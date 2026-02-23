@@ -81,6 +81,7 @@ run-worker-jaffle-shop: build
 	TEMPORAL_TASK_QUEUE=jaffle-shop \
 	DBT_PROJECT_DIRS=git+https://github.com/dbt-labs/jaffle-shop-classic.git#main \
 	DBT_PROFILES_DIR=examples/jaffle-shop \
+	USE_DBT_CSV=1 \
 	exec ./target/debug/dbt-temporal
 
 run-worker-bigquery: build
@@ -174,6 +175,11 @@ run-examples:
 	cargo build > /dev/null 2>&1 && printf " $${ok}\n" || { printf " $${fail}. Run 'cargo build' to see errors.\n"; exit 1; }; \
 	trap 'trap - INT TERM; printf "\n$${D}Shutting down...$${R}"; kill 0; wait 2>/dev/null; printf " done.\n$${D}Run '\''make cleanup-db'\'' to reset the Temporal database.$${R}\n$${D}Run '\''make postgres-down'\'' to stop Postgres.$${R}\n"; exit 0' INT TERM; \
 	printf "$${D}[4/5]$${R} Starting Temporal server..."; \
+	if lsof -ti :7233 >/dev/null 2>&1; then \
+		printf " $${fail}. Port 7233 is already in use (another Temporal server or Docker container).\n"; \
+		printf "  Stop it first: docker ps | grep 7233  or  make cleanup\n"; \
+		kill 0; wait 2>/dev/null; exit 1; \
+	fi; \
 	temporal server start-dev > /dev/null 2>&1 & \
 	sleep 2; \
 	temporal workflow list > /dev/null 2>&1 && printf " $${ok}\n" || { printf " $${fail}. Is the temporal CLI installed?\n"; kill 0; wait 2>/dev/null; exit 1; }; \
@@ -188,6 +194,7 @@ run-examples:
 	TEMPORAL_TASK_QUEUE=jaffle-shop \
 		DBT_PROJECT_DIRS=git+https://github.com/dbt-labs/jaffle-shop-classic.git#main \
 		DBT_PROFILES_DIR=examples/jaffle-shop \
+		USE_DBT_CSV=1 \
 		./target/debug/dbt-temporal > /dev/null 2>>"$$w_errors" & p4=$$!; \
 	GCP=$${GOOGLE_CLOUD_PROJECT:-$$(gcloud config get-value project 2>/dev/null)}; \
 	if [ -n "$$GCP" ]; then \

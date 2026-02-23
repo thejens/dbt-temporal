@@ -268,6 +268,9 @@ impl DbtRunWorkflow {
 
                 // Per-node labeling in Temporal UI: activity_id for event details,
                 // summary for the Gantt chart display (appended after activity type).
+                // Note: summary encoding is broken in temporalio-sdk 0.1.0-alpha.1
+                // (binary/plain instead of json/plain) — shows "Decoding failed"
+                // in the UI. Fixed in https://github.com/temporalio/sdk-core/pull/1129
                 let node_label = plan.nodes.get(unique_id).map(|info| {
                     let rt = info
                         .resource_type

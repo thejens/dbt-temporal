@@ -419,7 +419,12 @@ async fn execute_node_inner(
     // with fully inlined kwargs there (e.g. accepted_values values=[...]), while `raw_code`
     // can be a reduced template that references `_dbt_generic_test_kwargs`.
     #[allow(clippy::option_if_let_else)] // if-let-else is clearer here
-    let raw_sql_result = if rt == NodeType::Test {
+    let raw_sql_result = if rt == NodeType::Seed {
+        // Seeds have no SQL body — data comes from agate_table (loaded above).
+        // Reading original_file_path here would pick up the CSV file and embed it
+        // verbatim in CREATE TABLE AS (csv_content...), producing invalid SQL.
+        Ok(String::new())
+    } else if rt == NodeType::Test {
         if let Some(sql) = state.test_sql_cache.get(&node_path) {
             Ok(sql.clone())
         } else {
@@ -627,7 +632,14 @@ async fn execute_node_inner(
     // Resolve the materialization template using dbt-fusion's MaterializationResolver.
     // This applies proper adapter prefix inheritance (e.g. redshift→postgres→default)
     // and package precedence (Root > Imported > Core for builtins).
-    let materialization = base.materialized.to_string().to_lowercase();
+    // Seeds always dispatch to materialization_seed_default, which uses agate_table to
+    // generate INSERT/COPY SQL. dbt-fusion sets their materialized field to "table",
+    // but using that would call materialization_table_default with an empty sql body.
+    let materialization = if rt == NodeType::Seed {
+        "seed".to_string()
+    } else {
+        base.materialized.to_string().to_lowercase()
+    };
 
     // Extract compiled SQL from the node context before rendering.
     let compiled_sql = node_context

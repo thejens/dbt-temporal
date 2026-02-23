@@ -2,6 +2,8 @@
 
 Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node runs as a Temporal activity, enabling distributed execution, automatic retries, observability, and workflow management. [Lifecycle hooks](#lifecycle-hooks) let you plug arbitrary Temporal workflows into the pipeline — written in Python, Go, TypeScript, or any language with a Temporal SDK — for things like data validation, notifications, catalog updates, or conditional execution.
 
+![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
+
 > **Status**: Not production-ready. dbt-temporal depends on
 > [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), which is in preview, and
 > the [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.3.0-beta`),
@@ -527,6 +529,58 @@ Skip sentinel values (returned as the hook workflow's result):
 | Anything else | Continue (no skip) |
 
 The skip reason (if provided) is included in `DbtRunOutput.skip_reason`. This is useful for conditional execution — e.g. a pre-hook that checks whether source data has changed and skips the run if nothing is new.
+
+### Extra Env (Pre-Run Hooks)
+
+A `pre_run` hook can inject environment variables into the dbt run by returning an `extra_env` map:
+
+```json
+{"extra_env": {"SNOWFLAKE_ACCOUNT": "org-myaccount", "DB_SCHEMA": "prod_2026_02"}}
+```
+
+These are merged with the workflow's `env` field (hook values take precedence) and forwarded to every `execute_node` activity. They are available via `{{ env_var('KEY') }}` in model SQL and macros, and — when `profiles.yml` uses `env_var()` — also drive per-workflow adapter engine rebuilding, so the hook can control the database connection.
+
+`extra_env` and skip sentinels can coexist in the same return value. If a skip is detected, `extra_env` is irrelevant (no nodes run). Values must be strings; non-string values are silently ignored.
+
+**Example: hook resolves account credentials at runtime**
+
+```python
+# Python Temporal worker
+@workflow.defn
+class ResolveCredentialsWorkflow:
+    @workflow.run
+    async def run(self, payload: dict) -> dict:
+        account = await workflow.execute_activity(
+            fetch_account_for_run,
+            payload["input"],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        return {
+            "extra_env": {
+                "SNOWFLAKE_ACCOUNT": account["snowflake_account"],
+                "DB_SCHEMA": account["schema"],
+            }
+        }
+```
+
+```yaml
+# dbt_temporal.yml
+hooks:
+  pre_run:
+    - workflow_type: resolve_credentials
+      task_queue: auth-workers
+      on_error: fail
+```
+
+```yaml
+# profiles.yml — env_var() here triggers per-workflow adapter rebuilding
+my_profile:
+  outputs:
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      schema: "{{ env_var('DB_SCHEMA', 'public') }}"
+```
 
 ### Limitations
 

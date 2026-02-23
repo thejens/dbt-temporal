@@ -125,6 +125,11 @@ impl DbtRunWorkflow {
 
         let mut all_hook_errors = Vec::new();
 
+        // Effective env for this run: workflow input env, extended by pre_run hook extra_env.
+        // Used in NodeExecutionInput so execute_node picks it up for env_var() rendering
+        // and per-workflow adapter engine rebuilding (profiles.yml env_var() overrides).
+        let mut effective_env = input.env.clone();
+
         // --- Pre-run hooks ---
         if !hooks.pre_run.is_empty() {
             let payload = HookPayload {
@@ -137,6 +142,7 @@ impl DbtRunWorkflow {
             match execute_hooks(ctx, &hooks.pre_run, &payload).await {
                 Ok(outcome) => {
                     all_hook_errors.extend(outcome.errors);
+                    effective_env.extend(outcome.extra_env);
                     if outcome.skip {
                         return Ok(DbtRunOutput {
                             invocation_id: plan.invocation_id.clone(),
@@ -256,12 +262,13 @@ impl DbtRunWorkflow {
                     unique_id: unique_id.clone(),
                     invocation_id: plan.invocation_id.clone(),
                     project: plan.project.clone(),
-                    env: input.env.clone(),
+                    env: effective_env.clone(),
                     target: input.target.clone(),
                 };
 
-                // Use activity_id for per-node labeling in Temporal UI.
-                let activity_id = plan.nodes.get(unique_id).map(|info| {
+                // Per-node labeling in Temporal UI: activity_id for event details,
+                // summary for the Gantt chart display (appended after activity type).
+                let node_label = plan.nodes.get(unique_id).map(|info| {
                     let rt = info
                         .resource_type
                         .strip_prefix("NODE_TYPE_")
@@ -270,7 +277,7 @@ impl DbtRunWorkflow {
                     format!("{rt}:{}", info.name)
                 });
 
-                nodes_to_schedule.push((unique_id.clone(), node_input, activity_id));
+                nodes_to_schedule.push((unique_id.clone(), node_input, node_label));
             }
 
             // Memo: mark level as running (skipped nodes already set above).
@@ -279,12 +286,13 @@ impl DbtRunWorkflow {
 
             // Second pass: schedule activities (borrows ctx immutably via futures).
             let mut futures = Vec::new();
-            for (unique_id, node_input, activity_id) in nodes_to_schedule {
+            for (unique_id, node_input, node_label) in nodes_to_schedule {
                 let future = ctx.start_activity(
                     DbtActivities::execute_node,
                     node_input,
                     ActivityOptions {
-                        activity_id,
+                        activity_id: node_label.clone(),
+                        summary: node_label,
                         start_to_close_timeout: Some(Duration::from_secs(3600)), // 1 hr
                         heartbeat_timeout: Some(Duration::from_secs(300)),       // 5 min
                         cancellation_type: ActivityCancellationType::TryCancel,

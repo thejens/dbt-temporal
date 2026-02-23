@@ -19,6 +19,7 @@ flowchart TD
     subgraph Activities["Activities (non-deterministic, all I/O here)"]
         direction LR
         Plan["**plan_project**\nSelect nodes\nBuild DAG\nTopo levels\nManifest"]
+        Config["**resolve_config**\nLoad dbt_temporal.yml\nHook + retry config"]
         Exec["**execute_node**\nJinja render\n(execute=true via\nBridgeAdapter)"]
         Store["**store_artifacts**\nrun_results.json\nmanifest.json\nlog.txt"]
     end
@@ -32,9 +33,11 @@ flowchart TD
 
 2. **`plan_project` activity**: Applies `--select`/`--exclude` filters, builds topological levels from the DAG, and serializes the manifest.
 
-3. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter.
+3. **`resolve_config` activity**: Loads `dbt_temporal.yml` from the project directory (if present) and returns the resolved hook and retry configuration for this run.
 
-4. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
+4. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter.
+
+5. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
 
 Parallel execution is natural: all nodes in the same topological level are independent, so Temporal dispatches them as concurrent activities.
 
@@ -49,6 +52,7 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | [`src/project_registry.rs`](../src/project_registry.rs) | Multi-project registry + lookup |
 | [`src/hooks.rs`](../src/hooks.rs) | Lifecycle hooks (child workflows) |
 | [`src/health.rs`](../src/health.rs) | Health file tracker + HTTP health server |
+| [`src/telemetry_compat.rs`](../src/telemetry_compat.rs) | Tracing layer that injects `TelemetryAttributes` into every span (dbt-fusion compatibility) |
 | **Config** (`src/config/`) | |
 | [`mod.rs`](../src/config/mod.rs) | `DbtTemporalConfig`, `WorkerTuningConfig` (from env vars) |
 | [`discovery.rs`](../src/config/discovery.rs) | Project directory discovery + remote source detection |
@@ -67,8 +71,11 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | **Activities** (`src/activities/`) | |
 | [`plan.rs`](../src/activities/plan.rs) | `plan_project` — select nodes, build DAG levels, serialize manifest |
 | [`execute_node.rs`](../src/activities/execute_node.rs) | `execute_node` — compile + render a single node |
-| [`node_helpers.rs`](../src/activities/node_helpers.rs) | Materialization template lookup + rendering helpers |
 | [`store_artifacts.rs`](../src/activities/store_artifacts.rs) | `store_artifacts` — write run results + manifest |
+| [`node_helpers.rs`](../src/activities/node_helpers.rs) | Materialization template lookup + rendering helpers |
+| [`node_serialization.rs`](../src/activities/node_serialization.rs) | Serialization helpers for passing nodes across activity boundaries |
+| [`dag.rs`](../src/activities/dag.rs) | DAG construction and topological level computation |
+| [`selectors.rs`](../src/activities/selectors.rs) | Node selector evaluation (`--select` / `--exclude`) |
 | **Artifact Store** (`src/artifact_store/`) | |
 | [`mod.rs`](../src/artifact_store/mod.rs) | `ArtifactStore` trait |
 | [`local.rs`](../src/artifact_store/local.rs) | Local filesystem backend |
@@ -82,5 +89,5 @@ Parallel execution is natural: all nodes in the same topological level are indep
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-core) | Pre-alpha | Workflow orchestration |
-| [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) | Pre-alpha | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-core) | `0.1.0-alpha.1` | Workflow orchestration |
+| [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) | Pre-release | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

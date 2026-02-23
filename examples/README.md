@@ -81,7 +81,7 @@ make run-worker-single
 ```bash
 make submit-workflow-single
 # or: temporal workflow start --type dbt_run --task-queue single-project \
-#       --workflow-id dbt_test_project --id-conflict-policy allow_duplicate \
+#       --workflow-id dbt_test_project --id-conflict-policy TerminateExisting \
 #       --input '{"command": "run"}'
 ```
 
@@ -205,7 +205,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue env-override \
   --workflow-id env_override_demo \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{
     "command": "run",
     "env": {
@@ -223,7 +223,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue env-override \
   --workflow-id env_override_demo \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{
     "command": "run",
     "env": {
@@ -267,11 +267,11 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run"}'
 ```
 
-Using the project name as the workflow ID makes runs easy to find in the Temporal UI. The `allow_duplicate` conflict policy lets you re-run the same project without changing the ID — Temporal creates a new execution each time.
+Using the project name as the workflow ID makes runs easy to find in the Temporal UI. The `TerminateExisting` conflict policy terminates any in-progress run with the same ID before starting a fresh one, so you always get a clean execution without having to change the workflow ID.
 
 ### Build (Models + Tests)
 
@@ -282,7 +282,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "build"}'
 ```
 
@@ -294,7 +294,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "select": "staging.*"}'
 
 # Run everything except station_summary
@@ -302,7 +302,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "exclude": "station_summary"}'
 
 # Run a model and all its upstream dependencies
@@ -310,7 +310,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "select": "+active_stations"}'
 ```
 
@@ -323,7 +323,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "full_refresh": true}'
 ```
 
@@ -336,7 +336,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "build", "fail_fast": true}'
 ```
 
@@ -349,7 +349,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "vars": {"shared_var": "overridden_value"}}'
 ```
 
@@ -362,7 +362,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run", "target": "prod"}'
 ```
 
@@ -375,7 +375,7 @@ temporal workflow start \
   --type dbt_run \
   --task-queue multi-project \
   --workflow-id analytics \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{
     "command": "build",
     "project": "analytics",
@@ -783,14 +783,14 @@ temporal workflow terminate \
 
 ### Re-run with the same input
 
-Start a fresh execution using the same workflow ID (`allow_duplicate` creates a new run each time):
+Start a fresh execution using the same workflow ID (`TerminateExisting` terminates any running execution before starting a new one):
 
 ```bash
 temporal workflow start \
   --type dbt_run \
   --task-queue single-project \
   --workflow-id dbt_test_project \
-  --id-conflict-policy allow_duplicate \
+  --id-conflict-policy TerminateExisting \
   --input '{"command": "run"}'
 ```
 
@@ -882,7 +882,7 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 | Adapter | Status | Notes |
 |---------|--------|-------|
-| **Postgres** | Supported | Used by all non-BigQuery examples. Uses the ADBC PostgreSQL driver built from source (see `docs/adbc-postgres-macos-segfault.md` for macOS build notes). |
+| **Postgres** | Supported | Used by all non-BigQuery examples. Uses the ADBC PostgreSQL driver built from source (see `docs/workarounds.md#5-adbc-postgresql-driver-built-from-source-macos-arm64` for macOS build notes). |
 | **BigQuery** | Supported | OAuth (application default credentials). The `bigquery/` example uses BigQuery. |
 | **Snowflake** | Untested | dbt-fusion has Snowflake adapter code but it has not been validated with dbt-temporal. |
 | **Redshift** | Untested | Not validated. |

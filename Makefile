@@ -46,7 +46,6 @@ seed-postgres:
 	psql $(PG_URL)/single_project -f examples/single-project/seed-postgres.sql
 	psql $(PG_URL)/multi_project -f examples/multi-project/seed-postgres.sql
 	psql $(PG_URL)/env_override -f examples/env-override/seed-postgres.sql
-	psql $(PG_URL)/jaffle_shop -f examples/jaffle-shop-seed-postgres.sql
 	@echo "Seeded Postgres databases."
 
 # Local dev environment (requires: temporal CLI)
@@ -80,7 +79,8 @@ run-worker-env: build
 
 run-worker-jaffle-shop: build
 	TEMPORAL_TASK_QUEUE=jaffle-shop \
-	DBT_PROJECT_DIRS=git+https://github.com/jens-gilion/jaffle-shop-classic.git#main \
+	DBT_PROJECT_DIRS=git+https://github.com/dbt-labs/jaffle-shop-classic.git#main \
+	DBT_PROFILES_DIR=examples/jaffle-shop \
 	exec ./target/debug/dbt-temporal
 
 run-worker-bigquery: build
@@ -186,7 +186,8 @@ run-examples:
 	TEMPORAL_TASK_QUEUE=env-override DBT_PROJECT_DIR=examples/env-override \
 		./target/debug/dbt-temporal > /dev/null 2>>"$$w_errors" & p3=$$!; \
 	TEMPORAL_TASK_QUEUE=jaffle-shop \
-		DBT_PROJECT_DIRS=git+https://github.com/jens-gilion/jaffle-shop-classic.git#main \
+		DBT_PROJECT_DIRS=git+https://github.com/dbt-labs/jaffle-shop-classic.git#main \
+		DBT_PROFILES_DIR=examples/jaffle-shop \
 		./target/debug/dbt-temporal > /dev/null 2>>"$$w_errors" & p4=$$!; \
 	GCP=$${GOOGLE_CLOUD_PROJECT:-$$(gcloud config get-value project 2>/dev/null)}; \
 	if [ -n "$$GCP" ]; then \

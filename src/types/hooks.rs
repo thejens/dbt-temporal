@@ -130,6 +130,10 @@ pub struct HookExecutionOutcome {
     pub errors: Vec<HookError>,
     pub skip: bool,
     pub skip_reason: Option<String>,
+    /// Extra env vars injected by pre_run hooks via `{"extra_env": {"KEY": "value"}}`.
+    /// Merged into NodeExecutionInput.env so they are available via env_var() in model
+    /// SQL and also drive per-workflow adapter engine rebuilding for profiles.yml.
+    pub extra_env: std::collections::BTreeMap<String, String>,
 }
 
 #[cfg(test)]

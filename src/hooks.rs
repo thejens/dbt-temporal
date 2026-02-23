@@ -166,20 +166,25 @@ pub async fn execute_hooks(
                     "hook completed successfully"
                 );
 
-                // For pre_run hooks, check for skip sentinel in the result.
                 if payload.event == "pre_run"
                     && let Some(ref bytes) = completion_payload
-                    && let Some((skip, reason)) = parse_skip_sentinel(bytes)
-                    && skip
                 {
-                    info!(
-                        workflow_type = %hook.workflow_type,
-                        reason = ?reason,
-                        "pre_run hook signalled skip"
-                    );
-                    outcome.skip = true;
-                    outcome.skip_reason = reason;
-                    break;
+                    // Collect extra_env injected by this hook (merged across all hooks).
+                    if let Some(extra) = parse_extra_env(bytes) {
+                        outcome.extra_env.extend(extra);
+                    }
+
+                    // Check for skip sentinel — stops remaining hooks.
+                    if let Some((true, reason)) = parse_skip_sentinel(bytes) {
+                        info!(
+                            workflow_type = %hook.workflow_type,
+                            reason = ?reason,
+                            "pre_run hook signalled skip"
+                        );
+                        outcome.skip = true;
+                        outcome.skip_reason = reason;
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -213,6 +218,20 @@ pub async fn execute_hooks(
     }
 
     Ok(outcome)
+}
+
+/// Parse a hook completion payload for extra env vars.
+///
+/// Returns `Some(map)` if the payload contains `{"extra_env": {"KEY": "value", ...}}`.
+/// Values must be strings; non-string values are silently skipped.
+fn parse_extra_env(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, String>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let extra = value.as_object()?.get("extra_env")?.as_object()?;
+    let map: std::collections::BTreeMap<String, String> = extra
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Parse a hook completion payload for skip sentinel values.
@@ -502,6 +521,47 @@ hooks:
         let result = parse_skip_sentinel(bytes);
         // Object without "skip" field — doesn't match.
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extra_env_basic() {
+        let bytes = br#"{"extra_env": {"FOO": "bar", "NUM": "42"}}"#;
+        let Some(result) = parse_extra_env(bytes) else {
+            panic!("expected extra_env map");
+        };
+        assert_eq!(result.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(result.get("NUM").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn extra_env_combined_with_skip() {
+        // A hook can return both extra_env and a skip sentinel.
+        let bytes = br#"{"skip": true, "reason": "not ready", "extra_env": {"X": "1"}}"#;
+        let Some(extra) = parse_extra_env(bytes) else {
+            panic!("expected extra_env map");
+        };
+        assert_eq!(extra.get("X").map(String::as_str), Some("1"));
+        let skip = parse_skip_sentinel(bytes);
+        assert_eq!(skip, Some((true, Some("not ready".to_string()))));
+    }
+
+    #[test]
+    fn extra_env_non_string_values_skipped() {
+        // Non-string values are silently dropped.
+        let bytes = br#"{"extra_env": {"GOOD": "yes", "BAD": 123, "ALSO_BAD": null}}"#;
+        let Some(result) = parse_extra_env(bytes) else {
+            panic!("expected extra_env map");
+        };
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("GOOD").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn extra_env_absent_returns_none() {
+        assert!(parse_extra_env(b"{}").is_none());
+        assert!(parse_extra_env(br#"{"skip": true}"#).is_none());
+        assert!(parse_extra_env(b"false").is_none());
+        assert!(parse_extra_env(b"null").is_none());
     }
 
     #[test]

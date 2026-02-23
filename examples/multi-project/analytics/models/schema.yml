@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: stg_users
+    columns:
+      - name: user_id
+        tests:
+          - unique
+          - not_null
+
+  - name: user_activity
+    columns:
+      - name: user_id
+        tests:
+          - unique
+          - not_null

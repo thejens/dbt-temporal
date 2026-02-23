@@ -1,0 +1,16 @@
+# dbt-temporal project configuration.
+# Place alongside dbt_project.yml. All fields are optional.
+
+# Retry policy for execute_node activities.
+retry:
+  max_attempts: 3
+  initial_interval_secs: 5
+  backoff_coefficient: 2.0
+  max_interval_secs: 60
+  # Regex patterns matched against adapter error messages.
+  # A match promotes the error to non-retryable (skips remaining attempts).
+  non_retryable_errors:
+    - "Access Denied"
+    - "Not found: Dataset"
+    - "Not found: Table"
+    - "Syntax error in SQL query"

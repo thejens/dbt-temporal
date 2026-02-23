@@ -1,0 +1,53 @@
+name: bigquery_example
+version: "1.0.0"
+
+profile: bigquery_example
+
+clean-targets:
+  - target
+  - dbt_packages
+
+# --- Query comments: injected into every SQL query sent to BigQuery ---
+query-comment:
+  comment: "{{ query_comment() }}"
+  append: true
+  job-label: true
+
+# --- Project-level hooks ---
+on-run-start:
+  - "{{ log('dbt run started at ' ~ run_started_at.strftime('%Y-%m-%d %H:%M:%S') ~ ' | invocation=' ~ invocation_id, info=True) }}"
+
+on-run-end:
+  - "{{ log_run_results(results) }}"
+
+# --- Project variables ---
+vars:
+  shared_var: "hello_from_vars"
+  station_active_status: "active"
+  default_limit: 10000
+  enable_audit_columns: true
+  min_trip_count: 5
+
+# --- Model configurations by folder ---
+models:
+  bigquery_example:
+    +persist_docs:
+      relation: true
+      columns: true
+    +hours_to_expiration: "{{ '48' if env_var('DBT_EPHEMERAL_TABLES', '') else none }}"
+    staging:
+      +materialized: view
+      +tags: ['staging']
+    intermediate:
+      +materialized: ephemeral
+      +tags: ['intermediate']
+    marts:
+      +materialized: table
+      +tags: ['marts']
+      +post-hook:
+        - "{{ set_table_metadata() }}"
+
+# --- Test configurations ---
+tests:
+  bigquery_example:
+    +severity: warn

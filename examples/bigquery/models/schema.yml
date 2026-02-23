@@ -1,0 +1,179 @@
+version: 2
+
+models:
+  # --- Staging ---
+  - name: stg_stations
+    description: "Staging layer for bikeshare stations with active flag"
+    columns:
+      - name: station_id
+        description: "Unique station identifier"
+        data_tests:
+          - unique
+          - not_null
+      - name: status
+        description: '{{ doc("station_status") }}'
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['active', 'closed', 'moved', 'ACL']
+              config:
+                severity: warn
+
+  - name: stg_stations_deduped
+    description: "Deduplicated station records — one row per station_id"
+    data_tests:
+      - not_empty
+    columns:
+      - name: station_id
+        data_tests:
+          - unique
+          - not_null
+
+  - name: stg_trips
+    description: "Staging layer for bikeshare trips, filtered to valid durations"
+    data_tests:
+      - not_empty
+    columns:
+      - name: trip_id
+        data_tests:
+          - unique
+          - not_null
+      - name: duration_minutes
+        description: '{{ doc("trip_duration_minutes") }}'
+        data_tests:
+          - not_null
+          - is_positive
+          - greater_than:
+              arguments:
+                threshold: 0
+              config:
+                severity: warn
+      - name: start_station_id
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: subscriber_type
+        data_tests:
+          - not_null:
+              config:
+                severity: warn
+
+  # --- Marts ---
+  - name: active_stations
+    description: "Active stations enriched with trip metrics and audit metadata"
+    config:
+      meta:
+        owner: data-team
+        contains_pii: false
+    columns:
+      - name: station_id
+        data_tests:
+          - unique
+          - not_null
+      - name: station_id_formatted
+        description: "Zero-padded station ID (adapter-dispatched formatting)"
+      - name: total_departures
+        data_tests:
+          - is_positive:
+              config:
+                where: "total_departures is not null"
+      - name: _dbt_invocation_id
+        description: '{{ doc("audit_invocation_id") }}'
+      - name: _dbt_run_started_at
+        description: '{{ doc("audit_run_started_at") }}'
+
+  - name: station_summary
+    description: "Aggregated station counts by status with project metadata"
+    config:
+      pre_hook: "{{ log('PRE-HOOK: building station_summary for target=' ~ target.name, info=True) }}"
+      post_hook: "{{ log('POST-HOOK: station_summary complete — rows in ' ~ this, info=True) }}"
+    columns:
+      - name: status
+        data_tests:
+          - not_null
+      - name: station_count
+        data_tests:
+          - not_null
+          - is_positive
+          - greater_than:
+              arguments:
+                threshold: 0
+
+  - name: trip_summary
+    description: "Incremental daily trip aggregates per station, partitioned by month"
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_stations_deduped')
+                field: station_id
+              config:
+                severity: warn
+      - name: trip_date
+        data_tests:
+          - not_null
+      - name: trip_count
+        data_tests:
+          - not_null
+          - is_positive
+          - greater_than:
+              arguments:
+                threshold: "{{ var('min_trip_count') }}"
+              config:
+                severity: warn
+
+  - name: subscriber_analysis
+    description: "Trip counts pivoted by subscriber type and duration bucket"
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+      - name: duration_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - under_5_min
+                  - 5_to_15_min
+                  - 15_to_30_min
+                  - 30_to_60_min
+                  - over_60_min
+                  - unknown
+
+  - name: daily_station_activity
+    description: "Daily activity combining station metadata with trip summaries"
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+      - name: trip_date
+        data_tests:
+          - not_null
+
+  - name: station_dashboard_summary
+    description: "Dashboard-ready summary using run_query(), conditional sources, and graph introspection"
+    columns:
+      - name: station_id
+        data_tests:
+          - not_null
+
+exposures:
+  - name: station_operations_dashboard
+    type: dashboard
+    owner:
+      name: "Data Engineering"
+      email: "data-eng@example.com"
+    description: >
+      Operational dashboard showing station health, trip volumes, and subscriber
+      mix. Updated daily by the dbt-temporal worker.
+    depends_on:
+      - ref('active_stations')
+      - ref('station_summary')
+      - ref('trip_summary')
+      - ref('daily_station_activity')
+    maturity: high

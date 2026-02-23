@@ -1,0 +1,12 @@
+name: analytics
+version: "1.0.0"
+
+profile: analytics
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  analytics:
+    +materialized: table

@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: raw
+    database: bigquery-public-data
+    schema: austin_bikeshare
+    description: "Austin B-cycle bikeshare public dataset"
+    tables:
+      - name: bikeshare_stations
+        description: "Station locations and current operational status"
+        columns:
+          - name: station_id
+            description: "Unique station identifier"
+          - name: name
+            description: "Human-readable station name"
+          - name: status
+            description: '{{ doc("station_status") }}'
+
+      - name: bikeshare_trips
+        description: "Individual bikeshare trip records with start/end stations and duration"
+        columns:
+          - name: trip_id
+            description: "Unique trip identifier"
+          - name: subscriber_type
+            description: "Type of bikeshare subscription used"
+          - name: start_station_id
+            description: "Station where trip began"
+          - name: end_station_id
+            description: "Station where trip ended"
+          - name: duration_minutes
+            description: '{{ doc("trip_duration_minutes") }}'

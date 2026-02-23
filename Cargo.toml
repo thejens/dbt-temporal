@@ -1,0 +1,132 @@
+[package]
+name = "dbt-temporal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Execute dbt DAGs as Temporal Workflows"
+
+[[bin]]
+name = "dbt-temporal"
+path = "src/main.rs"
+
+[lib]
+name = "dbt_temporal"
+path = "src/lib.rs"
+
+[dependencies]
+# Temporal SDK (published v0.1.0-alpha.1, Feb 2026)
+temporalio-sdk = "0.1.0-alpha.1"
+temporalio-sdk-core = "0.1.0-alpha.1"
+temporalio-client = "0.1.0-alpha.1"
+temporalio-common = "0.1.0-alpha.1"
+temporalio-macros = "0.1.0"
+
+# dbt-fusion
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-dag = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-fusion" }
+dbt-yaml = "0.9.1"
+
+# Standard
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+filetime = "0.2"
+arrow-select = "56"
+tempfile = "3"
+prost-types = { version = "0.7", package = "prost-wkt-types" }
+
+# Artifact stores (feature-gated)
+object_store = { version = "0.11", optional = true }
+regex = "1.12.3"
+
+[features]
+default = []
+gcs = ["object_store/gcp"]
+aws = ["object_store/aws"]
+bigquery-tests = []
+
+[dev-dependencies]
+testcontainers = { version = "0.26", features = ["watchdog"] }
+testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+temporalio-sdk-core = { version = "0.1.0-alpha.1", features = ["ephemeral-server"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+unused_imports = "deny"
+dead_code = "deny"
+unreachable_code = "deny"
+unreachable_patterns = "deny"
+missing_debug_implementations = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Allow pedantic lints that are pervasive and low-signal
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+doc_markdown = "allow"
+# Restriction lints — prevent common mistakes
+unwrap_used = "deny"
+expect_used = "deny"
+clone_on_ref_ptr = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+needless_pass_by_value = "deny"
+
+# Patches required to match dbt-fusion's dependency versions.
+# dbt-fusion uses forked arrow-rs and arrow-adbc.
+# Without these patches, version conflicts prevent compilation.
+[patch.crates-io]
+# Forked arrow-rs (v56) used by dbt-fusion
+arrow = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-arith = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-array = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-buffer = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-cast = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-csv = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-data = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-ipc = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-json = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-ord = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-row = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-schema = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-select = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+arrow-string = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
+
+# Forked arrow-adbc (must use dbt-labs fork to get arrow 56 compatibility)
+adbc_core = { git = "https://github.com/dbt-labs/arrow-adbc", rev = "2caa4db73b5dee142d71a10e3b3905715c6d99db" }
+adbc_driver_manager = { git = "https://github.com/dbt-labs/arrow-adbc", rev = "2caa4db73b5dee142d71a10e3b3905715c6d99db" }
+
+# ring build.rs workaround (same as dbt-fusion)
+ring = { git = "https://github.com/sdf-labs/ring.git", rev = "3c35ce0b7e1bd9fe83180b19eda21d302e0b5006" }

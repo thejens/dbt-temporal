@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: bikeshare_stations
+        description: Public bikeshare station data from Austin

@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_stations
+    columns:
+      - name: station_id
+        tests:
+          - unique
+          - not_null
+
+  - name: stg_stations_deduped
+    columns:
+      - name: station_id
+        tests:
+          - unique
+          - not_null
+
+  - name: station_summary
+    description: Aggregated station stats by status
+    config:
+      pre_hook: "{{ log('PRE-HOOK: building station_summary', info=True) }}"
+      post_hook: "{{ log('POST-HOOK: station_summary complete', info=True) }}"
+    columns:
+      - name: status
+        tests:
+          - not_null
+      - name: station_count
+        tests:
+          - not_null
+
+  - name: active_stations
+    columns:
+      - name: station_id
+        tests:
+          - unique
+          - not_null

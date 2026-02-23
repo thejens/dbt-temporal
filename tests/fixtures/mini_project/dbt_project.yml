@@ -1,0 +1,12 @@
+name: mini_project
+version: "1.0.0"
+config-version: 2
+profile: mini_project
+
+models:
+  mini_project:
+    +materialized: table
+
+clean-targets:
+  - target
+  - dbt_packages

@@ -1,0 +1,17 @@
+# Build
+/target
+
+# Claude Code
+.claude
+
+# Agent instructions
+AGENTS.md
+
+# dbt user identity
+.user.yml
+
+# Local notes / planning
+/todo
+
+# macOS
+.DS_Store

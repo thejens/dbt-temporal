@@ -1,0 +1,12 @@
+single_project:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      port: 5555
+      user: dev
+      password: dev
+      dbname: single_project
+      schema: public
+      threads: 1

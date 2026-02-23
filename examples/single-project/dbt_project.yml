@@ -1,0 +1,18 @@
+name: dbt_test_project
+version: "1.0.0"
+
+profile: single_project
+
+clean-targets:
+  - target
+  - dbt_packages
+
+on-run-end:
+  - "{{ log_run_results() }}"
+
+vars:
+  shared_var: "hello_from_vars"
+
+models:
+  dbt_test_project:
+    +materialized: table

@@ -1,0 +1,12 @@
+name: marketing
+version: "1.0.0"
+
+profile: marketing
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  marketing:
+    +materialized: table

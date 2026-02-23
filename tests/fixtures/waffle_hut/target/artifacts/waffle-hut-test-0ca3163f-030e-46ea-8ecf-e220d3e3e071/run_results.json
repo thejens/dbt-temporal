@@ -1,0 +1,115 @@
+{
+  "elapsed_time": 0.0071389999999999995,
+  "metadata": {
+    "dbt_version": "0.1.0",
+    "generated_at": "2026-02-08T00:36:29.808244+00:00",
+    "invocation_id": "waffle-hut-test-0ca3163f-030e-46ea-8ecf-e220d3e3e071"
+  },
+  "results": [
+    {
+      "adapter_response": {},
+      "compiled_code": "--placeholder--",
+      "execution_time": 0.00147525,
+      "failures": null,
+      "message": null,
+      "status": "success",
+      "timing": [
+        {
+          "completed_at": "2026-02-08T00:36:29.747989+00:00",
+          "name": "compile",
+          "started_at": "2026-02-08T00:36:29.746652+00:00"
+        },
+        {
+          "completed_at": "2026-02-08T00:36:29.748110+00:00",
+          "name": "execute",
+          "started_at": "2026-02-08T00:36:29.747989+00:00"
+        }
+      ],
+      "unique_id": "model.waffle_hut.stg_customers"
+    },
+    {
+      "adapter_response": {},
+      "compiled_code": "--placeholder--",
+      "execution_time": 0.001655875,
+      "failures": null,
+      "message": null,
+      "status": "success",
+      "timing": [
+        {
+          "completed_at": "2026-02-08T00:36:29.750647+00:00",
+          "name": "compile",
+          "started_at": "2026-02-08T00:36:29.749070+00:00"
+        },
+        {
+          "completed_at": "2026-02-08T00:36:29.750715+00:00",
+          "name": "execute",
+          "started_at": "2026-02-08T00:36:29.750647+00:00"
+        }
+      ],
+      "unique_id": "model.waffle_hut.stg_orders"
+    },
+    {
+      "adapter_response": {},
+      "compiled_code": "--placeholder--",
+      "execution_time": 0.001659,
+      "failures": null,
+      "message": null,
+      "status": "success",
+      "timing": [
+        {
+          "completed_at": "2026-02-08T00:36:29.751266+00:00",
+          "name": "compile",
+          "started_at": "2026-02-08T00:36:29.749682+00:00"
+        },
+        {
+          "completed_at": "2026-02-08T00:36:29.751330+00:00",
+          "name": "execute",
+          "started_at": "2026-02-08T00:36:29.751266+00:00"
+        }
+      ],
+      "unique_id": "model.waffle_hut.stg_payments"
+    },
+    {
+      "adapter_response": {},
+      "compiled_code": "--placeholder--",
+      "execution_time": 0.001336667,
+      "failures": null,
+      "message": null,
+      "status": "success",
+      "timing": [
+        {
+          "completed_at": "2026-02-08T00:36:29.767592+00:00",
+          "name": "compile",
+          "started_at": "2026-02-08T00:36:29.766382+00:00"
+        },
+        {
+          "completed_at": "2026-02-08T00:36:29.767703+00:00",
+          "name": "execute",
+          "started_at": "2026-02-08T00:36:29.767592+00:00"
+        }
+      ],
+      "unique_id": "model.waffle_hut.customers"
+    },
+    {
+      "adapter_response": {},
+      "compiled_code": "--placeholder--",
+      "execution_time": 0.001012208,
+      "failures": null,
+      "message": null,
+      "status": "success",
+      "timing": [
+        {
+          "completed_at": "2026-02-08T00:36:29.769206+00:00",
+          "name": "compile",
+          "started_at": "2026-02-08T00:36:29.768272+00:00"
+        },
+        {
+          "completed_at": "2026-02-08T00:36:29.769272+00:00",
+          "name": "execute",
+          "started_at": "2026-02-08T00:36:29.769206+00:00"
+        }
+      ],
+      "unique_id": "model.waffle_hut.orders"
+    }
+  ]
+}

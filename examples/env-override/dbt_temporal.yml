@@ -1,0 +1,20 @@
+hooks:
+  pre_run:
+    - workflow_type: dbt_run
+      task_queue: env-override
+      timeout_secs: 120
+      on_error: fail
+      input:
+        command: run
+        select: customers
+        hooks: {}   # Prevent recursive hook execution
+  on_success:
+    - workflow_type: dbt_run
+      task_queue: env-override
+      timeout_secs: 120
+      on_error: warn
+      fire_and_forget: true   # Don't block the parent workflow on completion
+      input:
+        command: run
+        select: customer_orders
+        hooks: {}

@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: stg_campaigns
+    columns:
+      - name: campaign_id
+        description: Station ID repurposed as campaign identifier
+        tests:
+          - not_null
+          - unique
+
+  - name: campaign_performance
+    columns:
+      - name: campaign_id
+        description: Campaign identifier
+        tests:
+          - not_null
+          - unique
+      - name: total_spend
+        description: Total advertising spend
+        tests:
+          - not_null

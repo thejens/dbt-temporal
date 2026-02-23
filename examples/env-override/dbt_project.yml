@@ -1,0 +1,12 @@
+name: env_override_demo
+version: "1.0.0"
+
+profile: env_override_demo
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  env_override_demo:
+    +materialized: table

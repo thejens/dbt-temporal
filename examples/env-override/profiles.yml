@@ -1,0 +1,16 @@
+# This profile uses env_var() for all connection parameters.
+# When a workflow provides "env" overrides, dbt-temporal rebuilds the adapter
+# engine per-workflow so parallel workflows can target different databases.
+
+env_override_demo:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DB_HOST', 'localhost') }}"
+      port: "{{ env_var('DB_PORT', '5555') }}"
+      user: "{{ env_var('DB_USER', 'dev') }}"
+      password: "{{ env_var('DB_PASSWORD', 'dev') }}"
+      dbname: "{{ env_var('DB_NAME', 'env_override') }}"
+      schema: public
+      threads: 1

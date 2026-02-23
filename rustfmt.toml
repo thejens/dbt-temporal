@@ -1,0 +1,4 @@
+max_width = 100
+chain_width = 60
+fn_call_width = 80
+single_line_if_else_max_width = 50

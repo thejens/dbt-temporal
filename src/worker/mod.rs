@@ -363,7 +363,6 @@ pub async fn initialize_project(
     let adapter_engine = adapter::build_adapter_engine(
         &dbt_state.dbt_profile.db_config,
         resolver_state.root_project_quoting,
-        &token,
         auth_override.clone(),
     )?;
 

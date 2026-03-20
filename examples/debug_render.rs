@@ -71,7 +71,12 @@ async fn main() -> anyhow::Result<()> {
 
     let adapter_engine = Arc::clone(&state.adapter_engine);
     let concrete = dbt_adapter::typed_adapter::ConcreteAdapter::new(adapter_engine);
-    let bridge = dbt_adapter::BridgeAdapter::new(Arc::new(concrete), None, None);
+    let bridge = dbt_adapter::BridgeAdapter::new(
+        Arc::new(concrete),
+        None,
+        None,
+        state.cancellation_source.token(),
+    );
     let adapter: Arc<dyn dbt_adapter::BaseAdapter> = Arc::new(bridge);
 
     dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(&mut jinja_env, adapter);

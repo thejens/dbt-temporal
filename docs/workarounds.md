@@ -2,37 +2,21 @@
 
 dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as its rendering and execution engine. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
-## 1. `RunConfig` missing `call()` — `{{ config(...) }}` no-op during execution
-
-**Issue:** [dbt-labs/dbt-fusion#1290](https://github.com/dbt-labs/dbt-fusion/issues/1290)
-
-Model SQL frequently contains `{{ config(materialized='table') }}`. During the run phase this should be a silent no-op (the config was already parsed), but `RunConfig` only implements `call_method()` — not `call()` — so minijinja errors when invoking config as a function.
-
-**Workaround:** Before compiling raw SQL, we swap the `config` context variable to a `NoopConfig` object that implements both `call()` and `call_method("get",...)`. After compilation, we restore `RunConfig` so materialization macros can still use `config.get()`.
-
-## 2. `execute` not set as Jinja global
-
-**Issue:** [dbt-labs/dbt-fusion#1289](https://github.com/dbt-labs/dbt-fusion/issues/1289)
-
-`execute` is only set as a context variable in `build_compile_and_run_base_context()`, not as a Jinja global. Cross-template macros (like `statement()` in `statement.sql`) resolve variables from globals, not the caller's render context — so they see `execute` as undefined and skip SQL execution.
-
-**Workaround:** We call `jinja_env.env.add_global("execute", true)` before rendering.
-
-## 3. `ResultStore` not injectable into context builders
+## 1. `ResultStore` not injectable into context builders
 
 **Issue:** [dbt-labs/dbt-fusion#1291](https://github.com/dbt-labs/dbt-fusion/issues/1291)
 
-`build_compile_and_run_base_context()` and `extend_base_context_stateful_fn()` each create their own `ResultStore` and inject its closures (`store_result`, `load_result`, `store_raw_result`) into the context. Callers that need to read adapter responses after materialization must use their own `ResultStore`, but the context builders overwrite its closures.
+`build_compile_and_run_base_context()` and `extend_base_context_stateful_fn()` (called inside `build_run_node_context`) each create their own `ResultStore` and inject its closures (`store_result`, `load_result`, `store_raw_result`) into the context. Callers that need to read adapter responses after materialization must use their own `ResultStore`, but the context builders overwrite its closures.
 
-**Workaround:** We create our `ResultStore` upfront, let the context builders overwrite the closures, then re-inject our store's closures into both the context and Jinja globals. Three stores are allocated per node; two are immediately discarded.
+**Workaround:** We create our `ResultStore` upfront, inject its closures into `base_context`, then re-inject after `build_run_node_context` overwrites them in `node_context`. Three stores are allocated per node; two are immediately discarded.
 
-## 4. `ref()` resolves schemas at parse time, not execution time
+## 2. `ref()` resolves schemas at parse time, not execution time
 
 `ref()` calls are resolved during project parsing and baked into `Relation` objects with the startup default schema. When a per-workflow env override changes `DB_SCHEMA`, downstream models still reference the old schema in their compiled SQL (e.g. `"waffle_hut"."default_schema"."stg_customers"` instead of `"waffle_hut"."override_schema"."stg_customers"`).
 
 **Workaround:** After Jinja renders the raw SQL, we string-replace quoted occurrences of the startup default schema with the per-workflow schema in the compiled SQL. This is brittle — it assumes the schema appears as a quoted identifier and that no column or alias happens to match the schema name.
 
-## 5. ADBC PostgreSQL driver built from source (macOS ARM64)
+## 3. ADBC PostgreSQL driver built from source (macOS ARM64)
 
 **Issue:** [dbt-labs/arrow-adbc#31](https://github.com/dbt-labs/arrow-adbc/issues/31)
 

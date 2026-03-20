@@ -9,12 +9,11 @@ use crate::config::DbtTemporalConfig;
 pub fn build_adapter_engine(
     db_config: &dbt_schemas::schemas::profiles::DbConfig,
     quoting: dbt_schemas::schemas::common::ResolvedQuoting,
-    token: &dbt_common::cancellation::CancellationToken,
     auth_override: Option<Arc<dyn dbt_auth::Auth>>,
 ) -> Result<Arc<dyn dbt_adapter::AdapterEngine>> {
-    use dbt_adapter::adapter_engine::XdbcEngine;
     use dbt_adapter::base_adapter::backend_of;
     use dbt_adapter::cache::RelationCache;
+    use dbt_adapter::engine::XdbcEngine;
     use dbt_adapter::query_comment::QueryCommentConfig;
     use dbt_adapter::sql_types::SATypeOpsImpl;
     use dbt_adapter::stmt_splitter::NaiveStmtSplitter;
@@ -52,7 +51,6 @@ pub fn build_adapter_engine(
         None, // query_cache
         relation_cache,
         std::collections::BTreeMap::new(), // behavior_flag_overrides
-        token.clone(),
     );
 
     Ok(Arc::new(engine))

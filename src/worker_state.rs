@@ -58,9 +58,9 @@ pub struct WorkerState {
     /// Whether the project overrides `generate_schema_name` (non-default naming may
     /// cause stale `this.schema` context variables with per-workflow env overrides).
     pub has_custom_schema_name_macro: bool,
-    /// Keeps the CancellationTokenSource alive so the adapter engine's token
-    /// isn't considered cancelled (the token uses a Weak ref to the source).
-    #[allow(dead_code)]
+    /// Keeps the CancellationTokenSource alive so the BridgeAdapter token
+    /// passed per-activity isn't immediately cancelled (the token holds a Weak
+    /// ref to this source; if the source is dropped the token fires).
     pub cancellation_source: CancellationTokenSource,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engine_with_env` uses this instead of the default auth.

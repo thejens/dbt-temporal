@@ -81,7 +81,7 @@ pub async fn execute_hooks(
     payload: &HookPayload,
 ) -> Result<HookExecutionOutcome, anyhow::Error> {
     let mut outcome = HookExecutionOutcome::default();
-    let parent_workflow_id = ctx.workflow_initial_info().workflow_id.clone();
+    let parent_workflow_id = ctx.workflow_id();
 
     for (i, hook) in hooks.iter().enumerate() {
         let timeout = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);

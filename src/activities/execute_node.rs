@@ -193,19 +193,13 @@ async fn execute_node_inner(
         Arc::new(concrete),
         None, // schema_store
         None, // time_machine
+        state.cancellation_source.token(),
     );
     let adapter: Arc<dyn dbt_adapter::BaseAdapter> = Arc::new(bridge);
 
     // Configure the Jinja environment for compile+run phase.
     // This sets execute=true context where adapter.* calls hit the real DB.
     dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(&mut jinja_env, adapter);
-
-    // Set execute=true as a Jinja *global* so macros from other templates (e.g. statement.sql)
-    // can see it. build_compile_and_run_base_context only puts it in the render context, but
-    // cross-template macros resolve variables from globals, not the caller's render context.
-    jinja_env
-        .env
-        .add_global("execute", minijinja::Value::from(true));
 
     // Patch `target` / `env` Jinja globals with per-workflow schema/database so all macros
     // (generate_schema_name, materializations, custom macros) see the correct values.
@@ -231,18 +225,19 @@ async fn execute_node_inner(
 
     // Override store_result/load_result/store_raw_result with our own ResultStore so we can
     // extract adapter response metadata after rendering completes.
-    // These must also be registered as Jinja globals so cross-template macros
-    // (e.g. statement() in statement.sql) can access them.
     let result_store = ResultStore::default();
-    let store_fn = minijinja::Value::from_function(result_store.store_result());
-    let load_fn = minijinja::Value::from_function(result_store.load_result());
-    let store_raw_fn = minijinja::Value::from_function(result_store.store_raw_result());
-    base_context.insert("store_result".to_owned(), store_fn.clone());
-    base_context.insert("load_result".to_owned(), load_fn.clone());
-    base_context.insert("store_raw_result".to_owned(), store_raw_fn.clone());
-    jinja_env.env.add_global("store_result", store_fn);
-    jinja_env.env.add_global("load_result", load_fn);
-    jinja_env.env.add_global("store_raw_result", store_raw_fn);
+    base_context.insert(
+        "store_result".to_owned(),
+        minijinja::Value::from_function(result_store.store_result()),
+    );
+    base_context.insert(
+        "load_result".to_owned(),
+        minijinja::Value::from_function(result_store.load_result()),
+    );
+    base_context.insert(
+        "store_raw_result".to_owned(),
+        minijinja::Value::from_function(result_store.store_raw_result()),
+    );
 
     // Serialize the node to YmlValue for the model parameter.
     let model_yml = get_node_yml(&state.resolver_state.nodes, unique_id, rt)?;
@@ -314,15 +309,18 @@ async fn execute_node_inner(
     // build_run_node_context creates its own ResultStore (via extend_base_context_stateful_fn),
     // overwriting ours. Re-inject our activity-scoped store so adapter_response extraction
     // reads the same store that materialization macros write to.
-    let store_fn = minijinja::Value::from_function(result_store.store_result());
-    let load_fn = minijinja::Value::from_function(result_store.load_result());
-    let store_raw_fn = minijinja::Value::from_function(result_store.store_raw_result());
-    node_context.insert("store_result".to_owned(), store_fn.clone());
-    node_context.insert("load_result".to_owned(), load_fn.clone());
-    node_context.insert("store_raw_result".to_owned(), store_raw_fn.clone());
-    jinja_env.env.add_global("store_result", store_fn);
-    jinja_env.env.add_global("load_result", load_fn);
-    jinja_env.env.add_global("store_raw_result", store_raw_fn);
+    node_context.insert(
+        "store_result".to_owned(),
+        minijinja::Value::from_function(result_store.store_result()),
+    );
+    node_context.insert(
+        "load_result".to_owned(),
+        minijinja::Value::from_function(result_store.load_result()),
+    );
+    node_context.insert(
+        "store_raw_result".to_owned(),
+        minijinja::Value::from_function(result_store.store_raw_result()),
+    );
 
     // Inject TARGET_PACKAGE_NAME — required by ConfiguredVar (the var() function) to resolve
     // project-scoped variables. The compile phase sets this but build_run_node_context doesn't.
@@ -514,14 +512,6 @@ async fn execute_node_inner(
 
     match raw_sql_result {
         Ok(raw_sql) if !raw_sql.trim().is_empty() => {
-            // RunConfig doesn't implement call() — only get_value() and call_method().
-            // {{ config(materialized='ephemeral') }} in model SQL calls config as a function,
-            // which is a no-op during the run phase. Temporarily swap config to a callable
-            // for raw SQL compilation, then restore RunConfig for materialization.
-            // Uses NoopConfig which supports both call() and call_method("get",...) since
-            // test macros access config.get() while test raw_code uses config().
-            let run_config = node_context.remove("config");
-            node_context.insert("config".to_owned(), minijinja::Value::from_object(NoopConfig));
             let compiled = jinja_env
                 .render_str(&raw_sql, &node_context, &[])
                 .map_err(|e| {
@@ -552,10 +542,6 @@ async fn execute_node_inner(
                 compiled
             };
 
-            // Restore RunConfig so materialization macros can use config.get().
-            if let Some(rc) = run_config {
-                node_context.insert("config".to_owned(), rc);
-            }
             // Set both `sql` and `compiled_code` in the context. View materializations
             // reference `sql`, while table/incremental materializations reference
             // `compiled_code` (passed to create_table_as / bq_create_table_as).
@@ -632,9 +618,10 @@ async fn execute_node_inner(
     // Resolve the materialization template using dbt-fusion's MaterializationResolver.
     // This applies proper adapter prefix inheritance (e.g. redshift→postgres→default)
     // and package precedence (Root > Imported > Core for builtins).
-    // Seeds always dispatch to materialization_seed_default, which uses agate_table to
-    // generate INSERT/COPY SQL. dbt-fusion sets their materialized field to "table",
-    // but using that would call materialization_table_default with an empty sql body.
+    // Seeds are forced to "seed" because base.materialized still returns "table" for them
+    // (dbt-fusion#1345 — DbtMaterialization::Seed exists for comparisons but node data
+    // hasn't been updated to use it). Without this, materialization_table_default is called
+    // with an empty sql body, producing invalid SQL.
     let materialization = if rt == NodeType::Seed {
         "seed".to_string()
     } else {
@@ -789,18 +776,6 @@ fn build_success_message(
     None
 }
 
-/// No-op config object for raw SQL compilation phase.
-/// Supports both `config(...)` (call) and `config.get(...)` (method call) since
-/// test macros use config.get() while model/test raw_code uses config().
-#[derive(Debug)]
-struct NoopConfig;
-
-impl std::fmt::Display for NoopConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("")
-    }
-}
-
 /// Convert a `dbt_yaml::Value` to a native `minijinja::Value`.
 ///
 /// Unlike `minijinja::Value::from_serialize()`, this produces native minijinja
@@ -889,30 +864,6 @@ fn read_first_non_empty_sql(
         }
     }
     None
-}
-
-impl minijinja::value::Object for NoopConfig {
-    fn call(
-        self: &Arc<Self>,
-        _state: &minijinja::State,
-        _args: &[minijinja::Value],
-        _listeners: &[std::rc::Rc<dyn minijinja::listener::RenderingEventListener>],
-    ) -> Result<minijinja::Value, minijinja::Error> {
-        Ok(minijinja::Value::from(""))
-    }
-
-    fn call_method(
-        self: &Arc<Self>,
-        _state: &minijinja::State,
-        method: &str,
-        _args: &[minijinja::Value],
-        _listeners: &[std::rc::Rc<dyn minijinja::listener::RenderingEventListener>],
-    ) -> Result<minijinja::Value, minijinja::Error> {
-        match method {
-            "get" => Ok(minijinja::Value::UNDEFINED),
-            _ => Ok(minijinja::Value::from("")),
-        }
-    }
 }
 
 /// Detect `env_var()` usage inside `config(schema=...)` or `config(database=...)`.

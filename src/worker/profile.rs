@@ -12,11 +12,6 @@ pub struct RebuildResult {
     pub schema: String,
     /// Profile-level database after applying env overrides.
     pub database: String,
-    /// Keeps the CancellationTokenSource alive so the engine's token isn't
-    /// immediately cancelled (the token holds a Weak ref to the source).
-    /// Must be kept alive for the duration of engine usage.
-    #[allow(dead_code)]
-    pub cancellation_source: dbt_common::cancellation::CancellationTokenSource,
 }
 
 impl std::fmt::Debug for RebuildResult {
@@ -24,7 +19,6 @@ impl std::fmt::Debug for RebuildResult {
         f.debug_struct("RebuildResult")
             .field("schema", &self.schema)
             .field("database", &self.database)
-            .field("cancellation_source", &"<alive>")
             .finish_non_exhaustive()
     }
 }
@@ -52,11 +46,9 @@ pub fn rebuild_adapter_engine_with_env(
     let schema = db_config.get_schema().cloned().unwrap_or_default();
     let database = db_config.get_database().cloned().unwrap_or_default();
 
-    let cancellation_source = dbt_common::cancellation::CancellationTokenSource::new();
     let engine = super::adapter::build_adapter_engine(
         &db_config,
         state.resolver_state.root_project_quoting,
-        &cancellation_source.token(),
         state.auth_override.clone(),
     )?;
 
@@ -64,7 +56,6 @@ pub fn rebuild_adapter_engine_with_env(
         engine,
         schema,
         database,
-        cancellation_source,
     })
 }
 

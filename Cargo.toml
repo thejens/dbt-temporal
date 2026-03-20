@@ -14,27 +14,27 @@ name = "dbt_temporal"
 path = "src/lib.rs"
 
 [dependencies]
-# Temporal SDK (published v0.1.0-alpha.1, Feb 2026)
-temporalio-sdk = "0.1.0-alpha.1"
-temporalio-sdk-core = "0.1.0-alpha.1"
-temporalio-client = "0.1.0-alpha.1"
-temporalio-common = "0.1.0-alpha.1"
-temporalio-macros = "0.1.0"
+# Temporal SDK
+temporalio-sdk = "0.2.0"
+temporalio-sdk-core = "0.2.0"
+temporalio-client = "0.2.0"
+temporalio-common = "0.2.0"
+temporalio-macros = "0.2.0"
 
-# dbt-fusion
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-dag = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-fusion" }
+# dbt-fusion (pinned to 2.0.0-preview.158, 2026-03-19)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-dag = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
 dbt-yaml = "0.9.1"
 
 # Standard
@@ -72,7 +72,7 @@ testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
-temporalio-sdk-core = { version = "0.1.0-alpha.1", features = ["ephemeral-server"] }
+temporalio-sdk-core = { version = "0.2.0", features = ["ephemeral-server"] }
 
 [lints.rust]
 unsafe_code = "deny"

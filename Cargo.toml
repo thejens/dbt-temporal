@@ -21,20 +21,20 @@ temporalio-client = "0.3.0"
 temporalio-common = "0.3.0"
 temporalio-macros = "0.3.0"
 
-# dbt-fusion (pinned to 2.0.0-preview.158, 2026-03-19)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-dag = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
+# dbt-fusion (pinned to main, 2026-04-25)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-dag = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "00969f911ae9a43e008a16a65c9208ebdf9c041a" }
 dbt-yaml = "0.9.1"
 
 # Standard
@@ -59,6 +59,11 @@ prost-types = { version = "0.7", package = "prost-wkt-types" }
 # Artifact stores (feature-gated)
 object_store = { version = "0.11", optional = true }
 regex = "1.12.3"
+
+# dbt-fusion's generated SQL lexers were built against dbt-antlr4 1.0.5 and use
+# API that was removed in 1.1.x (check_version(), changed DFA::new signatures).
+# Pin to the exact version the generated code targets.
+dbt-antlr4 = "=1.0.5"
 
 [features]
 default = []
@@ -123,10 +128,6 @@ arrow-row = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07b
 arrow-schema = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 arrow-select = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 arrow-string = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
-
-# Forked arrow-adbc (must use dbt-labs fork to get arrow 56 compatibility)
-adbc_core = { git = "https://github.com/dbt-labs/arrow-adbc", rev = "2caa4db73b5dee142d71a10e3b3905715c6d99db" }
-adbc_driver_manager = { git = "https://github.com/dbt-labs/arrow-adbc", rev = "2caa4db73b5dee142d71a10e3b3905715c6d99db" }
 
 # ring build.rs workaround (same as dbt-fusion)
 ring = { git = "https://github.com/sdf-labs/ring.git", rev = "3c35ce0b7e1bd9fe83180b19eda21d302e0b5006" }

@@ -70,14 +70,12 @@ async fn main() -> anyhow::Result<()> {
     let mut jinja_env = (*state.jinja_env).clone();
 
     let adapter_engine = Arc::clone(&state.adapter_engine);
-    let concrete = dbt_adapter::typed_adapter::ConcreteAdapter::new(adapter_engine);
-    let bridge = dbt_adapter::BridgeAdapter::new(
-        Arc::new(concrete),
-        None,
+    let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
+    let adapter = Arc::new(dbt_adapter::Adapter::new(
+        Arc::new(adapter_impl),
         None,
         state.cancellation_source.token(),
-    );
-    let adapter: Arc<dyn dbt_adapter::BaseAdapter> = Arc::new(bridge);
+    ));
 
     dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(&mut jinja_env, adapter);
 
@@ -153,8 +151,7 @@ async fn main() -> anyhow::Result<()> {
         rt,
         sql_header,
         state.packages.clone(),
-    )
-    .await;
+    );
 
     // Re-inject our ResultStore after build_run_node_context (it creates its own).
     let store_fn = minijinja::Value::from_function(result_store.store_result());

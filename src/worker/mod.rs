@@ -304,9 +304,10 @@ pub async fn initialize_project(
     let token = cts.token();
 
     // Load the project: reads dbt_project.yml, profiles.yml, packages, etc.
-    let (dbt_state, _cloud_config) = dbt_loader::load(&load_args, &invocation_args, &token)
-        .await
-        .map_err(|e| anyhow::anyhow!("dbt load failed: {e}"))?;
+    let dbt_state =
+        dbt_loader::load(&load_args, std::borrow::Cow::Borrowed(&invocation_args), None, &token)
+            .await
+            .map_err(|e| anyhow::anyhow!("dbt load failed: {e}"))?;
     let dbt_state = Arc::new(dbt_state);
 
     let project_name = dbt_state

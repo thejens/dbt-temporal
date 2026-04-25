@@ -94,7 +94,9 @@ fn matches_non_retryable_pattern(
     matched
 }
 
-#[allow(clippy::too_many_lines)] // Sequential adapter interaction with setup, execution, and result extraction.
+#[allow(clippy::too_many_lines, clippy::unused_async)]
+// Sequential adapter interaction with setup, execution, and result extraction.
+// Kept async so tokio::select! in execute_node_outer can poll it against ctx.cancelled().
 async fn execute_node_inner(
     activities: &DbtActivities,
     ctx: &ActivityContext,
@@ -187,15 +189,12 @@ async fn execute_node_inner(
         (Arc::clone(&state.adapter_engine), None, None)
     };
 
-    // Build a BridgeAdapter wrapping the adapter engine.
-    let concrete = dbt_adapter::typed_adapter::ConcreteAdapter::new(adapter_engine);
-    let bridge = dbt_adapter::BridgeAdapter::new(
-        Arc::new(concrete),
-        None, // schema_store
+    let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
+    let adapter = Arc::new(dbt_adapter::Adapter::new(
+        Arc::new(adapter_impl),
         None, // time_machine
         state.cancellation_source.token(),
-    );
-    let adapter: Arc<dyn dbt_adapter::BaseAdapter> = Arc::new(bridge);
+    ));
 
     // Configure the Jinja environment for compile+run phase.
     // This sets execute=true context where adapter.* calls hit the real DB.
@@ -303,8 +302,7 @@ async fn execute_node_inner(
         rt,
         sql_header,
         state.packages.clone(),
-    )
-    .await;
+    );
 
     // build_run_node_context creates its own ResultStore (via extend_base_context_stateful_fn),
     // overwriting ours. Re-inject our activity-scoped store so adapter_response extraction
@@ -396,7 +394,9 @@ async fn execute_node_inner(
                 None,
                 base.quoting,
             ) {
-                node_context.insert("this".to_owned(), relation.as_value());
+                let relation_value =
+                    dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value();
+                node_context.insert("this".to_owned(), relation_value);
             }
             if needs_schema_patch {
                 node_context.insert("schema".to_owned(), minijinja::Value::from(patched_schema));

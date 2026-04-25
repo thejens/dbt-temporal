@@ -11,16 +11,14 @@ pub fn build_adapter_engine(
     quoting: dbt_schemas::schemas::common::ResolvedQuoting,
     auth_override: Option<Arc<dyn dbt_auth::Auth>>,
 ) -> Result<Arc<dyn dbt_adapter::AdapterEngine>> {
-    use dbt_adapter::base_adapter::backend_of;
+    use dbt_adapter::adapter::adapter_factory::backend_of;
     use dbt_adapter::cache::RelationCache;
     use dbt_adapter::engine::XdbcEngine;
-    use dbt_adapter::query_comment::QueryCommentConfig;
+    use dbt_adapter::engine::query_comment::QueryCommentConfig;
     use dbt_adapter::sql_types::SATypeOpsImpl;
     use dbt_adapter::stmt_splitter::NaiveStmtSplitter;
 
-    let adapter_type = db_config
-        .adapter_type_if_supported()
-        .ok_or_else(|| anyhow::anyhow!("unsupported adapter type: {}", db_config.adapter_type()))?;
+    let adapter_type = db_config.adapter_type();
 
     let base_auth: Arc<dyn dbt_auth::Auth> = auth_override.unwrap_or_else(|| {
         let backend = backend_of(adapter_type);
@@ -35,7 +33,7 @@ pub fn build_adapter_engine(
 
     let stmt_splitter: Arc<dyn dbt_adapter::stmt_splitter::StmtSplitter> =
         Arc::new(NaiveStmtSplitter);
-    let query_comment = QueryCommentConfig::from_query_comment(None, adapter_type, false);
+    let query_comment = QueryCommentConfig::from_query_comment(None, adapter_type, false, None);
     let type_ops: Box<dyn dbt_adapter::sql_types::TypeOps> =
         Box::new(SATypeOpsImpl::new(adapter_type));
     let relation_cache = Arc::new(RelationCache::default());
@@ -51,6 +49,7 @@ pub fn build_adapter_engine(
         None, // query_cache
         relation_cache,
         std::collections::BTreeMap::new(), // behavior_flag_overrides
+        None,                              // threads
     );
 
     Ok(Arc::new(engine))

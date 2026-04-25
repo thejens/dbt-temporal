@@ -52,7 +52,7 @@ pub fn render_materialization(
         .next_back()
         .unwrap_or(template_name);
 
-    let func = state.lookup(macro_name).ok_or_else(|| {
+    let func = state.lookup(macro_name, &[]).ok_or_else(|| {
         DbtTemporalError::Compilation(format!(
             "macro '{macro_name}' not found in template '{template_name}'"
         ))

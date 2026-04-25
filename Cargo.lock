@@ -2614,7 +2614,6 @@ dependencies = [
  "dbt-auth",
  "dbt-common",
  "dbt-csv",
- "dbt-dag",
  "dbt-jinja-utils",
  "dbt-loader",
  "dbt-parser",

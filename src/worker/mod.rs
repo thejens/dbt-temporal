@@ -378,6 +378,10 @@ pub async fn initialize_project(
     let (default_hooks, default_retry) = crate::hooks::load_project_config(&project_dir)
         .with_context(|| format!("loading config from {}", project_dir.display()))?;
 
+    // Pre-compile non-retryable-error regexes; invalid patterns log a warning and are dropped.
+    let non_retryable_error_patterns =
+        crate::error::compile_error_patterns(&default_retry.non_retryable_errors);
+
     // Detect whether profiles.yml uses env_var() — gates per-workflow adapter rebuilding.
     let uses_env_vars = profile::profile_uses_env_vars(&profiles_path);
 
@@ -429,6 +433,7 @@ pub async fn initialize_project(
         packages,
         default_hooks,
         default_retry,
+        non_retryable_error_patterns,
         profiles_path,
         profile_name_in_project,
         default_target,

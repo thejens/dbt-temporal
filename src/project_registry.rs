@@ -8,22 +8,26 @@ use crate::worker_state::WorkerState;
 ///
 /// Shared via `Arc<ProjectRegistry>` on `DbtActivities`.
 /// Activities look up the correct `WorkerState` by project name from the workflow input.
-pub struct ProjectRegistry {
-    projects: BTreeMap<String, Arc<WorkerState>>,
+pub type ProjectRegistry = Registry<WorkerState>;
+
+/// Generic over the entry type so tests can use a placeholder (`()`) instead of
+/// constructing a real `WorkerState` (which depends on the dbt-fusion stack).
+pub struct Registry<T> {
+    projects: BTreeMap<String, Arc<T>>,
     default_project: Option<String>,
 }
 
-impl std::fmt::Debug for ProjectRegistry {
+impl<T> std::fmt::Debug for Registry<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProjectRegistry")
+        f.debug_struct("Registry")
             .field("projects", &self.projects.keys().collect::<Vec<_>>())
             .field("default_project", &self.default_project)
             .finish()
     }
 }
 
-impl ProjectRegistry {
-    pub fn new(projects: BTreeMap<String, Arc<WorkerState>>) -> Self {
+impl<T> Registry<T> {
+    pub fn new(projects: BTreeMap<String, Arc<T>>) -> Self {
         let default_project = if projects.len() == 1 {
             projects.keys().next().cloned()
         } else {
@@ -36,7 +40,7 @@ impl ProjectRegistry {
     }
 
     /// Look up a project by name. If `name` is None, use the default (single-project case).
-    pub fn get(&self, name: Option<&str>) -> Result<&Arc<WorkerState>, DbtTemporalError> {
+    pub fn get(&self, name: Option<&str>) -> Result<&Arc<T>, DbtTemporalError> {
         let key = name.or(self.default_project.as_deref()).ok_or_else(|| {
             let names: Vec<&str> = self.projects.keys().map(String::as_str).collect();
             DbtTemporalError::ProjectNotFound(format!(
@@ -81,22 +85,15 @@ impl ProjectRegistry {
 mod tests {
     use super::*;
 
-    /// Build a registry with the given project names.
-    ///
-    /// Uses `MaybeUninit` to avoid needing real `WorkerState` internals.
-    /// Returns `ManuallyDrop` because the fake `Arc<WorkerState>` values have
-    /// invalid refcounts and must never be dropped.
-    #[allow(unsafe_code)]
-    fn test_registry(names: &[&str]) -> std::mem::ManuallyDrop<ProjectRegistry> {
-        let projects: BTreeMap<String, Arc<WorkerState>> = names
+    /// Build a registry over `()` so tests don't need real `WorkerState` instances.
+    /// Genericizing `Registry<T>` over the entry type lets us use `Arc<()>` here, which
+    /// replaces the previous `Arc::from_raw` of uninitialized memory hack.
+    fn test_registry(names: &[&str]) -> Registry<()> {
+        let projects: BTreeMap<String, Arc<()>> = names
             .iter()
-            .map(|n| {
-                let raw = Box::into_raw(Box::<WorkerState>::new_uninit());
-                let arc = unsafe { Arc::from_raw(raw as *const WorkerState) };
-                (n.to_string(), arc)
-            })
+            .map(|n| ((*n).to_string(), Arc::new(())))
             .collect();
-        std::mem::ManuallyDrop::new(ProjectRegistry::new(projects))
+        Registry::new(projects)
     }
 
     #[test]
@@ -132,7 +129,7 @@ mod tests {
                 assert!(msg.contains("waffle"));
                 assert!(msg.contains("stripe"));
             }
-            Ok(_) => panic!("expected error"),
+            Ok(_) => panic!("expected ProjectNotFound for unknown name 'nope'"),
         }
     }
 
@@ -146,7 +143,7 @@ mod tests {
                 assert!(msg.contains('a'));
                 assert!(msg.contains('b'));
             }
-            Ok(_) => panic!("expected error"),
+            Ok(_) => panic!("expected ProjectNotFound when no name and >1 projects"),
         }
     }
 

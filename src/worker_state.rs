@@ -32,6 +32,10 @@ pub struct WorkerState {
     pub default_hooks: HooksConfig,
     /// Default retry policy loaded from dbt_temporal.yml.
     pub default_retry: RetryConfig,
+    /// Pre-compiled regexes for `default_retry.non_retryable_errors`.
+    /// Compiled once at startup so each adapter error doesn't re-compile (and
+    /// re-warn about) the patterns.
+    pub non_retryable_error_patterns: Vec<regex::Regex>,
     /// Path to profiles.yml — needed for per-workflow adapter engine rebuilding.
     pub profiles_path: PathBuf,
     /// Profile name from dbt_project.yml (e.g. "waffle_hut").

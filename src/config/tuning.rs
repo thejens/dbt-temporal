@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
+use anyhow::{Context, Result, anyhow};
+
 use super::WorkerTuningConfig;
 
 /// Parse `TEMPORAL_SEARCH_ATTRIBUTES` env var as a JSON object of string key-value pairs.
 /// Example: `TEMPORAL_SEARCH_ATTRIBUTES={"env":"prod","team":"data-eng"}`
-pub fn parse_search_attributes() -> Result<BTreeMap<String, String>, String> {
+pub fn parse_search_attributes() -> Result<BTreeMap<String, String>> {
     let val = match std::env::var("TEMPORAL_SEARCH_ATTRIBUTES") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(BTreeMap::new()),
     };
     serde_json::from_str::<BTreeMap<String, String>>(&val)
-        .map_err(|e| format!("invalid TEMPORAL_SEARCH_ATTRIBUTES JSON: {e}"))
+        .context("invalid TEMPORAL_SEARCH_ATTRIBUTES JSON")
 }
 
 /// Parse worker tuning configuration from environment variables.
@@ -29,7 +31,7 @@ pub fn parse_search_attributes() -> Result<BTreeMap<String, String>, String> {
 ///   - `WORKER_RESOURCE_TARGET_CPU` (default: 0.9) — target CPU utilization [0.0–1.0]
 ///   - `WORKER_RESOURCE_ACTIVITY_MIN_SLOTS` (default: 1)
 ///   - `WORKER_RESOURCE_ACTIVITY_MAX_SLOTS` (default: 500)
-pub fn parse_worker_tuning() -> Result<WorkerTuningConfig, String> {
+pub fn parse_worker_tuning() -> Result<WorkerTuningConfig> {
     let mode = std::env::var("WORKER_TUNER").unwrap_or_default();
     match mode.as_str() {
         "resource-based" | "resource_based" => Ok(WorkerTuningConfig::ResourceBased {
@@ -49,50 +51,50 @@ pub fn parse_worker_tuning() -> Result<WorkerTuningConfig, String> {
                 100,
             )?,
         }),
-        other => Err(format!(
+        other => Err(anyhow!(
             "unknown WORKER_TUNER mode '{other}' (expected 'fixed' or 'resource-based')"
         )),
     }
 }
 
-pub fn parse_env_usize(name: &str, default: usize) -> Result<usize, String> {
+pub fn parse_env_usize(name: &str, default: usize) -> Result<usize> {
     std::env::var(name).map_or(Ok(default), |v| {
         v.parse::<usize>()
-            .map_err(|e| format!("invalid {name}: {e}"))
+            .with_context(|| format!("invalid {name}"))
     })
 }
 
-fn parse_env_f64(name: &str, default: f64) -> Result<f64, String> {
+fn parse_env_f64(name: &str, default: f64) -> Result<f64> {
     std::env::var(name)
-        .map_or(Ok(default), |v| v.parse::<f64>().map_err(|e| format!("invalid {name}: {e}")))
+        .map_or(Ok(default), |v| v.parse::<f64>().with_context(|| format!("invalid {name}")))
 }
 
-pub fn parse_env_u64(name: &str, default: u64) -> Result<u64, String> {
+pub fn parse_env_u64(name: &str, default: u64) -> Result<u64> {
     std::env::var(name)
-        .map_or(Ok(default), |v| v.parse::<u64>().map_err(|e| format!("invalid {name}: {e}")))
+        .map_or(Ok(default), |v| v.parse::<u64>().with_context(|| format!("invalid {name}")))
 }
 
-pub fn parse_env_f32(name: &str, default: f32) -> Result<f32, String> {
+pub fn parse_env_f32(name: &str, default: f32) -> Result<f32> {
     std::env::var(name)
-        .map_or(Ok(default), |v| v.parse::<f32>().map_err(|e| format!("invalid {name}: {e}")))
+        .map_or(Ok(default), |v| v.parse::<f32>().with_context(|| format!("invalid {name}")))
 }
 
-pub fn parse_optional_env_f64(name: &str) -> Result<Option<f64>, String> {
+pub fn parse_optional_env_f64(name: &str) -> Result<Option<f64>> {
     match std::env::var(name) {
         Ok(v) if !v.is_empty() => v
             .parse::<f64>()
             .map(Some)
-            .map_err(|e| format!("invalid {name}: {e}")),
+            .with_context(|| format!("invalid {name}")),
         _ => Ok(None),
     }
 }
 
-pub fn parse_optional_env_u64(name: &str) -> Result<Option<u64>, String> {
+pub fn parse_optional_env_u64(name: &str) -> Result<Option<u64>> {
     match std::env::var(name) {
         Ok(v) if !v.is_empty() => v
             .parse::<u64>()
             .map(Some)
-            .map_err(|e| format!("invalid {name}: {e}")),
+            .with_context(|| format!("invalid {name}")),
         _ => Ok(None),
     }
 }
@@ -105,37 +107,48 @@ mod tests {
     use std::sync::Mutex;
     static CFG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env<F: FnOnce() -> anyhow::Result<()>>(
-        vars: &[(&str, Option<&str>)],
-        f: F,
-    ) -> anyhow::Result<()> {
-        let _guard = CFG_ENV_LOCK.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+    /// RAII guard that restores env vars on drop, including when `f()` panics.
+    /// The previous version restored after `f()` returned normally, so an assertion
+    /// panic would leak polluted env into the next test.
+    struct EnvVarGuard<'a> {
+        saved: Vec<(&'a str, Option<String>)>,
+    }
+
+    impl Drop for EnvVarGuard<'_> {
+        fn drop(&mut self) {
+            for (k, orig) in &self.saved {
+                match orig {
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    fn with_env<F: FnOnce() -> Result<()>>(vars: &[(&str, Option<&str>)], f: F) -> Result<()> {
+        // PoisonError holds a non-Send MutexGuard, so anyhow::Error::from doesn't impl
+        // From<PoisonError<...>>. Convert via display string.
+        let _lock = CFG_ENV_LOCK.lock().map_err(|e| anyhow!("{e}"))?;
         let saved: Vec<(&str, Option<String>)> = vars
             .iter()
             .map(|(k, _)| (*k, std::env::var(k).ok()))
             .collect();
+        let _restore = EnvVarGuard { saved };
         for (k, v) in vars {
             match v {
                 Some(val) => unsafe { std::env::set_var(k, val) },
                 None => unsafe { std::env::remove_var(k) },
             }
         }
-        let result = f();
-        for (k, orig) in &saved {
-            match orig {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-        result
+        f()
     }
 
     // --- parse_env_usize / parse_env_f64 ---
 
     #[test]
-    fn parse_env_usize_valid() -> anyhow::Result<()> {
+    fn parse_env_usize_valid() -> Result<()> {
         unsafe { std::env::set_var("TEST_CFG_USIZE_VALID", "42") };
-        let val = parse_env_usize("TEST_CFG_USIZE_VALID", 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let val = parse_env_usize("TEST_CFG_USIZE_VALID", 0)?;
         assert_eq!(val, 42);
         unsafe { std::env::remove_var("TEST_CFG_USIZE_VALID") };
         Ok(())
@@ -149,18 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_env_usize_missing_uses_default() -> anyhow::Result<()> {
+    fn parse_env_usize_missing_uses_default() -> Result<()> {
         unsafe { std::env::remove_var("TEST_CFG_USIZE_MISSING") };
-        let val =
-            parse_env_usize("TEST_CFG_USIZE_MISSING", 99).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let val = parse_env_usize("TEST_CFG_USIZE_MISSING", 99)?;
         assert_eq!(val, 99);
         Ok(())
     }
 
     #[test]
-    fn parse_env_f64_valid() -> anyhow::Result<()> {
+    fn parse_env_f64_valid() -> Result<()> {
         unsafe { std::env::set_var("TEST_CFG_F64_VALID", "0.75") };
-        let val = parse_env_f64("TEST_CFG_F64_VALID", 0.0).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let val = parse_env_f64("TEST_CFG_F64_VALID", 0.0)?;
         assert!((val - 0.75).abs() < f64::EPSILON);
         unsafe { std::env::remove_var("TEST_CFG_F64_VALID") };
         Ok(())
@@ -174,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_env_f64_missing_uses_default() -> anyhow::Result<()> {
+    fn parse_env_f64_missing_uses_default() -> Result<()> {
         unsafe { std::env::remove_var("TEST_CFG_F64_MISSING") };
-        let val = parse_env_f64("TEST_CFG_F64_MISSING", 0.8).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let val = parse_env_f64("TEST_CFG_F64_MISSING", 0.8)?;
         assert!((val - 0.8).abs() < f64::EPSILON);
         Ok(())
     }
@@ -184,11 +196,11 @@ mod tests {
     // --- parse_search_attributes ---
 
     #[test]
-    fn parse_search_attributes_valid_json() -> anyhow::Result<()> {
+    fn parse_search_attributes_valid_json() -> Result<()> {
         with_env(
             &[("TEMPORAL_SEARCH_ATTRIBUTES", Some(r#"{"env":"prod","team":"data"}"#))],
             || {
-                let attrs = parse_search_attributes().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let attrs = parse_search_attributes()?;
                 assert_eq!(
                     attrs
                         .get("env")
@@ -207,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_attributes_invalid_json() -> anyhow::Result<()> {
+    fn parse_search_attributes_invalid_json() -> Result<()> {
         with_env(&[("TEMPORAL_SEARCH_ATTRIBUTES", Some("not json"))], || {
             assert!(parse_search_attributes().is_err());
             Ok(())
@@ -215,18 +227,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_attributes_missing_returns_empty() -> anyhow::Result<()> {
+    fn parse_search_attributes_missing_returns_empty() -> Result<()> {
         with_env(&[("TEMPORAL_SEARCH_ATTRIBUTES", None)], || {
-            let attrs = parse_search_attributes().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let attrs = parse_search_attributes()?;
             assert!(attrs.is_empty());
             Ok(())
         })
     }
 
     #[test]
-    fn parse_search_attributes_empty_string_returns_empty() -> anyhow::Result<()> {
+    fn parse_search_attributes_empty_string_returns_empty() -> Result<()> {
         with_env(&[("TEMPORAL_SEARCH_ATTRIBUTES", Some(""))], || {
-            let attrs = parse_search_attributes().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let attrs = parse_search_attributes()?;
             assert!(attrs.is_empty());
             Ok(())
         })
@@ -235,7 +247,7 @@ mod tests {
     // --- parse_worker_tuning ---
 
     #[test]
-    fn parse_worker_tuning_defaults_to_fixed() -> anyhow::Result<()> {
+    fn parse_worker_tuning_defaults_to_fixed() -> Result<()> {
         with_env(
             &[
                 ("WORKER_TUNER", None),
@@ -244,7 +256,7 @@ mod tests {
                 ("WORKER_MAX_CONCURRENT_LOCAL_ACTIVITIES", None),
             ],
             || {
-                let config = parse_worker_tuning().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let config = parse_worker_tuning()?;
                 match config {
                     WorkerTuningConfig::Fixed {
                         max_concurrent_workflow_tasks,
@@ -263,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_worker_tuning_fixed_explicit() -> anyhow::Result<()> {
+    fn parse_worker_tuning_fixed_explicit() -> Result<()> {
         with_env(
             &[
                 ("WORKER_TUNER", Some("fixed")),
@@ -272,7 +284,7 @@ mod tests {
                 ("WORKER_MAX_CONCURRENT_LOCAL_ACTIVITIES", Some("10")),
             ],
             || {
-                let config = parse_worker_tuning().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let config = parse_worker_tuning()?;
                 match config {
                     WorkerTuningConfig::Fixed {
                         max_concurrent_workflow_tasks,
@@ -291,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_worker_tuning_resource_based() -> anyhow::Result<()> {
+    fn parse_worker_tuning_resource_based() -> Result<()> {
         with_env(
             &[
                 ("WORKER_TUNER", Some("resource-based")),
@@ -301,7 +313,7 @@ mod tests {
                 ("WORKER_RESOURCE_ACTIVITY_MAX_SLOTS", Some("300")),
             ],
             || {
-                let config = parse_worker_tuning().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let config = parse_worker_tuning()?;
                 match config {
                     WorkerTuningConfig::ResourceBased {
                         target_mem_usage,
@@ -322,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_worker_tuning_resource_based_underscore_variant() -> anyhow::Result<()> {
+    fn parse_worker_tuning_resource_based_underscore_variant() -> Result<()> {
         with_env(
             &[
                 ("WORKER_TUNER", Some("resource_based")),
@@ -332,7 +344,7 @@ mod tests {
                 ("WORKER_RESOURCE_ACTIVITY_MAX_SLOTS", None),
             ],
             || {
-                let config = parse_worker_tuning().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let config = parse_worker_tuning()?;
                 assert!(matches!(config, WorkerTuningConfig::ResourceBased { .. }));
                 Ok(())
             },
@@ -340,12 +352,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_worker_tuning_invalid_mode() -> anyhow::Result<()> {
+    fn parse_worker_tuning_invalid_mode() -> Result<()> {
         with_env(&[("WORKER_TUNER", Some("bogus"))], || {
             let Err(err) = parse_worker_tuning() else {
                 anyhow::bail!("expected error for bogus tuner mode");
             };
-            assert!(err.contains("bogus"));
+            assert!(err.to_string().contains("bogus"));
             Ok(())
         })
     }

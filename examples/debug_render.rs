@@ -26,8 +26,7 @@ async fn main() -> anyhow::Result<()> {
     );
     eprintln!("=== Loading project from {} ===", project_dir.display());
 
-    let config =
-        dbt_temporal::config::DbtTemporalConfig::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config = dbt_temporal::config::DbtTemporalConfig::from_env()?;
 
     let state = dbt_temporal::worker::initialize_project(&project_dir, &config, None).await?;
     eprintln!(

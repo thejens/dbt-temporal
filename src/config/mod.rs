@@ -109,7 +109,8 @@ impl DbtTemporalConfig {
     /// 2. `DBT_PROJECTS_DIR` set → scan for subdirs containing `dbt_project.yml`
     /// 3. `DBT_PROJECT_DIR` set → single project directory
     /// 4. None set → use cwd (single project or scan subdirs)
-    pub fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> anyhow::Result<Self> {
+        use anyhow::Context;
         let dbt_project_dirs = discovery::discover_project_dirs()?;
 
         Ok(Self {
@@ -131,7 +132,7 @@ impl DbtTemporalConfig {
                 .ok()
                 .map(|v| v.parse::<u16>())
                 .transpose()
-                .map_err(|e| format!("invalid HEALTH_PORT: {e}"))?,
+                .context("invalid HEALTH_PORT")?,
             write_artifacts: std::env::var("WRITE_ARTIFACTS")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),

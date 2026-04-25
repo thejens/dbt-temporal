@@ -79,7 +79,11 @@ pub fn spawn_health_server(port: u16, path: PathBuf) -> tokio::task::JoinHandle<
                 body.len(),
             );
 
-            let _ = stream.write_all(response.as_bytes()).await;
+            // Slow/disconnected probe clients are common; don't propagate, but log
+            // at debug so a flood of failures is at least observable.
+            if let Err(e) = stream.write_all(response.as_bytes()).await {
+                tracing::debug!(error = %e, "health server failed to write response");
+            }
         }
     })
 }

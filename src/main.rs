@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod activities;
@@ -49,8 +49,7 @@ async fn main() -> Result<()> {
         .with(telemetry_compat::DbtTelemetryCompatLayer)
         .init();
 
-    let config = config::DbtTemporalConfig::from_env()
-        .map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let config = config::DbtTemporalConfig::from_env().context("configuration error")?;
 
     worker::run_worker(config).await
 }

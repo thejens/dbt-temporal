@@ -79,7 +79,7 @@ fn matches_non_retryable_pattern(
         return false;
     };
 
-    let patterns = &state.default_retry.non_retryable_errors;
+    let patterns = &state.non_retryable_error_patterns;
     if patterns.is_empty() {
         return false;
     }
@@ -153,9 +153,14 @@ async fn execute_node_inner(
     if !input.env.is_empty() {
         let env_overrides = Arc::new(input.env.clone());
         jinja_env.env.add_func_func("env_var", move |state, args| {
+            // dbt_jinja_utils::LookupFn = dyn Fn(&str) -> Option<Value>, which is
+            // implicitly 'static — the inner closure must own its captures, so we
+            // bump the Arc refcount per call.
             let map = Arc::clone(&env_overrides);
             let lookup = move |key: &str| -> Option<minijinja::Value> {
-                map.get(key).map(|v| minijinja::Value::from(v.clone()))
+                // Value::from(&str) uses minijinja's inline SmallStr where it fits,
+                // avoiding the second alloc that Value::from(String) would do.
+                map.get(key).map(|v| minijinja::Value::from(v.as_str()))
             };
             dbt_jinja_utils::env_var(false, Some(&lookup), state, args)
         });

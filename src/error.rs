@@ -60,21 +60,33 @@ impl From<anyhow::Error> for DbtTemporalError {
     }
 }
 
-/// Check if an error message matches any of the given regex patterns.
+/// Compile user-configured error patterns from `dbt_temporal.yml` into regexes.
+///
+/// Invalid patterns are logged at `warn!` and skipped. Done once at config-load
+/// time so each adapter error doesn't re-validate (and re-warn about) the patterns.
+pub fn compile_error_patterns(patterns: &[String]) -> Vec<regex::Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| match regex::Regex::new(pattern) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                tracing::warn!(
+                    pattern = %pattern,
+                    error = %e,
+                    "invalid regex in non_retryable_errors — pattern will be ignored"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Check if an error message matches any of the given pre-compiled patterns.
 ///
 /// Used by `execute_node` to promote adapter errors to non-retryable when the
 /// message matches a user-configured pattern from `dbt_temporal.yml`.
-pub fn matches_error_patterns(error_message: &str, patterns: &[String]) -> bool {
-    for pattern in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if re.is_match(error_message) {
-                return true;
-            }
-        } else {
-            // Invalid regex — skip silently.
-        }
-    }
-    false
+pub fn matches_error_patterns(error_message: &str, patterns: &[regex::Regex]) -> bool {
+    patterns.iter().any(|re| re.is_match(error_message))
 }
 
 #[cfg(test)]
@@ -132,7 +144,7 @@ mod tests {
 
     #[test]
     fn matches_error_patterns_exact_substring() {
-        let patterns = vec!["permission denied".to_string()];
+        let patterns = compile_error_patterns(&["permission denied".to_string()]);
         assert!(matches_error_patterns(
             "adapter error: permission denied for table foo",
             &patterns
@@ -142,7 +154,7 @@ mod tests {
 
     #[test]
     fn matches_error_patterns_regex() {
-        let patterns = vec![r"relation .* does not exist".to_string()];
+        let patterns = compile_error_patterns(&[r"relation .* does not exist".to_string()]);
         assert!(matches_error_patterns(
             "adapter error: relation \"public.foo\" does not exist",
             &patterns
@@ -152,7 +164,8 @@ mod tests {
 
     #[test]
     fn matches_error_patterns_multiple() {
-        let patterns = vec!["permission denied".to_string(), "access denied".to_string()];
+        let patterns =
+            compile_error_patterns(&["permission denied".to_string(), "access denied".to_string()]);
         assert!(matches_error_patterns("access denied for user", &patterns));
         assert!(matches_error_patterns("permission denied on schema", &patterns));
         assert!(!matches_error_patterns("connection timeout", &patterns));
@@ -160,13 +173,16 @@ mod tests {
 
     #[test]
     fn matches_error_patterns_empty_patterns() {
-        let patterns: Vec<String> = vec![];
+        let patterns: Vec<regex::Regex> = vec![];
         assert!(!matches_error_patterns("any error", &patterns));
     }
 
     #[test]
-    fn matches_error_patterns_invalid_regex_skipped() {
-        let patterns = vec!["[invalid".to_string(), "valid_pattern".to_string()];
+    fn compile_error_patterns_skips_invalid() {
+        let patterns =
+            compile_error_patterns(&["[invalid".to_string(), "valid_pattern".to_string()]);
+        // Only the valid pattern compiles — the invalid one is logged and dropped.
+        assert_eq!(patterns.len(), 1);
         assert!(matches_error_patterns("this has valid_pattern in it", &patterns));
         assert!(!matches_error_patterns("nothing matches", &patterns));
     }

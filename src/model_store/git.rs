@@ -128,16 +128,42 @@ mod tests {
     /// Serialize all git-token env var tests to avoid races.
     static GIT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// RAII guard that restores GITHUB_TOKEN/GIT_TOKEN on drop, including on panic.
+    /// The previous version restored after `f()` returned, so a test assertion panic
+    /// would leak the test's tokens into subsequent tests.
+    #[allow(unsafe_code)]
+    struct TokenGuard {
+        github: Option<String>,
+        git: Option<String>,
+    }
+
+    #[allow(unsafe_code)]
+    impl Drop for TokenGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("GITHUB_TOKEN");
+                std::env::remove_var("GIT_TOKEN");
+                if let Some(v) = &self.github {
+                    std::env::set_var("GITHUB_TOKEN", v);
+                }
+                if let Some(v) = &self.git {
+                    std::env::set_var("GIT_TOKEN", v);
+                }
+            }
+        }
+    }
+
     /// Helper: run a closure with specific GITHUB_TOKEN and GIT_TOKEN values, restoring after.
     #[allow(unsafe_code)]
     fn with_git_tokens<F: FnOnce()>(github: Option<&str>, git: Option<&str>, f: F) {
-        let Ok(_guard) = GIT_ENV_LOCK.lock() else {
+        let Ok(_lock) = GIT_ENV_LOCK.lock() else {
             panic!("GIT_ENV_LOCK poisoned");
         };
 
-        // Save
-        let old_github = std::env::var("GITHUB_TOKEN").ok();
-        let old_git = std::env::var("GIT_TOKEN").ok();
+        let _restore = TokenGuard {
+            github: std::env::var("GITHUB_TOKEN").ok(),
+            git: std::env::var("GIT_TOKEN").ok(),
+        };
 
         unsafe {
             std::env::remove_var("GITHUB_TOKEN");
@@ -151,18 +177,6 @@ mod tests {
         }
 
         f();
-
-        // Restore
-        unsafe {
-            std::env::remove_var("GITHUB_TOKEN");
-            std::env::remove_var("GIT_TOKEN");
-            if let Some(v) = old_github {
-                std::env::set_var("GITHUB_TOKEN", v);
-            }
-            if let Some(v) = old_git {
-                std::env::set_var("GIT_TOKEN", v);
-            }
-        }
     }
 
     #[test]

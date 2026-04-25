@@ -20,20 +20,30 @@ use crate::error::DbtTemporalError;
 use crate::types::{NodeExecutionResult, ProjectHooksInput};
 
 use super::DbtActivities;
+use super::heartbeat;
 use super::node_helpers::{json_to_minijinja, patch_target_global};
 
-/// Outer wrapper — handles the `Result` translation.
+/// Outer wrapper — handles the `Result` translation, cancellation, and heartbeating.
 ///
 /// All errors are mapped to `NonRetryable` because hook side effects (DDL, logging)
-/// are not safe to retry on transient errors.
+/// are not safe to retry on transient errors. Cancellation is honoured so a
+/// workflow termination does not leave hook SQL running on a doomed worker.
 pub async fn run_project_hooks_outer(
     activities: &DbtActivities,
-    _ctx: ActivityContext,
+    ctx: ActivityContext,
     input: ProjectHooksInput,
 ) -> Result<(), ActivityError> {
-    run_project_hooks_inner(activities, input)
-        .await
-        .map_err(|e| ActivityError::NonRetryable(e.into()))
+    let phase = input.phase.clone();
+    tokio::select! {
+        result = run_project_hooks_inner(activities, input) => {
+            result.map_err(|e| ActivityError::NonRetryable(e.into()))
+        }
+        () = ctx.cancelled() => {
+            info!(phase = %phase, "project hooks cancelled");
+            Err(ActivityError::cancelled())
+        }
+        never = heartbeat::heartbeat_loop(&ctx) => match never {},
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::unused_async)]

@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
-use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
 
@@ -12,6 +11,7 @@ use crate::project_registry::ProjectRegistry;
 use crate::types::{NodeExecutionInput, NodeExecutionResult, TimingEntry};
 
 use super::DbtActivities;
+use super::heartbeat;
 use super::node_helpers::{
     extract_adapter_response, extract_test_failures, inject_ephemeral_ctes, patch_target_global,
     render_materialization,
@@ -20,7 +20,8 @@ use super::node_serialization::{
     build_agate_table, get_node_config_yml, get_node_yml, get_sql_header,
 };
 
-/// Execute node activity — outer wrapper that handles errors and cancellation.
+/// Execute node activity — outer wrapper that handles errors, cancellation,
+/// and periodic heartbeating.
 ///
 /// Called from `DbtActivities::execute_node`.
 pub async fn execute_node_outer(
@@ -31,7 +32,7 @@ pub async fn execute_node_outer(
     let unique_id = input.unique_id.clone();
     let project = input.project.clone();
     tokio::select! {
-        result = execute_node_inner(activities, &ctx, input) => {
+        result = execute_node_inner(activities, input) => {
             match result {
                 Ok(result) => Ok(result),
                 Err(e) => {
@@ -66,6 +67,10 @@ pub async fn execute_node_outer(
             info!(node = %unique_id, "activity cancelled");
             Err(ActivityError::cancelled())
         }
+        // Never resolves — keeps the UI's last-heartbeat fresh and lets the
+        // server's heartbeat_timeout reschedule on a fresh worker if this one
+        // dies. Loses the select! race to the two real branches above.
+        never = heartbeat::heartbeat_loop(&ctx) => match never {},
     }
 }
 
@@ -97,10 +102,10 @@ fn matches_non_retryable_pattern(
 
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // Sequential adapter interaction with setup, execution, and result extraction.
-// Kept async so tokio::select! in execute_node_outer can poll it against ctx.cancelled().
+// Kept async so tokio::select! in execute_node_outer can poll it against
+// ctx.cancelled() and the heartbeat ticker.
 async fn execute_node_inner(
     activities: &DbtActivities,
-    ctx: &ActivityContext,
     input: NodeExecutionInput,
 ) -> Result<NodeExecutionResult, anyhow::Error> {
     let state = activities.registry.get(Some(&input.project))?;
@@ -132,15 +137,6 @@ async fn execute_node_inner(
     info!(node = %unique_id, resource_type = rt.as_str_name(), "executing node");
 
     let start_instant = std::time::Instant::now();
-
-    // Heartbeat with phase info so retried activities know where the previous attempt was.
-    let heartbeat = |phase: &str| {
-        if let Ok(payload) = phase.as_json_payload() {
-            ctx.record_heartbeat(vec![payload]);
-        }
-    };
-
-    heartbeat("starting");
 
     // --- COMPILE PHASE ---
     let compile_start = chrono::Utc::now();
@@ -655,8 +651,6 @@ async fn execute_node_inner(
     // --- EXECUTE PHASE ---
     let execute_start = chrono::Utc::now();
 
-    heartbeat("executing");
-
     // Ensure the target schema/dataset exists (dbt does this before materializations).
     // Dispatches to the adapter-specific create_schema macro (e.g. CREATE SCHEMA IF NOT EXISTS).
     // Uses `this` which is the target relation (database + schema + identifier).
@@ -707,8 +701,6 @@ async fn execute_node_inner(
     });
 
     let execute_end = chrono::Utc::now();
-
-    heartbeat("complete");
 
     let execution_time = start_instant.elapsed().as_secs_f64();
 

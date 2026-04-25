@@ -182,7 +182,9 @@ impl DbtRunWorkflow {
                     target: input.target.clone(),
                     node_results: vec![],
                 },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+                ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
+                    .heartbeat_timeout(Duration::from_secs(120))
+                    .build(),
             )
             .await
             .map_err(|e| {
@@ -493,7 +495,9 @@ impl DbtRunWorkflow {
                         target: input.target.clone(),
                         node_results: all_results.clone(),
                     },
-                    ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+                    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
+                        .heartbeat_timeout(Duration::from_secs(120))
+                        .build(),
                 )
                 .await
             {

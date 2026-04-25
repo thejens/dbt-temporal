@@ -1,11 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::rc::Rc;
 
 use dbt_adapter::load_store::ResultStore;
+use dbt_common::constants::DBT_CTE_PREFIX;
+use dbt_jinja_utils::utils::{inject_and_persist_ephemeral_models, render_sql_with_listeners};
+use minijinja::MacroSpans;
+use minijinja::listener::RenderingEventListener;
 
 use crate::error::DbtTemporalError;
 
-const CTE_PREFIX: &str = "__dbt__cte__";
+/// Empty listener slice for SQL renders that don't subscribe to events.
+/// Threaded through `render_sql_with_listeners` to keep call sites uniform.
+const NO_LISTENERS: &[Rc<dyn RenderingEventListener>] = &[];
 
 /// Find a materialization template by searching for a suffix match in the Jinja environment.
 /// Templates are registered with package prefixes (e.g. "dbt_postgres.materialization_view_postgres").
@@ -37,12 +44,12 @@ pub fn render_materialization(
     context: &BTreeMap<String, minijinja::Value>,
 ) -> Result<String, DbtTemporalError> {
     let template = jinja_env.env.get_template(template_name).map_err(|e| {
-        DbtTemporalError::Compilation(format!("template {template_name} not found: {e}"))
+        DbtTemporalError::Compilation(format!("template {template_name} not found: {e:#}"))
     })?;
 
     // Evaluate the template to get State with macro definitions registered.
     let state = template.eval_to_state(context, &[]).map_err(|e| {
-        DbtTemporalError::Compilation(format!("eval_to_state {template_name}: {e}"))
+        DbtTemporalError::Compilation(format!("eval_to_state {template_name}: {e:#}"))
     })?;
 
     // The macro name is the leaf part after the last dot
@@ -60,7 +67,7 @@ pub fn render_materialization(
 
     // Call the macro — this executes the materialization body (DDL/DML via adapter).
     let result = func.call(&state, &[], &[]).map_err(|e| {
-        DbtTemporalError::Compilation(format!("calling {macro_name} in {template_name}: {e}"))
+        DbtTemporalError::Compilation(format!("calling {macro_name} in {template_name}: {e:#}"))
     })?;
 
     Ok(result.as_str().map(ToString::to_string).unwrap_or_default())
@@ -68,60 +75,144 @@ pub fn render_materialization(
 
 /// Inject ephemeral model CTEs into compiled SQL.
 ///
-/// When a model refs an ephemeral model, the ref resolves to `__dbt__cte__<name>`.
-/// This function finds the referenced ephemeral models, compiles their SQL, and
-/// prepends them as a WITH clause. Handles transitive (nested) ephemeral refs.
+/// Walks the user's compiled SQL for `__dbt__cte__<name>` references, compiles
+/// each transitive ephemeral dependency through Jinja, and persists per-ephemeral
+/// CTE chains to `ephemeral_dir`. The final wrap is delegated to
+/// `dbt_jinja_utils::utils::inject_and_persist_ephemeral_models`, which produces
+/// SQL with `--EPHEMERAL-SELECT-WRAPPER-START/END` markers — matching vanilla
+/// dbt-fusion's compile output and consumable by dbt-fusion's adapter SQL
+/// tokenizer / diff (`crates/dbt-adapter/src/sql/{tokenizer,diff}.rs`), which
+/// rely on those markers to reason about ephemeral wrapping.
+///
+/// `ephemeral_dir` must be unique per-activity; the persist step writes
+/// `<name>.sql` files there, so concurrent activities sharing a directory would
+/// race on the cumulative-CTE-chain layout.
 pub fn inject_ephemeral_ctes(
     compiled_sql: &str,
+    user_node_name: &str,
     nodes: &dbt_schemas::schemas::Nodes,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
     in_dir: &Path,
+    ephemeral_dir: &Path,
 ) -> Result<String, DbtTemporalError> {
-    if !compiled_sql.contains(CTE_PREFIX) {
+    if !compiled_sql.contains(DBT_CTE_PREFIX) {
         return Ok(compiled_sql.to_string());
     }
 
-    // Collect all CTE names referenced in the SQL.
-    let cte_names = extract_cte_names(compiled_sql);
-    if cte_names.is_empty() {
-        return Ok(compiled_sql.to_string());
-    }
-
-    // Compile each ephemeral model and collect CTE definitions.
-    // Track visited to avoid infinite recursion on circular refs.
-    let mut cte_defs: Vec<(String, String)> = Vec::new();
+    // Walk the dependency DAG of ephemerals, persisting each leaf-first via
+    // dbt-fusion's `inject_and_persist_ephemeral_models`. Each call writes a
+    // cumulative CTE chain for that ephemeral into `ephemeral_dir`, so the
+    // final user-model call only has to read one file per direct dep.
     let mut visited = BTreeSet::new();
-    compile_ephemeral_ctes(
-        &cte_names,
+    persist_ephemeral_chain(
+        compiled_sql,
         nodes,
         jinja_env,
         node_context,
         in_dir,
-        &mut cte_defs,
+        ephemeral_dir,
         &mut visited,
     )?;
 
-    if cte_defs.is_empty() {
-        return Ok(compiled_sql.to_string());
-    }
-
-    // Build WITH clause: CTEs in dependency order (deepest first).
-    let ctes = cte_defs
-        .iter()
-        .map(|(name, sql)| format!("{CTE_PREFIX}{name} as (\n{sql}\n)"))
-        .collect::<Vec<_>>()
-        .join(",\n");
-
-    Ok(format!("with {ctes}\n{compiled_sql}"))
+    let mut spans = MacroSpans::default();
+    inject_and_persist_ephemeral_models(
+        compiled_sql.to_string(),
+        &mut spans,
+        user_node_name,
+        false, // not an ephemeral — wraps and returns without persisting
+        ephemeral_dir,
+    )
+    .map_err(|e| {
+        DbtTemporalError::Compilation(format!(
+            "wrapping ephemeral CTEs for {user_node_name}: {e:#}"
+        ))
+    })
 }
 
-/// Extract `__dbt__cte__<name>` model names from SQL.
-fn extract_cte_names(sql: &str) -> Vec<String> {
+/// Recursively compile each ephemeral referenced (directly or transitively) by
+/// the given SQL, persisting each leaf-first via
+/// `inject_and_persist_ephemeral_models(is_current_model_ephemeral=true)`.
+///
+/// Leaf-first ordering is required: the function reads each direct dep's
+/// persisted file when processing a parent ephemeral, so dependencies must
+/// already be on disk.
+fn persist_ephemeral_chain(
+    sql: &str,
+    nodes: &dbt_schemas::schemas::Nodes,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    node_context: &BTreeMap<String, minijinja::Value>,
+    in_dir: &Path,
+    ephemeral_dir: &Path,
+    visited: &mut BTreeSet<String>,
+) -> Result<(), DbtTemporalError> {
+    for name in extract_ephemeral_names(sql) {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+
+        let Some((_, node)) = nodes.iter().find(|(_, n)| {
+            n.common().name == name
+                && n.base()
+                    .materialized
+                    .to_string()
+                    .eq_ignore_ascii_case("ephemeral")
+        }) else {
+            continue;
+        };
+
+        let raw_path = in_dir.join(&node.common().original_file_path);
+        let raw_sql = std::fs::read_to_string(&raw_path).map_err(|e| {
+            DbtTemporalError::Compilation(format!(
+                "reading ephemeral model '{name}' at {}: {e:#}",
+                raw_path.display()
+            ))
+        })?;
+        let compiled =
+            render_sql_with_listeners(&raw_sql, jinja_env, node_context, NO_LISTENERS, &raw_path)
+                .map_err(|e| {
+                DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e:#}"))
+            })?;
+
+        // Recurse first so this ephemeral's deps land on disk before we persist it.
+        persist_ephemeral_chain(
+            &compiled,
+            nodes,
+            jinja_env,
+            node_context,
+            in_dir,
+            ephemeral_dir,
+            visited,
+        )?;
+
+        let mut spans = MacroSpans::default();
+        inject_and_persist_ephemeral_models(
+            compiled,
+            &mut spans,
+            &name,
+            true, // ephemeral — persists cumulative CTE chain to disk
+            ephemeral_dir,
+        )
+        .map_err(|e| {
+            DbtTemporalError::Compilation(format!(
+                "persisting ephemeral CTE chain for '{name}': {e:#}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Extract ephemeral model names from `__dbt__cte__<name>` references in SQL.
+///
+/// dbt-fusion has a private equivalent (`extract_ephemeral_model_names` in
+/// `dbt-jinja-utils/src/utils.rs`); we keep our own because we need it to walk
+/// the dep DAG before each ephemeral is persisted, and the upstream version
+/// isn't exported.
+fn extract_ephemeral_names(sql: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut pos = 0;
-    while let Some(start) = sql[pos..].find(CTE_PREFIX) {
-        pos += start + CTE_PREFIX.len();
+    while let Some(start) = sql[pos..].find(DBT_CTE_PREFIX) {
+        pos += start + DBT_CTE_PREFIX.len();
         let name_end = sql[pos..]
             .find(|c: char| !c.is_alphanumeric() && c != '_')
             .unwrap_or_else(|| sql[pos..].len());
@@ -132,69 +223,6 @@ fn extract_cte_names(sql: &str) -> Vec<String> {
         pos += name_end;
     }
     names
-}
-
-/// Recursively compile ephemeral models and their transitive dependencies.
-fn compile_ephemeral_ctes(
-    names: &[String],
-    nodes: &dbt_schemas::schemas::Nodes,
-    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
-    node_context: &BTreeMap<String, minijinja::Value>,
-    in_dir: &Path,
-    cte_defs: &mut Vec<(String, String)>,
-    visited: &mut BTreeSet<String>,
-) -> Result<(), DbtTemporalError> {
-    for name in names {
-        if visited.contains(name) {
-            continue;
-        }
-        visited.insert(name.clone());
-
-        // Find the ephemeral node by model name.
-        let node = nodes.iter().find(|(_, n)| {
-            n.common().name == *name
-                && n.base()
-                    .materialized
-                    .to_string()
-                    .eq_ignore_ascii_case("ephemeral")
-        });
-        let Some((_, node)) = node else {
-            continue;
-        };
-
-        // Read and compile the ephemeral model's raw SQL.
-        let raw_path = in_dir.join(&node.common().original_file_path);
-        let raw_sql = std::fs::read_to_string(&raw_path).map_err(|e| {
-            DbtTemporalError::Compilation(format!(
-                "reading ephemeral model '{}' at {}: {e}",
-                name,
-                raw_path.display()
-            ))
-        })?;
-
-        let compiled = jinja_env
-            .render_str(&raw_sql, node_context, &[])
-            .map_err(|e| {
-                DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e}"))
-            })?;
-
-        // Check for transitive ephemeral refs (ephemeral model referencing another ephemeral).
-        let transitive = extract_cte_names(&compiled);
-        if !transitive.is_empty() {
-            compile_ephemeral_ctes(
-                &transitive,
-                nodes,
-                jinja_env,
-                node_context,
-                in_dir,
-                cte_defs,
-                visited,
-            )?;
-        }
-
-        cte_defs.push((name.clone(), compiled));
-    }
-    Ok(())
 }
 
 /// Extract the test failure count from the ResultStore.
@@ -357,6 +385,109 @@ pub(super) fn json_to_minijinja(v: &serde_json::Value) -> minijinja::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_ephemeral_names_finds_each_unique_reference() {
+        let sql = "with __dbt__cte__alpha as (select 1), __dbt__cte__beta as (select 2)\n\
+                   select * from __dbt__cte__alpha join __dbt__cte__beta using(id)";
+        let names = extract_ephemeral_names(sql);
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn extract_ephemeral_names_returns_empty_when_absent() {
+        assert!(extract_ephemeral_names("select 1").is_empty());
+    }
+
+    #[test]
+    fn upstream_ephemeral_wrap_handles_user_with_clause() -> anyhow::Result<()> {
+        // Regression for the BigQuery `Expected keyword DEPTH` failure: when
+        // the user's compiled SQL starts with `WITH`, naively prepending the
+        // ephemeral CTEs (our old code) produced two `WITH` keywords in a row.
+        // BigQuery's parser then tried to read the second `WITH` as part of a
+        // recursive CTE's `... CYCLE ... DEPTH` clause and rejected it. The
+        // dbt-fusion helper wraps the user SQL in `select * from (...)` plus
+        // `--EPHEMERAL-SELECT-WRAPPER-START/END` markers so a leading user
+        // `WITH` becomes a valid subselect CTE list.
+        let dir = tempfile::tempdir()?;
+
+        // Simulate the persist step for a single ephemeral named `alpha` —
+        // mirrors what we do at runtime in `persist_ephemeral_chain`.
+        let mut spans = MacroSpans::default();
+        inject_and_persist_ephemeral_models(
+            "select 1 as k, 2 as v".to_string(),
+            &mut spans,
+            "alpha",
+            true,
+            dir.path(),
+        )
+        .map_err(|e| anyhow::anyhow!("persist alpha: {e:#}"))?;
+
+        let user_sql = "WITH user_cte AS (\n  SELECT k, v FROM __dbt__cte__alpha\n)\n\
+                        SELECT * FROM user_cte";
+        let mut user_spans = MacroSpans::default();
+        let wrapped = inject_and_persist_ephemeral_models(
+            user_sql.to_string(),
+            &mut user_spans,
+            "user_model",
+            false,
+            dir.path(),
+        )
+        .map_err(|e| anyhow::anyhow!("wrap user model: {e:#}"))?;
+
+        assert!(
+            wrapped.contains("--EPHEMERAL-SELECT-WRAPPER-START"),
+            "expected start marker; got:\n{wrapped}"
+        );
+        assert!(
+            wrapped.contains("--EPHEMERAL-SELECT-WRAPPER-END"),
+            "expected end marker; got:\n{wrapped}"
+        );
+        assert!(
+            wrapped.contains("__dbt__cte__alpha as (\nselect 1 as k, 2 as v\n)"),
+            "expected alpha to be inlined; got:\n{wrapped}"
+        );
+        assert!(
+            wrapped.contains("select * from (\nWITH user_cte AS"),
+            "expected user WITH wrapped in subselect; got:\n{wrapped}"
+        );
+        // The original two-WITH-in-a-row pathology: assert that the user
+        // `WITH` appears strictly *inside* the wrap, not as a sibling to the
+        // outer `with __dbt__cte__alpha ...`. The wrapper-start marker is the
+        // boundary; nothing before it should mention the user CTE.
+        let start_idx = wrapped
+            .find("--EPHEMERAL-SELECT-WRAPPER-START")
+            .ok_or_else(|| anyhow::anyhow!("start marker missing"))?;
+        let user_idx = wrapped
+            .find("WITH user_cte")
+            .ok_or_else(|| anyhow::anyhow!("user WITH missing"))?;
+        assert!(
+            user_idx > start_idx,
+            "user WITH must appear after the wrapper start; got:\n{wrapped}"
+        );
+        assert!(
+            !wrapped[..start_idx].contains("WITH user_cte"),
+            "user WITH must not appear before the wrapper start; got:\n{wrapped}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_ephemeral_wrap_is_noop_without_cte_references() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut spans = MacroSpans::default();
+        let plain = "select 1 as id".to_string();
+        let out = inject_and_persist_ephemeral_models(
+            plain.clone(),
+            &mut spans,
+            "user_model",
+            false,
+            dir.path(),
+        )
+        .map_err(|e| anyhow::anyhow!("noop wrap: {e:#}"))?;
+        assert_eq!(out, plain);
+        Ok(())
+    }
 
     #[test]
     fn extract_adapter_response_empty_store() {

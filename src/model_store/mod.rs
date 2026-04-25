@@ -41,10 +41,11 @@ fn scan_for_projects(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
 
     let mut projects: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("reading model store dir {}: {e}", dir.display()))?
+        .map_err(|e| anyhow::anyhow!("reading model store dir {}: {e:#}", dir.display()))?
     {
-        let entry = entry
-            .map_err(|e| anyhow::anyhow!("reading entry in model store {}: {e}", dir.display()))?;
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!("reading entry in model store {}: {e:#}", dir.display())
+        })?;
         let path = entry.path();
         if path.is_dir() && path.join("dbt_project.yml").exists() {
             projects.push(path);

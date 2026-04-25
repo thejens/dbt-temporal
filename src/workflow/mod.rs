@@ -26,8 +26,9 @@ use crate::types::{
 };
 
 use self::helpers::{
-    build_node_status_tree, build_retry_policy, cancelled_result, error_result, node_label,
-    set_node_status, short_activity_error, skipped_result, upsert_memo_state, upsert_node_status,
+    build_effective_env, build_node_status_tree, build_retry_policy, cancelled_result,
+    error_result, node_label, set_node_status, short_activity_error, skipped_result,
+    upsert_memo_state, upsert_node_status,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -76,7 +77,7 @@ impl DbtRunWorkflow {
             .await
             .map_err(|e| {
                 temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                    "plan_project activity failed: {e}"
+                    "plan_project activity failed: {e:#}"
                 ))
             })?;
 
@@ -88,7 +89,7 @@ impl DbtRunWorkflow {
                 .map(|(k, v)| {
                     let payload = v.as_json_payload().map_err(|e| {
                         temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                            "serializing search attribute '{k}' as JSON payload: {e}"
+                            "serializing search attribute '{k}' as JSON payload: {e:#}"
                         ))
                     })?;
                     Ok((k.clone(), payload))
@@ -119,7 +120,7 @@ impl DbtRunWorkflow {
             .await
             .map_err(|e| {
                 temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                    "resolve_config activity failed: {e}"
+                    "resolve_config activity failed: {e:#}"
                 ))
             })?;
         let hooks = project_config.hooks;
@@ -127,10 +128,11 @@ impl DbtRunWorkflow {
 
         let mut all_hook_errors = Vec::new();
 
-        // Effective env for this run: workflow input env, extended by pre_run hook extra_env.
-        // Used in NodeExecutionInput so execute_node picks it up for env_var() rendering
+        // Effective env for this run: workflow input env (with `_` set to the
+        // serialised input), extended by pre_run hook extra_env. Used in
+        // NodeExecutionInput so execute_node picks it up for env_var() rendering
         // and per-workflow adapter engine rebuilding (profiles.yml env_var() overrides).
-        let mut effective_env = input.env.clone();
+        let mut effective_env = build_effective_env(&input);
 
         // --- Pre-run hooks ---
         if !hooks.pre_run.is_empty() {
@@ -185,7 +187,7 @@ impl DbtRunWorkflow {
             .await
             .map_err(|e| {
                 temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                    "on-run-start hook failed: {e}"
+                    "on-run-start hook failed: {e:#}"
                 ))
             })?;
         }
@@ -290,6 +292,7 @@ impl DbtRunWorkflow {
                     project: plan.project.clone(),
                     env: effective_env.clone(),
                     target: input.target.clone(),
+                    command: input.command.clone(),
                 };
 
                 // Per-node labeling in Temporal UI: activity_id for event details,
@@ -408,7 +411,8 @@ impl DbtRunWorkflow {
                         had_failure = true;
                         failed_nodes.insert(unique_id.clone());
                         set_node_status(&mut node_status, &unique_id, NodeStatus::Error);
-                        all_results.push(error_result(&unique_id, format!("activity failed: {e}")));
+                        all_results
+                            .push(error_result(&unique_id, format!("activity failed: {e:#}")));
                     }
                 }
             }
@@ -464,7 +468,7 @@ impl DbtRunWorkflow {
                 .await
                 .map_err(|e| {
                     temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                        "store_artifacts activity failed: {e}"
+                        "store_artifacts activity failed: {e:#}"
                     ))
                 })?;
             let log_path = artifacts.log_path.clone();

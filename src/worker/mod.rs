@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_sdk::Worker;
-use temporalio_sdk_core::{CoreRuntime, RuntimeOptions, Url};
+use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 use tracing::info;
 
 use crate::activities::DbtActivities;
@@ -119,16 +119,19 @@ pub async fn connect_and_register(
     let runtime_options = RuntimeOptions::builder()
         .telemetry_options(telemetry_options)
         .build()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
     let runtime = CoreRuntime::new_assume_tokio(runtime_options)?;
 
     // Connect to Temporal (new Connection + Client API)
     let tls_options = temporal::build_tls_options(config)?;
-    let mut conn_opts = ConnectionOptions::new(
-        Url::parse(&config.temporal_address).context("parsing TEMPORAL_ADDRESS as URL")?,
-    )
-    .identity(format!("dbt-temporal-worker@{}", std::process::id()))
-    .build();
+    // Auto-prefix `http://` for scheme-less addresses to match the Temporal CLI's
+    // `--address localhost:7233` ergonomics. Without this, Url::parse rejects the
+    // bare host:port form with the misleading "target URL has no host" error.
+    let temporal_url = temporal::normalize_address(&config.temporal_address)
+        .context("parsing TEMPORAL_ADDRESS as URL")?;
+    let mut conn_opts = ConnectionOptions::new(temporal_url)
+        .identity(format!("dbt-temporal-worker@{}", std::process::id()))
+        .build();
 
     if let Some(tls) = tls_options {
         conn_opts.tls_options = Some(tls);
@@ -142,7 +145,7 @@ pub async fn connect_and_register(
         .context("connecting to Temporal server")?;
 
     let client = Client::new(connection, ClientOptions::new(&config.temporal_namespace).build())
-        .map_err(|e| anyhow::anyhow!("creating Temporal client: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("creating Temporal client: {e:#}"))?;
 
     // List registered search attributes so we can skip unregistered ones at runtime.
     let registered_attrs =
@@ -161,7 +164,7 @@ pub async fn connect_and_register(
     // Build worker options and create worker
     let worker_options = temporal::build_worker_options(config);
     let mut worker = Worker::new(&runtime, client, worker_options)
-        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e:#}"))?;
 
     // Register activities and workflow on the worker
     worker.register_activities(activities);
@@ -307,7 +310,7 @@ pub async fn initialize_project(
     let dbt_state =
         dbt_loader::load(&load_args, std::borrow::Cow::Borrowed(&invocation_args), None, &token)
             .await
-            .map_err(|e| anyhow::anyhow!("dbt load failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("dbt load failed: {e:#}"))?;
     let dbt_state = Arc::new(dbt_state);
 
     let project_name = dbt_state
@@ -338,7 +341,7 @@ pub async fn initialize_project(
         listener_factory,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("dbt resolve failed: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("dbt resolve failed: {e:#}"))?;
 
     let node_count = resolver_state.nodes.iter().count();
     info!(project = %project_name, nodes = node_count, "project resolved");

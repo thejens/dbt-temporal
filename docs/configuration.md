@@ -6,7 +6,7 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TEMPORAL_ADDRESS` | `http://localhost:7233` | Temporal server address (URL with protocol) |
+| `TEMPORAL_ADDRESS` | `http://localhost:7233` | Temporal server address. Accepts both `host:port` and full URLs; bare `host:port` is auto-prefixed with `http://`. |
 | `TEMPORAL_NAMESPACE` | `default` | Temporal namespace |
 | `TEMPORAL_TASK_QUEUE` | `dbt-tasks` | Task queue name |
 | `TEMPORAL_API_KEY` | - | API key for Temporal Cloud (sent as `Authorization: Bearer` header) |

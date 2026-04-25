@@ -28,7 +28,7 @@ pub fn apply_selectors(
         let tokens: Vec<String> = sel.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
             let expr = parse_model_specifiers(&tokens)
-                .map_err(|e| anyhow::anyhow!("invalid --select: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("invalid --select: {e:#}"))?;
             let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
             selected_ids.retain(|uid| matched.contains(uid.as_str()));
         }
@@ -38,7 +38,7 @@ pub fn apply_selectors(
         let tokens: Vec<String> = excl.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
             let expr = parse_model_specifiers(&tokens)
-                .map_err(|e| anyhow::anyhow!("invalid --exclude: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("invalid --exclude: {e:#}"))?;
             let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
             selected_ids.retain(|uid| !matched.contains(uid.as_str()));
         }

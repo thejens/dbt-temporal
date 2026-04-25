@@ -186,4 +186,34 @@ mod tests {
         assert!(matches_error_patterns("this has valid_pattern in it", &patterns));
         assert!(!matches_error_patterns("nothing matches", &patterns));
     }
+
+    #[test]
+    fn anyhow_alternate_format_preserves_chain_for_dbt_fusion_errors() {
+        // Regression: the worker used to wrap dbt-fusion errors with `: {e}`
+        // (Display), which prints only the outermost `anyhow::Error` message
+        // and discards the chained context — turning real failures like
+        // `dbt1001: Failed to read file <path>` into bare
+        // `Failed to read file: No such file or directory (os error 2)`.
+        // We now use `: {e:#}` (alternate Display) at every wrapping site so
+        // chains print as `outer: inner: deeper`. This test pins that
+        // contract: switching back to `{e}` would make it fail.
+        use anyhow::Context;
+        let inner: Result<(), std::io::Error> =
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing /path/to/file.sql"));
+        let Err(chained) = inner
+            .context("dbt1001: Failed to read file")
+            .context("dbt resolve failed")
+        else {
+            panic!("expected the chained Result to be Err");
+        };
+
+        let alt = format!("wrap: {chained:#}");
+        assert!(alt.contains("dbt resolve failed"), "got: {alt}");
+        assert!(alt.contains("dbt1001: Failed to read file"), "got: {alt}");
+        assert!(alt.contains("/path/to/file.sql"), "got: {alt}");
+
+        let basic = format!("wrap: {chained}");
+        assert!(basic.contains("dbt resolve failed"));
+        assert!(!basic.contains("/path/to/file.sql"), "got: {basic}");
+    }
 }

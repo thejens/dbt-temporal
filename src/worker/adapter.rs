@@ -27,7 +27,7 @@ pub fn build_adapter_engine(
 
     let mapping = db_config
         .to_mapping()
-        .map_err(|e| anyhow::anyhow!("failed to serialize db config: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to serialize db config: {e:#}"))?;
 
     let adapter_config = dbt_auth::AdapterConfig::new(mapping);
 

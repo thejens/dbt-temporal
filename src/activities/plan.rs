@@ -43,14 +43,7 @@ pub async fn plan_project_inner(
             if is_ephemeral {
                 return false;
             }
-            match input.command.as_str() {
-                "run" => matches!(rt, NodeType::Model),
-                "build" => matches!(
-                    rt,
-                    NodeType::Model | NodeType::Test | NodeType::Seed | NodeType::Snapshot
-                ),
-                _ => false,
-            }
+            command_includes_node_type(input.command.as_str(), rt)
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -172,6 +165,22 @@ pub async fn plan_project_inner(
     })
 }
 
+/// Decide whether a node of resource type `rt` belongs in the plan for `command`.
+///
+/// `compile` renders SQL templates without executing — seeds are CSV (no SQL),
+/// so they're excluded from compile to match `dbt compile` semantics. `run`
+/// matches dbt's "models only" default; `build` matches its full graph.
+fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
+    match command {
+        "run" => matches!(rt, NodeType::Model),
+        "build" => {
+            matches!(rt, NodeType::Model | NodeType::Test | NodeType::Seed | NodeType::Snapshot)
+        }
+        "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
+        _ => false,
+    }
+}
+
 /// Extract NodeInfo from Nodes for a given unique_id.
 fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Option<NodeInfo> {
     let node = nodes.get_node(unique_id)?;
@@ -191,4 +200,46 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
             .map(|(id, _)| id.clone())
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_command_only_includes_models() {
+        assert!(command_includes_node_type("run", NodeType::Model));
+        assert!(!command_includes_node_type("run", NodeType::Test));
+        assert!(!command_includes_node_type("run", NodeType::Seed));
+        assert!(!command_includes_node_type("run", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn build_command_includes_full_graph() {
+        for rt in [
+            NodeType::Model,
+            NodeType::Test,
+            NodeType::Seed,
+            NodeType::Snapshot,
+        ] {
+            assert!(command_includes_node_type("build", rt), "build should include {rt:?}");
+        }
+    }
+
+    #[test]
+    fn compile_command_includes_sql_nodes_but_not_seeds() {
+        // Regression: an earlier version returned false for any non-{run, build}
+        // command, producing "no nodes found for command 'compile'" on real projects.
+        assert!(command_includes_node_type("compile", NodeType::Model));
+        assert!(command_includes_node_type("compile", NodeType::Test));
+        assert!(command_includes_node_type("compile", NodeType::Snapshot));
+        // Seeds are CSV — there's no SQL to compile.
+        assert!(!command_includes_node_type("compile", NodeType::Seed));
+    }
+
+    #[test]
+    fn unknown_command_excludes_everything() {
+        assert!(!command_includes_node_type("freshness", NodeType::Model));
+        assert!(!command_includes_node_type("", NodeType::Model));
+    }
 }

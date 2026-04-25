@@ -2,9 +2,26 @@ use std::collections::BTreeMap;
 
 use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
 
-use crate::types::{ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig};
+use crate::types::{
+    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
+};
 
 use super::DbtRunWorkflow;
+
+/// Build the per-run effective env starting from `input.env` and exposing the
+/// workflow input itself as `_` (mirroring bash's `$_`) so models and macros
+/// can read the full payload via `env_var('_')`.
+///
+/// Always overrides any caller-supplied `_` because the only meaningful value
+/// here is the actual payload that started this workflow. `serde_json::to_string`
+/// is infallible on `DbtRunInput`.
+pub fn build_effective_env(input: &DbtRunInput) -> BTreeMap<String, String> {
+    let mut env = input.env.clone();
+    if let Ok(json) = serde_json::to_string(input) {
+        env.insert("_".to_string(), json);
+    }
+    env
+}
 
 /// Build the initial node status tree from the execution plan, with all nodes set to Pending.
 pub fn build_node_status_tree(plan: &ExecutionPlan) -> NodeStatusTree {
@@ -349,6 +366,78 @@ mod tests {
                 "DbtTemporalError::ProjectNotFound",
             ]
         );
+    }
+
+    #[test]
+    fn effective_env_carries_input_env_through() {
+        let input = DbtRunInput {
+            project: None,
+            command: "build".into(),
+            select: None,
+            exclude: None,
+            vars: BTreeMap::new(),
+            target: None,
+            full_refresh: false,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::from([("API_TOKEN".into(), "secret-123".into())]),
+        };
+        let env = build_effective_env(&input);
+        assert_eq!(env.get("API_TOKEN").map(String::as_str), Some("secret-123"));
+    }
+
+    #[test]
+    fn effective_env_injects_underscore_with_serialised_input() -> anyhow::Result<()> {
+        // Regression: the workflow exposes the full payload via env_var('_'),
+        // mirroring bash's `$_`. Macros parse this JSON to read the original
+        // command, so the field must round-trip the input verbatim.
+        let input = DbtRunInput {
+            project: Some("waffle".into()),
+            command: "compile".into(),
+            select: Some("+stg_customers".into()),
+            exclude: None,
+            vars: BTreeMap::from([("env_label".into(), serde_json::json!("dev"))]),
+            target: Some("dev".into()),
+            full_refresh: true,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::new(),
+        };
+        let env = build_effective_env(&input);
+        let underscore = env
+            .get("_")
+            .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;
+        let parsed: DbtRunInput = serde_json::from_str(underscore)?;
+        assert_eq!(parsed.command, "compile");
+        assert_eq!(parsed.project.as_deref(), Some("waffle"));
+        assert_eq!(parsed.select.as_deref(), Some("+stg_customers"));
+        assert!(parsed.full_refresh);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_env_overrides_caller_supplied_underscore() -> anyhow::Result<()> {
+        // The whole point of `_` is "the payload that started this workflow",
+        // so an explicit `_` in input.env must be replaced, not preserved.
+        let input = DbtRunInput {
+            project: None,
+            command: "run".into(),
+            select: None,
+            exclude: None,
+            vars: BTreeMap::new(),
+            target: None,
+            full_refresh: false,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::from([("_".into(), "garbage caller value".into())]),
+        };
+        let env = build_effective_env(&input);
+        let underscore = env
+            .get("_")
+            .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;
+        assert_ne!(underscore, "garbage caller value");
+        assert!(underscore.contains("\"command\":\"run\""));
+        Ok(())
     }
 
     #[test]

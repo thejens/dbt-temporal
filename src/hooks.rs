@@ -130,7 +130,8 @@ pub async fn execute_hooks(
                     );
                 }
                 Err(e) => {
-                    let error_msg = format!("fire-and-forget child workflow failed to start: {e}");
+                    let error_msg =
+                        format!("fire-and-forget child workflow failed to start: {e:#}");
                     match hook.on_error {
                         HookErrorMode::Fail => {
                             return Err(anyhow::anyhow!(
@@ -273,12 +274,12 @@ async fn run_child_workflow(
     let started = ctx
         .child_workflow(wf, input, opts)
         .await
-        .map_err(|e| anyhow::anyhow!("child workflow failed to start: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("child workflow failed to start: {e:#}"))?;
 
     let result = started
         .result()
         .await
-        .map_err(|e| anyhow::anyhow!("child workflow failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("child workflow failed: {e:#}"))?;
 
     let bytes = result.payloads.into_iter().next().map(|p| p.data);
     Ok(bytes)

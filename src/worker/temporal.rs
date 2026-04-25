@@ -4,10 +4,25 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use temporalio_common::worker::{WorkerDeploymentOptions, WorkerTaskTypes};
 use temporalio_sdk::WorkerOptions;
-use temporalio_sdk_core::{FixedSizeSlotSupplier, TunerBuilder, WorkerTuner};
+use temporalio_sdk_core::{FixedSizeSlotSupplier, TunerBuilder, Url, WorkerTuner};
 use tracing::info;
 
 use crate::config::{DbtTemporalConfig, WorkerTuningConfig};
+
+/// Parse a Temporal address, auto-prefixing `http://` for scheme-less inputs.
+///
+/// The Temporal CLI accepts the bare `host:port` form (`temporal --address
+/// localhost:7233 ...`), so users naturally try the same in `TEMPORAL_ADDRESS`.
+/// `Url::parse` rejects it with the cryptic "target URL has no host" error.
+/// Adding the scheme transparently matches the CLI's behaviour.
+pub fn normalize_address(address: &str) -> Result<Url> {
+    let normalized = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    Url::parse(&normalized).with_context(|| format!("invalid Temporal address: {address:?}"))
+}
 
 /// Build TLS options when connecting to Temporal Cloud or a TLS-enabled server.
 ///
@@ -193,5 +208,27 @@ mod tests {
             activity_max_slots: 300,
         };
         let _opts = build_worker_options(&config);
+    }
+
+    #[test]
+    fn normalize_address_adds_scheme_when_missing() -> Result<()> {
+        let url = normalize_address("localhost:7233")?;
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("localhost"));
+        assert_eq!(url.port(), Some(7233));
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_address_preserves_existing_scheme() -> Result<()> {
+        let url = normalize_address("https://example.com:7233")?;
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_address_rejects_garbage() {
+        assert!(normalize_address("").is_err());
     }
 }

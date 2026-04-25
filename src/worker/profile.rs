@@ -110,11 +110,11 @@ pub fn render_profile_with_env(
     let rendered = jinja_env
         .env
         .render_str(&raw, BTreeMap::<String, String>::new(), &[])
-        .map_err(|e| anyhow::anyhow!("rendering profiles.yml with env overrides: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("rendering profiles.yml with env overrides: {e:#}"))?;
 
     // Parse the rendered YAML.
     let yaml: dbt_yaml::Value = dbt_yaml::from_str(&rendered)
-        .map_err(|e| anyhow::anyhow!("parsing rendered profiles.yml: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("parsing rendered profiles.yml: {e:#}"))?;
 
     // Navigate: profile -> outputs -> target.
     let profile_val = yaml
@@ -131,7 +131,7 @@ pub fn render_profile_with_env(
 
     // Deserialize into DbConfig (tagged by `type` field).
     dbt_yaml::from_value(target_config.clone())
-        .map_err(|e| anyhow::anyhow!("deserializing db config for target '{target}': {e}"))
+        .map_err(|e| anyhow::anyhow!("deserializing db config for target '{target}': {e:#}"))
 }
 
 /// Check whether a profiles.yml file contains `env_var()` calls.

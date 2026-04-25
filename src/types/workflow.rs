@@ -95,6 +95,10 @@ pub struct NodeExecutionInput {
     /// Target override from workflow input — used for per-workflow adapter engine rebuilding.
     #[serde(default)]
     pub target: Option<String>,
+    /// Workflow command (`build`, `run`, `compile`). Mirrors `DbtRunInput.command`.
+    /// `compile` skips the materialization/execute phase and returns the compiled SQL only.
+    #[serde(default = "default_command")]
+    pub command: String,
 }
 
 /// Input to the run_project_hooks activity.

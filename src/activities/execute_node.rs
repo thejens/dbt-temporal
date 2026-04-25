@@ -177,23 +177,24 @@ async fn execute_node_inner(
     #[allow(unused_assignments, clippy::collection_is_never_read)]
     // _rebuild_guard is a drop guard, not read
     let mut _rebuild_guard = None;
-    let (adapter_engine, env_schema, env_database) = if !input.env.is_empty()
-        && state.profile_uses_env_vars
-    {
-        let result = crate::worker::rebuild_adapter_engine_with_env(
-            state,
-            input.target.as_deref(),
-            &input.env,
-        )
-        .map_err(|e| DbtTemporalError::Configuration(format!("rebuilding adapter engine: {e}")))?;
-        let engine = Arc::clone(&result.engine);
-        let schema = result.schema.clone();
-        let database = result.database.clone();
-        _rebuild_guard = Some(result);
-        (engine, Some(schema), Some(database))
-    } else {
-        (Arc::clone(&state.adapter_engine), None, None)
-    };
+    let (adapter_engine, env_schema, env_database) =
+        if !input.env.is_empty() && state.profile_uses_env_vars {
+            let result = crate::worker::rebuild_adapter_engine_with_env(
+                state,
+                input.target.as_deref(),
+                &input.env,
+            )
+            .map_err(|e| {
+                DbtTemporalError::Configuration(format!("rebuilding adapter engine: {e:#}"))
+            })?;
+            let engine = Arc::clone(&result.engine);
+            let schema = result.schema.clone();
+            let database = result.database.clone();
+            _rebuild_guard = Some(result);
+            (engine, Some(schema), Some(database))
+        } else {
+            (Arc::clone(&state.adapter_engine), None, None)
+        };
 
     let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
     let adapter = Arc::new(dbt_adapter::Adapter::new(
@@ -260,8 +261,16 @@ async fn execute_node_inner(
     // Create an ephemeral output dir for this activity so concurrent workflows
     // and cross-worker dispatch don't share target/.
     let temp_dir = tempfile::tempdir()
-        .map_err(|e| anyhow::anyhow!("failed to create temp dir for activity: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to create temp dir for activity: {e:#}"))?;
     let temp_out = temp_dir.path().to_path_buf();
+
+    // Per-activity ephemeral CTE persistence dir. dbt-fusion's
+    // `inject_and_persist_ephemeral_models` writes per-ephemeral cumulative CTE
+    // chains here; sharing the dir across activities would race on those files.
+    let ephemeral_dir = temp_dir.path().join("ephemeral");
+    std::fs::create_dir_all(&ephemeral_dir).map_err(|e| {
+        anyhow::anyhow!("creating ephemeral dir {}: {e:#}", ephemeral_dir.display())
+    })?;
 
     let node_path = common.path.to_string_lossy().to_string();
 
@@ -518,18 +527,28 @@ async fn execute_node_inner(
 
     match raw_sql_result {
         Ok(raw_sql) if !raw_sql.trim().is_empty() => {
-            let compiled = jinja_env
-                .render_str(&raw_sql, &node_context, &[])
-                .map_err(|e| {
-                    DbtTemporalError::Compilation(format!("compiling SQL for {unique_id}: {e}"))
-                })?;
+            // Use the model's original file path as the rendering filename so any
+            // Jinja error references the source file rather than `<unknown>`.
+            let render_filename = state.io_args.in_dir.join(&common.original_file_path);
+            let compiled = dbt_jinja_utils::utils::render_sql_with_listeners(
+                &raw_sql,
+                &jinja_env,
+                &node_context,
+                &[],
+                &render_filename,
+            )
+            .map_err(|e| {
+                DbtTemporalError::Compilation(format!("compiling SQL for {unique_id}: {e:#}"))
+            })?;
             // Inject ephemeral model CTEs (ref('ephemeral_model') → __dbt__cte__<name>).
             let compiled = inject_ephemeral_ctes(
                 &compiled,
+                &common.name,
                 &state.resolver_state.nodes,
                 &jinja_env,
                 &node_context,
                 &state.io_args.in_dir,
+                &ephemeral_dir,
             )?;
             // Patch ref() schemas in compiled SQL: ref() resolves to startup default schema,
             // but per-workflow env overrides may change the schema. Replace quoted occurrences
@@ -561,14 +580,14 @@ async fn execute_node_inner(
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     DbtTemporalError::Configuration(format!(
-                        "creating compiled SQL directory {}: {e}",
+                        "creating compiled SQL directory {}: {e:#}",
                         parent.display()
                     ))
                 })?;
             }
             std::fs::write(&dest, &compiled).map_err(|e| {
                 DbtTemporalError::Configuration(format!(
-                    "writing compiled SQL for {unique_id} to {}: {e}",
+                    "writing compiled SQL for {unique_id} to {}: {e:#}",
                     dest.display()
                 ))
             })?;
@@ -587,7 +606,7 @@ async fn execute_node_inner(
         Err((path, e)) => match rt {
             NodeType::Model | NodeType::Snapshot | NodeType::Test => {
                 return Err(DbtTemporalError::Compilation(format!(
-                    "reading raw SQL for {unique_id} at {}: {e}",
+                    "reading raw SQL for {unique_id} at {}: {e:#}",
                     path.display()
                 ))
                 .into());
@@ -606,6 +625,32 @@ async fn execute_node_inner(
     // Keep temp_dir alive until after rendering completes (dropped at end of scope).
 
     let compile_end = chrono::Utc::now();
+
+    // For `dbt compile`, stop here — render SQL but skip materialization and any
+    // adapter execution. The caller gets the compiled SQL via `compiled_code`.
+    if input.command == "compile" {
+        let compiled_code = node_context
+            .get("sql")
+            .and_then(|v| v.as_str().map(ToString::to_string));
+        let execution_time = start_instant.elapsed().as_secs_f64();
+        let compile_iso = compile_start.to_rfc3339();
+        let compile_end_iso = compile_end.to_rfc3339();
+        info!(node = %unique_id, time_secs = execution_time, "node compiled (compile-only)");
+        return Ok(NodeExecutionResult {
+            unique_id: unique_id.clone(),
+            status: "success".to_string(),
+            execution_time,
+            message: Some("compiled".to_string()),
+            adapter_response: BTreeMap::new(),
+            compiled_code,
+            timing: vec![TimingEntry {
+                name: "compile".to_string(),
+                started_at: compile_iso,
+                completed_at: compile_end_iso,
+            }],
+            failures: None,
+        });
+    }
 
     // --- EXECUTE PHASE ---
     let execute_start = chrono::Utc::now();
@@ -644,7 +689,7 @@ async fn execute_node_inner(
         .find_materialization_macro_by_name(&materialization)
         .map_err(|e| {
             DbtTemporalError::Compilation(format!(
-                "no materialization found for node {unique_id} (materialization={materialization}): {e}"
+                "no materialization found for node {unique_id} (materialization={materialization}): {e:#}"
             ))
         })?;
 

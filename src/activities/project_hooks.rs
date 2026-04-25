@@ -78,7 +78,7 @@ async fn run_project_hooks_inner(
         )
         .map_err(|e| {
             DbtTemporalError::Configuration(format!(
-                "rebuilding adapter engine for {}: {e}",
+                "rebuilding adapter engine for {}: {e:#}",
                 input.phase
             ))
         })?;
@@ -169,7 +169,7 @@ async fn run_project_hooks_inner(
 
         // Render — `run_query`/`statement`/`log` macros execute as a side effect.
         let rendered = jinja_env.render_str(raw_code, &context, &[]).map_err(|e| {
-            DbtTemporalError::Compilation(format!("{} hook[{idx}]: {e}", input.phase))
+            DbtTemporalError::Compilation(format!("{} hook[{idx}]: {e:#}", input.phase))
         })?;
 
         // If rendering produced non-empty SQL (e.g. raw `create table ...` strings),
@@ -181,7 +181,7 @@ async fn run_project_hooks_inner(
                 .execute_without_state(Some(&ctx), sql, false)
                 .map_err(|e| {
                     DbtTemporalError::Adapter(anyhow::anyhow!(
-                        "{} hook[{idx}] direct SQL failed: {e}",
+                        "{} hook[{idx}] direct SQL failed: {e:#}",
                         input.phase
                     ))
                 })?;

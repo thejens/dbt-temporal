@@ -2,9 +2,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
+use temporalio_common::UntypedWorkflow;
+use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
-use temporalio_common::protos::coresdk::child_workflow::child_workflow_result;
 use temporalio_common::protos::temporal::api::enums::v1::ParentClosePolicy;
+
 use temporalio_sdk::ChildWorkflowOptions;
 use tracing::{info, warn};
 
@@ -109,54 +111,56 @@ pub async fn execute_hooks(
 
         let opts = ChildWorkflowOptions {
             workflow_id,
-            workflow_type: hook.workflow_type.clone(),
             task_queue: Some(hook.task_queue.clone()),
-            input: input_payload,
             parent_close_policy,
             execution_timeout: Some(Duration::from_secs(timeout)),
             ..Default::default()
         };
+        let wf = UntypedWorkflow::new(&hook.workflow_type);
+        let raw_input = RawValue::new(input_payload);
 
         if hook.fire_and_forget {
-            // Start but don't await — the child runs independently.
-            let pending = ctx.child_workflow(opts).start().await;
-            if pending.into_started().is_none() {
-                let error_msg = "fire-and-forget child workflow failed to start".to_string();
-                match hook.on_error {
-                    HookErrorMode::Fail => {
-                        return Err(anyhow::anyhow!(
-                            "hook '{}' ({}) failed: {}",
-                            hook.workflow_type,
-                            payload.event,
-                            error_msg
-                        ));
-                    }
-                    HookErrorMode::Warn => {
-                        warn!(
-                            workflow_type = %hook.workflow_type,
-                            event = %payload.event,
-                            error = %error_msg,
-                            "fire-and-forget hook failed to start (continuing)"
-                        );
-                        outcome.errors.push(HookError {
-                            hook_workflow_type: hook.workflow_type.clone(),
-                            event: payload.event.clone(),
-                            error: error_msg,
-                        });
-                    }
-                    HookErrorMode::Ignore => {}
+            // Start but don't await result — the child runs independently.
+            match ctx.child_workflow(wf, raw_input, opts).await {
+                Ok(_started) => {
+                    info!(
+                        workflow_type = %hook.workflow_type,
+                        event = %payload.event,
+                        "fire-and-forget hook started"
+                    );
                 }
-            } else {
-                info!(
-                    workflow_type = %hook.workflow_type,
-                    event = %payload.event,
-                    "fire-and-forget hook started"
-                );
+                Err(e) => {
+                    let error_msg = format!("fire-and-forget child workflow failed to start: {e}");
+                    match hook.on_error {
+                        HookErrorMode::Fail => {
+                            return Err(anyhow::anyhow!(
+                                "hook '{}' ({}) failed: {}",
+                                hook.workflow_type,
+                                payload.event,
+                                error_msg
+                            ));
+                        }
+                        HookErrorMode::Warn => {
+                            warn!(
+                                workflow_type = %hook.workflow_type,
+                                event = %payload.event,
+                                error = %error_msg,
+                                "fire-and-forget hook failed to start (continuing)"
+                            );
+                            outcome.errors.push(HookError {
+                                hook_workflow_type: hook.workflow_type.clone(),
+                                event: payload.event.clone(),
+                                error: error_msg,
+                            });
+                        }
+                        HookErrorMode::Ignore => {}
+                    }
+                }
             }
             continue;
         }
 
-        let result = run_child_workflow(ctx, opts).await;
+        let result = run_child_workflow(ctx, wf, raw_input, opts).await;
 
         match result {
             Ok(completion_payload) => {
@@ -262,35 +266,22 @@ fn parse_skip_sentinel(bytes: &[u8]) -> Option<(bool, Option<String>)> {
 #[allow(clippy::future_not_send)] // WorkflowContext uses Rc internally.
 async fn run_child_workflow(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
+    wf: UntypedWorkflow,
+    input: RawValue,
     opts: ChildWorkflowOptions,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let pending = ctx.child_workflow(opts).start().await;
+    let started = ctx
+        .child_workflow(wf, input, opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("child workflow failed to start: {e}"))?;
 
-    let started = pending
-        .into_started()
-        .ok_or_else(|| anyhow::anyhow!("child workflow failed to start"))?;
+    let result = started
+        .result()
+        .await
+        .map_err(|e| anyhow::anyhow!("child workflow failed: {e}"))?;
 
-    let result = started.result().await;
-
-    match result.status {
-        Some(child_workflow_result::Status::Completed(success)) => {
-            let bytes = success.result.map(|p| p.data);
-            Ok(bytes)
-        }
-        Some(child_workflow_result::Status::Failed(f)) => {
-            let msg = f
-                .failure
-                .map_or_else(|| "unknown failure".to_string(), |f| f.message);
-            Err(anyhow::anyhow!("child workflow failed: {msg}"))
-        }
-        Some(child_workflow_result::Status::Cancelled(c)) => {
-            let msg = c
-                .failure
-                .map_or_else(|| "cancelled".to_string(), |f| f.message);
-            Err(anyhow::anyhow!("child workflow cancelled: {msg}"))
-        }
-        None => Err(anyhow::anyhow!("child workflow returned no status")),
-    }
+    let bytes = result.payloads.into_iter().next().map(|p| p.data);
+    Ok(bytes)
 }
 
 #[cfg(test)]

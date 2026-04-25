@@ -71,10 +71,7 @@ impl DbtRunWorkflow {
             .start_activity(
                 DbtActivities::plan_project,
                 input.clone(),
-                ActivityOptions {
-                    start_to_close_timeout: Some(Duration::from_secs(300)), // 5 min
-                    ..Default::default()
-                },
+                ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
             )
             .await
             .map_err(|e| {
@@ -100,6 +97,14 @@ impl DbtRunWorkflow {
             ctx.upsert_search_attributes(sa_payloads);
         }
 
+        ctx.set_current_details(format!(
+            "planned {} node{} across {} level{}",
+            plan.nodes.len(),
+            if plan.nodes.len() == 1 { "" } else { "s" },
+            plan.levels.len(),
+            if plan.levels.len() == 1 { "" } else { "s" },
+        ));
+
         // --- Resolve project config (hooks + retry) ---
         let resolve_input = ResolveConfigInput {
             project: Some(plan.project.clone()),
@@ -109,10 +114,7 @@ impl DbtRunWorkflow {
             .start_activity(
                 DbtActivities::resolve_config,
                 resolve_input,
-                ActivityOptions {
-                    start_to_close_timeout: Some(Duration::from_secs(10)),
-                    ..Default::default()
-                },
+                ActivityOptions::start_to_close_timeout(Duration::from_secs(10)),
             )
             .await
             .map_err(|e| {
@@ -267,10 +269,7 @@ impl DbtRunWorkflow {
                 };
 
                 // Per-node labeling in Temporal UI: activity_id for event details,
-                // summary for the Gantt chart display (appended after activity type).
-                // Note: summary encoding is broken in temporalio-sdk 0.1.0-alpha.1
-                // (binary/plain instead of json/plain) — shows "Decoding failed"
-                // in the UI. Fixed in https://github.com/temporalio/sdk-core/pull/1129
+                // summary for the Gantt chart display.
                 let node_label = plan.nodes.get(unique_id).map(|info| {
                     let rt = info
                         .resource_type
@@ -287,21 +286,35 @@ impl DbtRunWorkflow {
             // Must happen before start_activity calls which borrow ctx.
             upsert_memo_state(ctx, &node_status, &log_lines)?;
 
+            // Update workflow details with the currently executing models (visible in Temporal UI).
+            {
+                let running: Vec<&str> = nodes_to_schedule
+                    .iter()
+                    .filter_map(|(_, _, label)| label.as_deref())
+                    .collect();
+                if !running.is_empty() {
+                    ctx.set_current_details(format!(
+                        "level {}/{}: {}",
+                        level_idx + 1,
+                        plan.levels.len(),
+                        running.join(", ")
+                    ));
+                }
+            }
+
             // Second pass: schedule activities (borrows ctx immutably via futures).
             let mut futures = Vec::new();
             for (unique_id, node_input, node_label) in nodes_to_schedule {
                 let future = ctx.start_activity(
                     DbtActivities::execute_node,
                     node_input,
-                    ActivityOptions {
-                        activity_id: node_label.clone(),
-                        summary: node_label,
-                        start_to_close_timeout: Some(Duration::from_secs(3600)), // 1 hr
-                        heartbeat_timeout: Some(Duration::from_secs(300)),       // 5 min
-                        cancellation_type: ActivityCancellationType::TryCancel,
-                        retry_policy: Some(build_retry_policy(&retry_config)),
-                        ..Default::default()
-                    },
+                    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(3600))
+                        .heartbeat_timeout(Duration::from_secs(300))
+                        .maybe_activity_id(node_label.clone())
+                        .maybe_summary(node_label)
+                        .cancellation_type(ActivityCancellationType::TryCancel)
+                        .retry_policy(build_retry_policy(&retry_config))
+                        .build(),
                 );
 
                 futures.push((unique_id, future));
@@ -422,10 +435,7 @@ impl DbtRunWorkflow {
                 .start_activity(
                     DbtActivities::store_artifacts,
                     store_input,
-                    ActivityOptions {
-                        start_to_close_timeout: Some(Duration::from_secs(120)), // 2 min
-                        ..Default::default()
-                    },
+                    ActivityOptions::start_to_close_timeout(Duration::from_secs(120)),
                 )
                 .await
                 .map_err(|e| {

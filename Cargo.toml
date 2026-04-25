@@ -15,11 +15,11 @@ path = "src/lib.rs"
 
 [dependencies]
 # Temporal SDK
-temporalio-sdk = "0.2.0"
-temporalio-sdk-core = "0.2.0"
-temporalio-client = "0.2.0"
-temporalio-common = "0.2.0"
-temporalio-macros = "0.2.0"
+temporalio-sdk = "0.3.0"
+temporalio-sdk-core = "0.3.0"
+temporalio-client = "0.3.0"
+temporalio-common = "0.3.0"
+temporalio-macros = "0.3.0"
 
 # dbt-fusion (pinned to 2.0.0-preview.158, 2026-03-19)
 dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "24789794c453e44a0372bae2a6b9145b4ea5f5af" }
@@ -72,7 +72,7 @@ testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
-temporalio-sdk-core = { version = "0.2.0", features = ["ephemeral-server"] }
+temporalio-sdk-core = { version = "0.3.0", features = ["ephemeral-server"] }
 
 [lints.rust]
 unsafe_code = "deny"

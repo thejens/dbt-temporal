@@ -5,15 +5,13 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 ![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
 
 > **Status**: Not production-ready. dbt-temporal depends on
-> [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), which is in preview, and
-> the [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.1.0-alpha.1`),
-> which is pre-1.0. Several
-> [workarounds](docs/workarounds.md) are needed to make the dbt-fusion engine
-> work in a long-lived worker context. This project will not be production-ready
-> until at least dbt-fusion reaches GA (target: April 2026). Until then,
-> consider this a proof of concept — perhaps it will always be just that, given
-> it is largely developed by [Claude Code](https://claude.ai/claude-code) and
-> there are no guarantees of code quality.
+> [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), which is still in preview
+> (2.0.0-preview.174 as of April 2026), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.3.0`), which is
+> pre-1.0. Several [workarounds](docs/workarounds.md) are needed to make the
+> dbt-fusion engine work in a long-lived worker context. Consider this a proof of
+> concept — largely developed by [Claude Code](https://claude.ai/claude-code) with
+> no guarantees of code quality.
 
 > **License**: dbt-temporal itself is [MIT-licensed](LICENSE). Its two main
 > dependencies have their own licenses — see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)

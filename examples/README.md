@@ -882,7 +882,7 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 | Adapter | Status | Notes |
 |---------|--------|-------|
-| **Postgres** | Supported | Used by all non-BigQuery examples. Uses the ADBC PostgreSQL driver built from source (see `docs/workarounds.md#5-adbc-postgresql-driver-built-from-source-macos-arm64` for macOS build notes). |
+| **Postgres** | Supported | Used by all non-BigQuery examples. Uses the ADBC PostgreSQL driver built from source (see `docs/workarounds.md#3-adbc-postgresql-driver-built-from-source-macos-arm64` for macOS build notes). |
 | **BigQuery** | Supported | OAuth (application default credentials). The `bigquery/` example uses BigQuery. |
 | **Snowflake** | Untested | dbt-fusion has Snowflake adapter code but it has not been validated with dbt-temporal. |
 | **Redshift** | Untested | Not validated. |

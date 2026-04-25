@@ -7,6 +7,9 @@ clean-targets:
   - target
   - dbt_packages
 
+on-run-start:
+  - "{{ log('dbt-temporal: starting run', info=True) }}"
+
 on-run-end:
   - "{{ log_run_results() }}"
 

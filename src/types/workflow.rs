@@ -61,6 +61,12 @@ pub struct ExecutionPlan {
     /// Whether artifact writing is enabled for this run.
     #[serde(default)]
     pub write_artifacts: bool,
+    /// Whether dbt_project.yml (or any loaded package) defines on-run-start hooks.
+    #[serde(default)]
+    pub has_on_run_start: bool,
+    /// Whether dbt_project.yml (or any loaded package) defines on-run-end hooks.
+    #[serde(default)]
+    pub has_on_run_end: bool,
 }
 
 /// Metadata about a single dbt node.
@@ -89,6 +95,27 @@ pub struct NodeExecutionInput {
     /// Target override from workflow input — used for per-workflow adapter engine rebuilding.
     #[serde(default)]
     pub target: Option<String>,
+}
+
+/// Input to the run_project_hooks activity.
+///
+/// One activity invocation runs all hooks for a single phase
+/// (`on_run_start` or `on_run_end`) sequentially.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectHooksInput {
+    /// Hook phase: "on_run_start" or "on_run_end".
+    pub phase: String,
+    pub project: String,
+    pub invocation_id: String,
+    /// Per-workflow environment variable overrides for `env_var()` rendering.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Target override — used for per-workflow adapter engine rebuilding.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Node results for `on_run_end` (empty for `on_run_start`).
+    #[serde(default)]
+    pub node_results: Vec<NodeExecutionResult>,
 }
 
 /// Result of executing a single node.

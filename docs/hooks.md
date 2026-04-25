@@ -1,4 +1,72 @@
-# Lifecycle Hooks
+# Hooks
+
+dbt-temporal supports two distinct kinds of hooks:
+
+| Kind | Defined in | What runs | When |
+|---|---|---|---|
+| **dbt project hooks** | `dbt_project.yml` | Jinja templates that render to SQL (or have side effects via `run_query`/`log`) | `on-run-start`, `on-run-end`, plus per-model `pre-hook` / `post-hook` |
+| **dbt-temporal lifecycle hooks** | `dbt_temporal.yml` (or workflow input) | Arbitrary Temporal child workflows (any language) | `pre_run`, `on_success`, `on_failure` |
+
+The two are complementary. dbt project hooks are evaluated by dbt-fusion's Jinja engine in the same context as your models — they share `target`, `env`, `execute`, macros, and the warehouse adapter. dbt-temporal lifecycle hooks fan out to child workflows and are how you wire dbt runs into the rest of your platform (notifications, catalog updates, conditional skipping, credential resolution).
+
+---
+
+# dbt project hooks
+
+Hooks defined in `dbt_project.yml`. These are standard dbt hooks and behave like they do under dbt-core.
+
+| Event | Source | When it fires | Jinja context |
+|---|---|---|---|
+| `on-run-start` | `dbt_project.yml` (root or any package) | After planning, before any node executes | base context + `execute=true` |
+| `on-run-end` | `dbt_project.yml` (root or any package) | After all nodes complete and artifacts are stored, regardless of success | base context + `execute=true` + `results` |
+| `pre-hook` | model `config(pre_hook=…)` or `dbt_project.yml` `+pre-hook` | Inside each model's materialization, before the main SQL | full model context |
+| `post-hook` | model `config(post_hook=…)` or `dbt_project.yml` `+post-hook` | Inside each model's materialization, after the main SQL | full model context |
+
+**`pre-hook` / `post-hook`** are handled transparently by dbt-fusion's materialization templates — they're called from inside the materialization macro via `{{ run_hooks(pre_hooks) }}` / `{{ run_hooks(post_hooks) }}`. No dbt-temporal-specific configuration is required.
+
+**`on-run-start` / `on-run-end`** are executed as a dedicated Temporal activity (`run_project_hooks`) once per phase, after planning and after artifact storage respectively. The activity:
+
+- Builds the standard compile+run Jinja context (so `ref`, `source`, `log`, `target`, `env`, custom macros, and the adapter are all available).
+- Adds `execute=true` as a Jinja **global** so cross-template macros that check `{% if execute %}` work correctly.
+- For `on-run-end`, populates the `results` Jinja list — each entry has `unique_id`, `status`, `execution_time`, `message`, `failures`, `adapter_response`, and a `node` sub-object with `unique_id`, `name`, `resource_type`, `package_name`. This matches dbt-core's shape, so existing community macros like `log_run_results(results)` work unchanged.
+- Renders each hook template with `jinja_env.render_str(...)`. Side-effect macros (`run_query`, `statement`, `log`) execute against the warehouse during rendering. If the rendered output is non-empty SQL, it's executed directly via the adapter.
+
+Per-workflow `env` overrides apply: the activity rebuilds the adapter engine if `profiles.yml` uses `env_var()` and the workflow input set `env`, and patches `target.schema` / `target.database` accordingly. Hooks therefore see the same per-workflow connection as the models do.
+
+**Failure semantics:**
+- `on-run-start` failure aborts the workflow — no nodes execute.
+- `on-run-end` failure is non-fatal: the error is logged and recorded in `DbtRunOutput.hook_errors`, but the run's `success` status is unchanged.
+- Cancellation skips both `store_artifacts` and `on-run-end`, matching the existing artifact behavior.
+
+**Example** (`dbt_project.yml` + a custom macro):
+
+```yaml
+# dbt_project.yml
+on-run-start:
+  - "{{ log('starting dbt run', info=True) }}"
+on-run-end:
+  - "{{ log_run_results(results) }}"
+```
+
+```sql
+-- macros/log_run_results.sql
+{% macro log_run_results(results) %}
+  {% if execute and results %}
+    {% set ns = namespace(pass=0, error=0) %}
+    {% for r in results %}
+      {% if r.status == 'success' %}{% set ns.pass = ns.pass + 1 %}{% endif %}
+      {% if r.status == 'error' %}{% set ns.error = ns.error + 1 %}{% endif %}
+    {% endfor %}
+    {{ log("PASS=" ~ ns.pass ~ " ERROR=" ~ ns.error, info=True) }}
+  {% endif %}
+{% endmacro %}
+```
+
+Hooks from any loaded package are merged into the same lists by dbt-fusion's resolver — no extra configuration is needed for package-level hooks.
+
+---
+
+# dbt-temporal lifecycle hooks
 
 Hooks let you run arbitrary Temporal workflows at specific points in the dbt run lifecycle. Each hook starts a child workflow, awaits its completion, and handles errors according to a configurable policy.
 

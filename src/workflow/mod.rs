@@ -21,7 +21,7 @@ use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
 use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookPayload, NodeExecutionInput,
-    NodeExecutionResult, NodeStatus, ResolveConfigInput, ResolvedProjectConfig,
+    NodeExecutionResult, NodeStatus, ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig,
     StoreArtifactsInput, StoreArtifactsOutput,
 };
 
@@ -164,6 +164,30 @@ impl DbtRunWorkflow {
                     return Err(temporalio_sdk::WorkflowTermination::failed(e));
                 }
             }
+        }
+
+        // --- on-run-start hooks (from dbt_project.yml) ---
+        // Failure aborts the workflow — no nodes execute if these fail.
+        if plan.has_on_run_start {
+            ctx.set_current_details("running on-run-start hooks".to_string());
+            ctx.start_activity(
+                DbtActivities::run_project_hooks,
+                ProjectHooksInput {
+                    phase: "on_run_start".to_string(),
+                    project: plan.project.clone(),
+                    invocation_id: plan.invocation_id.clone(),
+                    env: effective_env.clone(),
+                    target: input.target.clone(),
+                    node_results: vec![],
+                },
+                ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+            )
+            .await
+            .map_err(|e| {
+                temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
+                    "on-run-start hook failed: {e}"
+                ))
+            })?;
         }
 
         // Build the initial node status tree (all nodes pending) and store in memo.
@@ -448,6 +472,38 @@ impl DbtRunWorkflow {
         } else {
             (None, None)
         };
+
+        // --- on-run-end hooks (from dbt_project.yml) ---
+        // Always fires, even when the run failed (matches dbt-core behaviour).
+        // Failure is non-fatal: appended to hook_errors, doesn't change run outcome.
+        if plan.has_on_run_end {
+            ctx.set_current_details("running on-run-end hooks".to_string());
+            match ctx
+                .start_activity(
+                    DbtActivities::run_project_hooks,
+                    ProjectHooksInput {
+                        phase: "on_run_end".to_string(),
+                        project: plan.project.clone(),
+                        invocation_id: plan.invocation_id.clone(),
+                        env: effective_env.clone(),
+                        target: input.target.clone(),
+                        node_results: all_results.clone(),
+                    },
+                    ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "on-run-end hook failed (non-fatal)");
+                    all_hook_errors.push(crate::types::HookError {
+                        hook_workflow_type: "on_run_end".to_string(),
+                        event: "on_run_end".to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
 
         // --- Build output (before post-hooks, since hooks receive it) ---
         let mut success = !had_failure;

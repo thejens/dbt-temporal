@@ -38,7 +38,7 @@ flowchart TD
 - **Parallel DAG execution** — nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors
 - **Multi-project** — load multiple dbt projects into one worker; select which to run per workflow invocation
 - **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
-- **Lifecycle hooks** — plug arbitrary Temporal workflows (in any language) at `pre_run`, `on_success`, and `on_failure` points for validation, notifications, catalog updates, or conditional execution
+- **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
 - **Per-workflow environment overrides** — each workflow can override `env_var()` values, including database connection settings, enabling parallel runs against different warehouses from a single worker
 - **Artifact storage** — write `run_results.json`, `manifest.json`, and a CLI-style run log to local disk, S3, or GCS
 - **Observability** — live node status in Temporal memos, per-node activity names in the Gantt chart, and custom search attributes for filtering

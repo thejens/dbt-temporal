@@ -155,6 +155,9 @@ pub async fn plan_project_inner(
         }
     }
 
+    let has_on_run_start = !state.resolver_state.operations.on_run_start.is_empty();
+    let has_on_run_end = !state.resolver_state.operations.on_run_end.is_empty();
+
     Ok(ExecutionPlan {
         project: state.project_name.clone(),
         levels,
@@ -164,6 +167,8 @@ pub async fn plan_project_inner(
         invocation_id,
         search_attributes,
         write_artifacts,
+        has_on_run_start,
+        has_on_run_end,
     })
 }
 

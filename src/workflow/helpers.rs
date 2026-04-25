@@ -240,6 +240,8 @@ mod tests {
             invocation_id: "test-inv".to_string(),
             search_attributes: BTreeMap::new(),
             write_artifacts: false,
+            has_on_run_start: false,
+            has_on_run_end: false,
         }
     }
 

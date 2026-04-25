@@ -6,6 +6,7 @@ pub mod execute_node;
 pub mod node_helpers;
 pub mod node_serialization;
 pub mod plan;
+pub mod project_hooks;
 pub mod selectors;
 pub mod store_artifacts;
 
@@ -20,8 +21,8 @@ use crate::config::{
 };
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionInput, NodeExecutionResult, ResolveConfigInput,
-    ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
+    DbtRunInput, ExecutionPlan, NodeExecutionInput, NodeExecutionResult, ProjectHooksInput,
+    ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
 };
 
 /// Shared state for all dbt activities, replacing the old `app_data()` DI pattern.
@@ -91,5 +92,14 @@ impl DbtActivities {
     ) -> Result<ResolvedProjectConfig, ActivityError> {
         crate::hooks::resolve_config_impl(&self.registry, input)
             .map_err(|e| ActivityError::NonRetryable(e.into()))
+    }
+
+    #[activity(name = "run_project_hooks")]
+    pub async fn run_project_hooks(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        input: ProjectHooksInput,
+    ) -> Result<(), ActivityError> {
+        project_hooks::run_project_hooks_outer(&self, ctx, input).await
     }
 }

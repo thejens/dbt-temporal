@@ -278,6 +278,82 @@ pub fn extract_adapter_response(result_store: &ResultStore) -> BTreeMap<String, 
     response_map
 }
 
+/// Patch the `target` (and `env`) Jinja global with per-workflow schema/database.
+///
+/// The startup `target` global has the profile schema/database from worker init.
+/// When per-workflow env overrides change the profile (e.g. different schema via env_var()),
+/// all Jinja macros that access `target.schema` / `target.database` must see the new values.
+/// This includes `generate_schema_name`, `generate_database_name`, materialization templates,
+/// and any custom macros.
+pub(super) fn patch_target_global(
+    jinja_env: &mut dbt_jinja_utils::jinja_environment::JinjaEnv,
+    schema: &str,
+    database: &str,
+    target_name: Option<&str>,
+) {
+    // Extract current target as JSON, modify fields, re-inject as a native BTreeMap Value.
+    let target_json = jinja_env
+        .render_str("{{ target | tojson }}", BTreeMap::<String, minijinja::Value>::new(), &[])
+        .unwrap_or_default();
+
+    let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&target_json) else {
+        return;
+    };
+    let Some(obj) = json_val.as_object() else {
+        return;
+    };
+
+    let mut new_target: BTreeMap<String, minijinja::Value> = obj
+        .iter()
+        .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+        .collect();
+
+    new_target.insert("schema".to_string(), minijinja::Value::from(schema));
+    new_target.insert("database".to_string(), minijinja::Value::from(database));
+    if let Some(name) = target_name {
+        new_target.insert("name".to_string(), minijinja::Value::from(name));
+        new_target.insert("target_name".to_string(), minijinja::Value::from(name));
+    }
+
+    let val = minijinja::Value::from(new_target);
+    jinja_env.env.add_global("target", val.clone());
+    // In dbt, `env` is an alias for `target`.
+    jinja_env.env.add_global("env", val);
+}
+
+/// Convert a `serde_json::Value` to a native `minijinja::Value`.
+///
+/// Produces native minijinja types (Vec, BTreeMap) that support iteration,
+/// attribute access, and `.get()` in Jinja templates — unlike `from_serialize`
+/// which creates "plain objects" with limited Jinja interop.
+#[allow(clippy::option_if_let_else)]
+pub(super) fn json_to_minijinja(v: &serde_json::Value) -> minijinja::Value {
+    match v {
+        serde_json::Value::Null => minijinja::Value::from(()),
+        serde_json::Value::Bool(b) => minijinja::Value::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                minijinja::Value::from(i)
+            } else if let Some(f) = n.as_f64() {
+                minijinja::Value::from(f)
+            } else {
+                minijinja::Value::from(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => minijinja::Value::from(s.clone()),
+        serde_json::Value::Array(arr) => {
+            minijinja::Value::from(arr.iter().map(json_to_minijinja).collect::<Vec<_>>())
+        }
+        serde_json::Value::Object(obj) => {
+            let map: BTreeMap<String, minijinja::Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+                .collect();
+            minijinja::Value::from(map)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -602,6 +602,97 @@ pub fn print_results(output: &DbtRunOutput) {
     }
 }
 
+/// Like `test_config` but also returns the generated Postgres schema name.
+///
+/// Useful when tests need to query Postgres directly to verify side-effects
+/// (e.g. rows written by on-run-start / on-run-end hooks).
+pub fn test_config_with_schema(
+    infra: &SharedInfra,
+    fixture_dir: &Path,
+) -> Result<(DbtTemporalConfig, String)> {
+    let schema = create_test_schema(infra);
+    let profiles_dir = std::env::temp_dir().join(format!("dbtt-profiles-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&profiles_dir).context("creating profiles dir")?;
+
+    let profiles_yml = format!(
+        r#"waffle_hut:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{}"
+      port: {}
+      user: "{}"
+      password: "{}"
+      dbname: "{}"
+      schema: "{schema}"
+      threads: 1
+"#,
+        infra.pg_host, infra.pg_port, infra.pg_user, infra.pg_password, infra.pg_database,
+    );
+    std::fs::write(profiles_dir.join("profiles.yml"), profiles_yml)
+        .context("writing profiles.yml")?;
+
+    let artifact_dir =
+        std::env::temp_dir().join(format!("dbtt-artifacts-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&artifact_dir).ok();
+
+    let config = DbtTemporalConfig {
+        temporal_address: format!("http://{}", infra.temporal_addr),
+        temporal_namespace: "default".to_string(),
+        temporal_task_queue: format!("test-{}", uuid::Uuid::new_v4()),
+        temporal_api_key: None,
+        temporal_tls_cert: None,
+        temporal_tls_key: None,
+        dbt_project_dirs: vec![fixture_dir.to_string_lossy().to_string()],
+        dbt_profiles_dir: Some(profiles_dir.to_string_lossy().to_string()),
+        dbt_target: None,
+        health_file: None,
+        health_port: None,
+        write_artifacts: false,
+        artifact_store: artifact_dir.to_string_lossy().to_string(),
+        search_attributes: std::collections::BTreeMap::default(),
+        write_run_log: false,
+        worker_tuning: dbt_temporal::config::WorkerTuningConfig::Fixed {
+            max_concurrent_workflow_tasks: 200,
+            max_concurrent_activities: 4,
+            max_concurrent_local_activities: 4,
+        },
+        sticky_queue_timeout_secs: 10,
+        nonsticky_to_sticky_poll_ratio: 0.2,
+        max_worker_activities_per_second: None,
+        max_task_queue_activities_per_second: None,
+        graceful_shutdown_secs: None,
+        max_cached_workflows: 1000,
+    };
+
+    Ok((config, schema))
+}
+
+/// Run a SQL query via `psql` and return stdout (unaligned, tuples only).
+///
+/// Uses `-t -A` flags: no header row, columns separated by `|`. Suitable for
+/// simple assertions on query results without pulling in a Postgres client crate.
+pub fn psql_query(infra: &SharedInfra, sql: &str) -> String {
+    let output = std::process::Command::new("psql")
+        .arg("-h")
+        .arg(&infra.pg_host)
+        .arg("-p")
+        .arg(infra.pg_port.to_string())
+        .arg("-U")
+        .arg(&infra.pg_user)
+        .arg("-d")
+        .arg(&infra.pg_database)
+        .arg("-t") // tuples only (no header)
+        .arg("-A") // unaligned output
+        .arg("-c")
+        .arg(sql)
+        .env("PGPASSWORD", &infra.pg_password)
+        .output()
+        .expect("psql should be available");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 /// Run a workflow that is expected to fail and extract node status from the memo.
 pub async fn run_dbt_workflow_expect_failure(
     client: &mut Client,

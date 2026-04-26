@@ -247,3 +247,63 @@ async fn test_select_exclude() -> Result<()> {
     worker_abort.notify_one();
     test_result
 }
+
+/// `dbt compile` early-returns from execute_node before materialization, exercising
+/// the compile-only branch (sets compiled_code without touching the warehouse).
+#[tokio::test(flavor = "current_thread")]
+async fn test_dbt_compile() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = fixture_path("waffle_hut");
+    let config = test_config(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            () = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let test_result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let client = connect_client(&infra.temporal_addr).await?;
+            let run =
+                run_dbt_workflow(&client, &task_queue, make_input("compile", None, None, false))
+                    .await?;
+            let output = &run.output;
+            print_results(output);
+
+            assert!(output.success, "compile should succeed");
+            let model_results: Vec<_> = output
+                .node_results
+                .iter()
+                .filter(|r| r.unique_id.starts_with("model."))
+                .collect();
+            assert_eq!(model_results.len(), 5, "all 5 models should be compiled");
+            for r in &model_results {
+                assert_eq!(r.status, NodeStatus::Success);
+                assert!(r.compiled_code.is_some(), "{} missing compiled_code", r.unique_id);
+                assert_eq!(
+                    r.message.as_deref(),
+                    Some("compiled"),
+                    "compile mode should report 'compiled' message"
+                );
+            }
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    test_result
+}

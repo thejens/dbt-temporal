@@ -39,6 +39,23 @@ fn echo_hook(
     }
 }
 
+/// Variant of `echo_hook` with `fire_and_forget: true` (parent does not await
+/// child completion).
+fn fire_and_forget_hook(
+    task_queue: &str,
+    on_error: HookErrorMode,
+    return_value: serde_json::Value,
+) -> HookConfig {
+    HookConfig {
+        workflow_type: "hook_echo".to_string(),
+        task_queue: task_queue.to_string(),
+        timeout_secs: Some(30),
+        on_error,
+        input: Some(return_value),
+        fire_and_forget: true,
+    }
+}
+
 /// Outcome of running a dbt workflow under a paired hook worker.
 #[allow(clippy::large_enum_variant)] // test-only; size of DbtRunOutput is fine here.
 enum RunOutcome {
@@ -260,5 +277,37 @@ async fn test_on_success_ignore_silent() -> Result<()> {
 
     assert!(output.success);
     assert!(output.hook_errors.is_empty(), "ignore mode must not collect errors");
+    Ok(())
+}
+
+/// Fire-and-forget on_success hook → workflow does not await child completion,
+/// run reports success regardless of the (unobserved) child outcome.
+/// Exercises the `if hook.fire_and_forget { ... }` branch of `execute_hooks`.
+#[tokio::test(flavor = "current_thread")]
+async fn test_on_success_fire_and_forget_does_not_block() -> Result<()> {
+    init_tracing();
+    let queue = hook_queue();
+
+    let mut hooks = HooksConfig::default();
+    // Even with a deliberately failing child payload, fire-and-forget must not
+    // surface the failure into hook_errors — the parent does not await.
+    hooks.on_success.push(fire_and_forget_hook(
+        &queue,
+        HookErrorMode::Warn,
+        serde_json::json!({"error": "ignored-by-parent"}),
+    ));
+
+    let mut input = make_input("run", Some("+customers"), None, false);
+    input.hooks = Some(hooks);
+
+    let RunOutcome::Ok(output) = run_with_hook_worker(input, &queue).await? else {
+        anyhow::bail!("expected workflow to succeed");
+    };
+
+    assert!(output.success, "fire-and-forget hook must not affect parent success");
+    assert!(
+        output.hook_errors.is_empty(),
+        "parent does not observe fire-and-forget child outcome"
+    );
     Ok(())
 }

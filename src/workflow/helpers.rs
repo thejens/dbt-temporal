@@ -249,6 +249,101 @@ pub fn mark_remaining_level_as_cancelled(
     }
 }
 
+/// Build the per-node Temporal activity label (used for both `activity_id`
+/// and `summary` in the UI). Pure — uses only the plan's nodemap.
+///
+/// Format: `<resource_type>:<name>` with the proto enum prefix stripped, so
+/// `NODE_TYPE_MODEL` → `model`. Returns `None` when the id isn't in the plan,
+/// matching the behaviour of `start_activity` (no label).
+pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<String> {
+    plan.nodes.get(unique_id).map(|info| {
+        let rt = info
+            .resource_type
+            .strip_prefix("NODE_TYPE_")
+            .unwrap_or(&info.resource_type)
+            .to_ascii_lowercase();
+        format!("{rt}:{}", info.name)
+    })
+}
+
+/// True if `unique_id` has any upstream dependency in `failed_nodes`. Used by
+/// the per-level scheduler to skip a node whose upstream model failed.
+pub fn is_blocked_by_failed_upstream(
+    plan: &ExecutionPlan,
+    unique_id: &str,
+    failed_nodes: &std::collections::BTreeSet<String>,
+) -> bool {
+    plan.nodes
+        .get(unique_id)
+        .is_some_and(|info| info.depends_on.iter().any(|dep| failed_nodes.contains(dep)))
+}
+
+/// Classify the result status from an activity completion. The level scheduler
+/// treats anything that isn't an explicit `Error` or `Skipped` as a success
+/// for log/memo purposes — the activity may have produced a richer status
+/// internally but we're only interested in the success/error/skip trichotomy.
+pub const fn classify_result_status(status: NodeStatus) -> NodeStatus {
+    match status {
+        NodeStatus::Error => NodeStatus::Error,
+        NodeStatus::Skipped => NodeStatus::Skipped,
+        _ => NodeStatus::Success,
+    }
+}
+
+/// Format the right-hand side `[tag]` of a per-node log line — the bit after
+/// `<package>.<name>  `. Pure; the caller wraps it in the brackets.
+pub fn format_result_tag(status: NodeStatus, message: Option<&str>, execution_time: f64) -> String {
+    match status {
+        NodeStatus::Success => {
+            let detail = message.unwrap_or("OK");
+            format!("{detail} in {execution_time:.2}s")
+        }
+        NodeStatus::Error => {
+            let msg = message.unwrap_or("error");
+            format!("ERROR {msg}")
+        }
+        NodeStatus::Skipped => "SKIP".to_string(),
+        // Pending / Running / Cancelled never appear on the result-tag path
+        // (results are only built from completed activities), so the Debug
+        // form is just a defensive default.
+        _ => format!("{status:?}"),
+    }
+}
+
+/// "1 of 17 START stg_customers" log lines. The verb is the only thing that
+/// changes between START and SKIP — extract once so the formatting stays in
+/// one place.
+pub fn format_progress_line(num: usize, total: usize, verb: &str, label: &str) -> String {
+    format!("{num} of {total} {verb} {label}")
+}
+
+/// Build the workflow-detail line shown in the Temporal UI while a level is
+/// running, e.g. "level 3/8: model:stg_customers, model:stg_orders".
+pub fn format_running_details(level_idx: usize, total_levels: usize, running: &[&str]) -> String {
+    format!("level {}/{}: {}", level_idx + 1, total_levels, running.join(", "))
+}
+
+/// Decide whether to flush the memo at the end of a level.
+///
+/// Always flushes on a level that just had a failure (operators want failure
+/// visibility quickly) or on a periodic boundary. The last level is left to
+/// the orchestrator's terminal flush so we don't double-write.
+pub const fn should_flush_memo(
+    level_idx: usize,
+    total_levels: usize,
+    level_had_failure: bool,
+    periodic_every_n: usize,
+) -> bool {
+    let is_last = level_idx == total_levels.saturating_sub(1);
+    if is_last {
+        return false;
+    }
+    if level_had_failure {
+        return true;
+    }
+    (level_idx + 1).is_multiple_of(periodic_every_n)
+}
+
 /// Build a human-readable label for a node, e.g. "table model waffle_hut.stg_customers".
 pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     plan.nodes.get(unique_id).map_or_else(
@@ -758,5 +853,158 @@ mod tests {
         let short = short_activity_error(&err);
         assert_eq!(short.len(), 200);
         assert!(!short.ends_with("..."));
+    }
+
+    // --- format_activity_label ---
+
+    #[test]
+    fn format_activity_label_strips_node_type_prefix_and_lowercases() {
+        let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
+        // test_plan sets resource_type to "model"; format_activity_label expects
+        // raw proto strings ("NODE_TYPE_MODEL"). Patch the entry to mirror the
+        // shape that the planner produces.
+        let mut plan = plan;
+        plan.nodes.get_mut("model.waffle.m1").unwrap().resource_type =
+            "NODE_TYPE_MODEL".to_string();
+        assert_eq!(format_activity_label(&plan, "model.waffle.m1"), Some("model:m1".to_string()));
+    }
+
+    #[test]
+    fn format_activity_label_passes_unknown_types_through_lowercase() {
+        let plan = test_plan(vec![vec!["t1"]], &[("t1", None, vec![])]);
+        let mut plan = plan;
+        plan.nodes.get_mut("model.waffle.t1").unwrap().resource_type = "Test".to_string();
+        // No NODE_TYPE_ prefix — the raw value is just lowercased.
+        assert_eq!(format_activity_label(&plan, "model.waffle.t1"), Some("test:t1".to_string()));
+    }
+
+    #[test]
+    fn format_activity_label_returns_none_for_unknown_id() {
+        let plan = test_plan(vec![vec!["m1"]], &[("m1", None, vec![])]);
+        assert!(format_activity_label(&plan, "model.waffle.nope").is_none());
+    }
+
+    // --- is_blocked_by_failed_upstream ---
+
+    #[test]
+    fn is_blocked_by_failed_upstream_true_when_any_dep_failed() {
+        let plan = test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_false_when_no_dep_failed() {
+        let plan = test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
+        let failed = std::collections::BTreeSet::new();
+        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_false_for_unknown_id() {
+        let plan = test_plan(vec![vec!["a"]], &[("a", None, vec![])]);
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        // An id that isn't in the plan can't be blocked — the level loop will
+        // simply skip it. Returning false here keeps the contract coherent.
+        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.nope", &failed));
+    }
+
+    // --- classify_result_status ---
+
+    #[test]
+    fn classify_result_status_collapses_to_three_terminals() {
+        assert_eq!(classify_result_status(NodeStatus::Error), NodeStatus::Error);
+        assert_eq!(classify_result_status(NodeStatus::Skipped), NodeStatus::Skipped);
+        // All other variants — including Pending/Running/Cancelled/Success —
+        // collapse to Success on the result-collection path.
+        assert_eq!(classify_result_status(NodeStatus::Success), NodeStatus::Success);
+        assert_eq!(classify_result_status(NodeStatus::Pending), NodeStatus::Success);
+        assert_eq!(classify_result_status(NodeStatus::Running), NodeStatus::Success);
+        assert_eq!(classify_result_status(NodeStatus::Cancelled), NodeStatus::Success);
+    }
+
+    // --- format_result_tag ---
+
+    #[test]
+    fn format_result_tag_success_uses_message_or_ok_default() {
+        assert_eq!(
+            format_result_tag(NodeStatus::Success, Some("CREATE TABLE (4 rows)"), 1.234),
+            "CREATE TABLE (4 rows) in 1.23s"
+        );
+        assert_eq!(format_result_tag(NodeStatus::Success, None, 0.05), "OK in 0.05s");
+    }
+
+    #[test]
+    fn format_result_tag_error_includes_message_or_default() {
+        assert_eq!(
+            format_result_tag(NodeStatus::Error, Some("permission denied"), 0.1),
+            "ERROR permission denied"
+        );
+        assert_eq!(format_result_tag(NodeStatus::Error, None, 0.0), "ERROR error");
+    }
+
+    #[test]
+    fn format_result_tag_skipped_is_constant() {
+        assert_eq!(format_result_tag(NodeStatus::Skipped, Some("ignored"), 9.0), "SKIP");
+    }
+
+    // --- format_progress_line ---
+
+    #[test]
+    fn format_progress_line_renders_dbt_style() {
+        assert_eq!(
+            format_progress_line(3, 17, "START", "model waffle.stg_customers"),
+            "3 of 17 START model waffle.stg_customers"
+        );
+        assert_eq!(format_progress_line(1, 1, "SKIP", "x"), "1 of 1 SKIP x");
+    }
+
+    // --- format_running_details ---
+
+    #[test]
+    fn format_running_details_one_indexes_level_and_joins_running() {
+        // level_idx is zero-based but the UI shows 1-based.
+        assert_eq!(
+            format_running_details(2, 5, &["model:a", "model:b"]),
+            "level 3/5: model:a, model:b"
+        );
+    }
+
+    #[test]
+    fn format_running_details_handles_empty_running() {
+        assert_eq!(format_running_details(0, 1, &[]), "level 1/1: ");
+    }
+
+    // --- should_flush_memo ---
+
+    #[test]
+    fn should_flush_memo_skips_last_level() {
+        // Last level (idx == total - 1) is always handled by the orchestrator's
+        // terminal flush; we must not double-write here even on failure.
+        assert!(!should_flush_memo(2, 3, true, 10));
+        assert!(!should_flush_memo(0, 1, true, 10));
+    }
+
+    #[test]
+    fn should_flush_memo_flushes_on_failure_in_intermediate_levels() {
+        assert!(should_flush_memo(0, 3, true, 10));
+        assert!(should_flush_memo(1, 3, true, 10));
+    }
+
+    #[test]
+    fn should_flush_memo_flushes_on_periodic_boundary() {
+        // Every 5th level on a 20-level run, intermediate (not last).
+        assert!(should_flush_memo(4, 20, false, 5));
+        assert!(should_flush_memo(9, 20, false, 5));
+        assert!(!should_flush_memo(0, 20, false, 5));
+        assert!(!should_flush_memo(3, 20, false, 5));
+    }
+
+    #[test]
+    fn should_flush_memo_handles_zero_level_count() {
+        // Empty plan — nothing to flush. saturating_sub keeps the math safe.
+        assert!(!should_flush_memo(0, 0, true, 10));
     }
 }

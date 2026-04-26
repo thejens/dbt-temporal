@@ -76,6 +76,103 @@ fn merge_resolved_config(
     }
 }
 
+/// What a successfully-completed pre_run hook tells the runner to do next.
+#[derive(Debug, PartialEq, Eq)]
+enum HookCompletionAction {
+    /// Continue running remaining hooks.
+    Continue,
+    /// Stop here — pre_run signalled skip with the given (optional) reason.
+    Skip(Option<String>),
+}
+
+/// Build the deterministic child-workflow ID used for a single hook invocation.
+///
+/// Embeds the parent workflow ID, the lifecycle event, the hook's index in the
+/// configured list, and the hook workflow type — sufficient to make per-run
+/// hook IDs unique across replays without baking timestamps into history.
+fn build_hook_workflow_id(
+    parent_id: &str,
+    event: HookEvent,
+    index: usize,
+    workflow_type: &str,
+) -> String {
+    format!("{parent_id}-hook-{event}-{index}-{workflow_type}")
+}
+
+/// Build the per-hook child-workflow options. Fire-and-forget hooks must use
+/// `Abandon` so the child survives the parent; awaited hooks use the default.
+fn build_hook_options(hook: &HookConfig, workflow_id: String) -> ChildWorkflowOptions {
+    let timeout = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
+    let parent_close_policy = if hook.fire_and_forget {
+        ParentClosePolicy::Abandon
+    } else {
+        ParentClosePolicy::Unspecified
+    };
+    ChildWorkflowOptions {
+        workflow_id,
+        task_queue: Some(hook.task_queue.clone()),
+        parent_close_policy,
+        execution_timeout: Some(Duration::from_secs(timeout)),
+        ..Default::default()
+    }
+}
+
+/// Process the completion payload of a pre_run hook: merge any `extra_env`
+/// into `outcome` and detect a skip sentinel.
+///
+/// Always returns `Continue` for non-pre_run events — the only sentinels we
+/// listen for are on the pre_run path; on_success / on_failure cannot affect
+/// the run that already finished.
+fn process_pre_run_completion(
+    event: HookEvent,
+    payload_bytes: Option<&[u8]>,
+    outcome: &mut HookExecutionOutcome,
+) -> HookCompletionAction {
+    if event != HookEvent::PreRun {
+        return HookCompletionAction::Continue;
+    }
+    let Some(bytes) = payload_bytes else {
+        return HookCompletionAction::Continue;
+    };
+    if let Some(extra) = parse_extra_env(bytes) {
+        outcome.extra_env.extend(extra);
+    }
+    if let Some((true, reason)) = parse_skip_sentinel(bytes) {
+        outcome.skip = true;
+        outcome.skip_reason.clone_from(&reason);
+        return HookCompletionAction::Skip(reason);
+    }
+    HookCompletionAction::Continue
+}
+
+/// Apply the hook's `on_error` policy to a failure. Returns `Err` for `Fail`
+/// mode (the runner aborts), pushes to `outcome.errors` for `Warn`, drops the
+/// error silently for `Ignore`.
+fn record_hook_error(
+    hook: &HookConfig,
+    payload: &HookPayload,
+    error_msg: String,
+    outcome: &mut HookExecutionOutcome,
+) -> Result<(), anyhow::Error> {
+    match hook.on_error {
+        HookErrorMode::Fail => Err(anyhow::anyhow!(
+            "hook '{}' ({}) failed: {}",
+            hook.workflow_type,
+            payload.event,
+            error_msg
+        )),
+        HookErrorMode::Warn => {
+            outcome.errors.push(HookError {
+                hook_workflow_type: hook.workflow_type.clone(),
+                event: payload.event.to_string(),
+                error: error_msg,
+            });
+            Ok(())
+        }
+        HookErrorMode::Ignore => Ok(()),
+    }
+}
+
 /// Execute a list of hooks sequentially as child workflows.
 ///
 /// Returns a `HookExecutionOutcome` with collected non-fatal errors and skip state.
@@ -86,7 +183,7 @@ fn merge_resolved_config(
 /// - JSON object with `"skip": true` (optionally with `"reason": "..."`)
 ///
 /// When a skip sentinel is detected, remaining hooks are not executed.
-#[allow(clippy::too_many_lines, clippy::future_not_send)] // WorkflowContext uses Rc internally.
+#[allow(clippy::future_not_send)] // WorkflowContext uses Rc internally.
 pub async fn execute_hooks(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
     hooks: &[HookConfig],
@@ -96,9 +193,8 @@ pub async fn execute_hooks(
     let parent_workflow_id = ctx.workflow_id();
 
     for (i, hook) in hooks.iter().enumerate() {
-        let timeout = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
         let workflow_id =
-            format!("{}-hook-{}-{}-{}", parent_workflow_id, payload.event, i, hook.workflow_type);
+            build_hook_workflow_id(parent_workflow_id, payload.event, i, &hook.workflow_type);
 
         info!(
             workflow_type = %hook.workflow_type,
@@ -113,19 +209,7 @@ pub async fn execute_hooks(
             vec![payload.as_json_payload()?]
         };
 
-        let parent_close_policy = if hook.fire_and_forget {
-            ParentClosePolicy::Abandon
-        } else {
-            ParentClosePolicy::Unspecified
-        };
-
-        let opts = ChildWorkflowOptions {
-            workflow_id,
-            task_queue: Some(hook.task_queue.clone()),
-            parent_close_policy,
-            execution_timeout: Some(Duration::from_secs(timeout)),
-            ..Default::default()
-        };
+        let opts = build_hook_options(hook, workflow_id);
         let wf = UntypedWorkflow::new(&hook.workflow_type);
         let raw_input = RawValue::new(input_payload);
 
@@ -142,30 +226,15 @@ pub async fn execute_hooks(
                 Err(e) => {
                     let error_msg =
                         format!("fire-and-forget child workflow failed to start: {e:#}");
-                    match hook.on_error {
-                        HookErrorMode::Fail => {
-                            return Err(anyhow::anyhow!(
-                                "hook '{}' ({}) failed: {}",
-                                hook.workflow_type,
-                                payload.event,
-                                error_msg
-                            ));
-                        }
-                        HookErrorMode::Warn => {
-                            warn!(
-                                workflow_type = %hook.workflow_type,
-                                event = %payload.event,
-                                error = %error_msg,
-                                "fire-and-forget hook failed to start (continuing)"
-                            );
-                            outcome.errors.push(HookError {
-                                hook_workflow_type: hook.workflow_type.clone(),
-                                event: payload.event.to_string(),
-                                error: error_msg,
-                            });
-                        }
-                        HookErrorMode::Ignore => {}
+                    if matches!(hook.on_error, HookErrorMode::Warn) {
+                        warn!(
+                            workflow_type = %hook.workflow_type,
+                            event = %payload.event,
+                            error = %error_msg,
+                            "fire-and-forget hook failed to start (continuing)"
+                        );
                     }
+                    record_hook_error(hook, payload, error_msg, &mut outcome)?;
                 }
             }
             continue;
@@ -181,53 +250,31 @@ pub async fn execute_hooks(
                     "hook completed successfully"
                 );
 
-                if matches!(payload.event, HookEvent::PreRun)
-                    && let Some(ref bytes) = completion_payload
-                {
-                    // Collect extra_env injected by this hook (merged across all hooks).
-                    if let Some(extra) = parse_extra_env(bytes) {
-                        outcome.extra_env.extend(extra);
-                    }
-
-                    // Check for skip sentinel — stops remaining hooks.
-                    if let Some((true, reason)) = parse_skip_sentinel(bytes) {
-                        info!(
-                            workflow_type = %hook.workflow_type,
-                            reason = ?reason,
-                            "pre_run hook signalled skip"
-                        );
-                        outcome.skip = true;
-                        outcome.skip_reason = reason;
-                        break;
-                    }
+                let action = process_pre_run_completion(
+                    payload.event,
+                    completion_payload.as_deref(),
+                    &mut outcome,
+                );
+                if let HookCompletionAction::Skip(reason) = action {
+                    info!(
+                        workflow_type = %hook.workflow_type,
+                        reason = ?reason,
+                        "pre_run hook signalled skip"
+                    );
+                    break;
                 }
             }
             Err(e) => {
                 let error_msg = format!("{e:#}");
-                match hook.on_error {
-                    HookErrorMode::Fail => {
-                        return Err(anyhow::anyhow!(
-                            "hook '{}' ({}) failed: {}",
-                            hook.workflow_type,
-                            payload.event,
-                            error_msg
-                        ));
-                    }
-                    HookErrorMode::Warn => {
-                        warn!(
-                            workflow_type = %hook.workflow_type,
-                            event = %payload.event,
-                            error = %error_msg,
-                            "hook failed (continuing)"
-                        );
-                        outcome.errors.push(HookError {
-                            hook_workflow_type: hook.workflow_type.clone(),
-                            event: payload.event.to_string(),
-                            error: error_msg,
-                        });
-                    }
-                    HookErrorMode::Ignore => {}
+                if matches!(hook.on_error, HookErrorMode::Warn) {
+                    warn!(
+                        workflow_type = %hook.workflow_type,
+                        event = %payload.event,
+                        error = %error_msg,
+                        "hook failed (continuing)"
+                    );
                 }
+                record_hook_error(hook, payload, error_msg, &mut outcome)?;
             }
         }
     }
@@ -332,6 +379,186 @@ mod tests {
         assert_eq!(resolved.hooks.pre_run[0].workflow_type, "from_input");
         // Retry comes from defaults regardless of input.
         assert_eq!(resolved.retry.max_attempts, 7);
+    }
+
+    // --- build_hook_workflow_id ---
+
+    #[test]
+    fn build_hook_workflow_id_includes_parent_event_index_and_type() {
+        let id = build_hook_workflow_id("dbt-run-abc", HookEvent::PreRun, 2, "notify");
+        assert_eq!(id, "dbt-run-abc-hook-pre_run-2-notify");
+    }
+
+    #[test]
+    fn build_hook_workflow_id_distinguishes_each_event() {
+        let pre = build_hook_workflow_id("p", HookEvent::PreRun, 0, "h");
+        let succ = build_hook_workflow_id("p", HookEvent::OnSuccess, 0, "h");
+        let fail = build_hook_workflow_id("p", HookEvent::OnFailure, 0, "h");
+        assert_ne!(pre, succ);
+        assert_ne!(pre, fail);
+        assert_ne!(succ, fail);
+    }
+
+    // --- build_hook_options ---
+
+    fn make_hook(
+        workflow_type: &str,
+        timeout_secs: Option<u64>,
+        fire_and_forget: bool,
+    ) -> HookConfig {
+        HookConfig {
+            workflow_type: workflow_type.to_string(),
+            task_queue: "q".to_string(),
+            timeout_secs,
+            on_error: HookErrorMode::default(),
+            input: None,
+            fire_and_forget,
+        }
+    }
+
+    #[test]
+    fn build_hook_options_sets_workflow_id_and_task_queue() {
+        let hook = make_hook("notify", Some(30), false);
+        let opts = build_hook_options(&hook, "id-123".to_string());
+        assert_eq!(opts.workflow_id, "id-123");
+        assert_eq!(opts.task_queue.as_deref(), Some("q"));
+        assert_eq!(opts.execution_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn build_hook_options_uses_default_timeout_when_unset() {
+        let hook = make_hook("notify", None, false);
+        let opts = build_hook_options(&hook, "id".to_string());
+        assert_eq!(opts.execution_timeout, Some(Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS)));
+    }
+
+    #[test]
+    fn build_hook_options_abandons_only_for_fire_and_forget() {
+        let normal = build_hook_options(&make_hook("h", None, false), "id".to_string());
+        let fire = build_hook_options(&make_hook("h", None, true), "id".to_string());
+        assert_eq!(normal.parent_close_policy, ParentClosePolicy::Unspecified);
+        assert_eq!(fire.parent_close_policy, ParentClosePolicy::Abandon);
+    }
+
+    // --- process_pre_run_completion ---
+
+    fn empty_pre_run_payload() -> HookPayload {
+        HookPayload {
+            event: HookEvent::PreRun,
+            invocation_id: "inv".to_string(),
+            input: crate::types::DbtRunInput {
+                project: None,
+                command: "build".to_string(),
+                select: None,
+                exclude: None,
+                vars: std::collections::BTreeMap::new(),
+                target: None,
+                full_refresh: false,
+                fail_fast: false,
+                hooks: None,
+                env: std::collections::BTreeMap::new(),
+            },
+            plan: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn process_pre_run_completion_continue_for_non_pre_run_events() {
+        let mut outcome = HookExecutionOutcome::default();
+        // Even with a skip sentinel, a non-pre_run event must not flip skip.
+        let bytes = br#"{"skip": true}"#;
+        for event in [HookEvent::OnSuccess, HookEvent::OnFailure] {
+            let action = process_pre_run_completion(event, Some(bytes), &mut outcome);
+            assert_eq!(action, HookCompletionAction::Continue);
+            assert!(!outcome.skip);
+        }
+    }
+
+    #[test]
+    fn process_pre_run_completion_continue_when_no_payload() {
+        let mut outcome = HookExecutionOutcome::default();
+        let action = process_pre_run_completion(HookEvent::PreRun, None, &mut outcome);
+        assert_eq!(action, HookCompletionAction::Continue);
+    }
+
+    #[test]
+    fn process_pre_run_completion_merges_extra_env() {
+        let mut outcome = HookExecutionOutcome::default();
+        let bytes = br#"{"extra_env": {"DBT_PARTITION": "2026-04-26", "TIER": "premium"}}"#;
+        let action = process_pre_run_completion(HookEvent::PreRun, Some(bytes), &mut outcome);
+        assert_eq!(action, HookCompletionAction::Continue);
+        assert_eq!(outcome.extra_env.get("DBT_PARTITION").map(String::as_str), Some("2026-04-26"));
+        assert_eq!(outcome.extra_env.get("TIER").map(String::as_str), Some("premium"));
+        assert!(!outcome.skip);
+    }
+
+    #[test]
+    fn process_pre_run_completion_returns_skip_with_reason() {
+        let mut outcome = HookExecutionOutcome::default();
+        let bytes = br#"{"skip": true, "reason": "no new data"}"#;
+        let action = process_pre_run_completion(HookEvent::PreRun, Some(bytes), &mut outcome);
+        assert_eq!(action, HookCompletionAction::Skip(Some("no new data".to_string())));
+        assert!(outcome.skip);
+        assert_eq!(outcome.skip_reason.as_deref(), Some("no new data"));
+    }
+
+    #[test]
+    fn process_pre_run_completion_returns_skip_without_reason_for_json_false() {
+        let mut outcome = HookExecutionOutcome::default();
+        let action = process_pre_run_completion(HookEvent::PreRun, Some(b"false"), &mut outcome);
+        assert_eq!(action, HookCompletionAction::Skip(None));
+        assert!(outcome.skip);
+    }
+
+    #[test]
+    fn process_pre_run_completion_merges_env_and_skip_in_one_payload() {
+        let mut outcome = HookExecutionOutcome::default();
+        let bytes = br#"{"skip": true, "reason": "soft", "extra_env": {"X": "y"}}"#;
+        let action = process_pre_run_completion(HookEvent::PreRun, Some(bytes), &mut outcome);
+        assert_eq!(action, HookCompletionAction::Skip(Some("soft".to_string())));
+        assert_eq!(outcome.extra_env.get("X").map(String::as_str), Some("y"));
+    }
+
+    // --- record_hook_error ---
+
+    #[test]
+    fn record_hook_error_returns_err_for_fail_mode() {
+        let mut hook = make_hook("h", None, false);
+        hook.on_error = HookErrorMode::Fail;
+        let payload = empty_pre_run_payload();
+        let mut outcome = HookExecutionOutcome::default();
+        let err = record_hook_error(&hook, &payload, "boom".to_string(), &mut outcome).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("hook 'h'"), "got: {msg}");
+        assert!(msg.contains("boom"), "got: {msg}");
+        // Outcome.errors stays empty — caller would never see Warn-style accumulation
+        // when the hook is configured to abort the run.
+        assert!(outcome.errors.is_empty());
+    }
+
+    #[test]
+    fn record_hook_error_pushes_for_warn_mode() {
+        let mut hook = make_hook("notify", None, false);
+        hook.on_error = HookErrorMode::Warn;
+        let payload = empty_pre_run_payload();
+        let mut outcome = HookExecutionOutcome::default();
+        record_hook_error(&hook, &payload, "warn-msg".to_string(), &mut outcome).unwrap();
+        assert_eq!(outcome.errors.len(), 1);
+        let entry = &outcome.errors[0];
+        assert_eq!(entry.hook_workflow_type, "notify");
+        assert_eq!(entry.event, "pre_run");
+        assert_eq!(entry.error, "warn-msg");
+    }
+
+    #[test]
+    fn record_hook_error_drops_silently_for_ignore_mode() {
+        let mut hook = make_hook("h", None, false);
+        hook.on_error = HookErrorMode::Ignore;
+        let payload = empty_pre_run_payload();
+        let mut outcome = HookExecutionOutcome::default();
+        record_hook_error(&hook, &payload, "ignored".to_string(), &mut outcome).unwrap();
+        assert!(outcome.errors.is_empty());
     }
 
     #[test]

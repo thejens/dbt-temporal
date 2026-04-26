@@ -23,9 +23,11 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    build_log_header, build_node_status_tree, build_retry_policy, cancelled_result, error_result,
+    build_log_header, build_node_status_tree, build_retry_policy, cancelled_result,
+    classify_result_status, error_result, format_activity_label, format_progress_line,
+    format_result_tag, format_running_details, is_blocked_by_failed_upstream,
     mark_remaining_level_as_cancelled, node_label, set_node_status, short_activity_error,
-    skipped_result, upsert_memo_state, upsert_node_status,
+    should_flush_memo, skipped_result, upsert_memo_state, upsert_node_status,
 };
 
 /// Cap memo writes for deep DAGs — upsert on this cadence on quiet levels.
@@ -139,9 +141,12 @@ async fn execute_one_level(
         for unique_id in level {
             *state.node_counter += 1;
             let label = node_label(state.plan, unique_id);
-            state
-                .log_lines
-                .push(format!("{} of {} SKIP {label}", *state.node_counter, state.total_nodes));
+            state.log_lines.push(format_progress_line(
+                *state.node_counter,
+                state.total_nodes,
+                "SKIP",
+                &label,
+            ));
             set_node_status(state.node_status, unique_id, NodeStatus::Skipped);
             state
                 .all_results
@@ -156,17 +161,15 @@ async fn execute_one_level(
     // ctx) so we can upsert memo first.
     let mut nodes_to_schedule: Vec<(String, NodeExecutionInput, Option<String>)> = Vec::new();
     for unique_id in level {
-        if let Some(node_info) = state.plan.nodes.get(unique_id)
-            && node_info
-                .depends_on
-                .iter()
-                .any(|dep| state.failed_nodes.contains(dep))
-        {
+        if is_blocked_by_failed_upstream(state.plan, unique_id, state.failed_nodes) {
             *state.node_counter += 1;
             let label = node_label(state.plan, unique_id);
-            state
-                .log_lines
-                .push(format!("{} of {} SKIP {label}", *state.node_counter, state.total_nodes));
+            state.log_lines.push(format_progress_line(
+                *state.node_counter,
+                state.total_nodes,
+                "SKIP",
+                &label,
+            ));
             state.failed_nodes.insert(unique_id.clone());
             *state.had_failure = true;
             set_node_status(state.node_status, unique_id, NodeStatus::Skipped);
@@ -181,7 +184,7 @@ async fn execute_one_level(
         let label = node_label(state.plan, unique_id);
         state
             .log_lines
-            .push(format!("{node_num} of {} START {label}", state.total_nodes));
+            .push(format_progress_line(node_num, state.total_nodes, "START", &label));
 
         set_node_status(state.node_status, unique_id, NodeStatus::Running);
 
@@ -196,14 +199,7 @@ async fn execute_one_level(
 
         // Per-node labelling in Temporal UI: activity_id for event details,
         // summary for the Gantt chart display.
-        let activity_label = state.plan.nodes.get(unique_id).map(|info| {
-            let rt = info
-                .resource_type
-                .strip_prefix("NODE_TYPE_")
-                .unwrap_or(&info.resource_type)
-                .to_ascii_lowercase();
-            format!("{rt}:{}", info.name)
-        });
+        let activity_label = format_activity_label(state.plan, unique_id);
 
         nodes_to_schedule.push((unique_id.clone(), node_input, activity_label));
     }
@@ -219,11 +215,10 @@ async fn execute_one_level(
             .filter_map(|(_, _, label)| label.as_deref())
             .collect();
         if !running.is_empty() {
-            ctx.set_current_details(format!(
-                "level {}/{}: {}",
-                level_idx + 1,
+            ctx.set_current_details(format_running_details(
+                level_idx,
                 state.plan.levels.len(),
-                running.join(", ")
+                &running,
             ));
         }
     }
@@ -257,27 +252,13 @@ async fn execute_one_level(
             Ok(result) => {
                 processed_in_level.insert(unique_id.clone());
 
-                let status = match result.status {
-                    NodeStatus::Error => {
-                        *state.had_failure = true;
-                        state.failed_nodes.insert(unique_id.clone());
-                        NodeStatus::Error
-                    }
-                    NodeStatus::Skipped => NodeStatus::Skipped,
-                    _ => NodeStatus::Success,
-                };
-                let tag = match status {
-                    NodeStatus::Success => {
-                        let detail = result.message.as_deref().unwrap_or("OK");
-                        format!("{detail} in {:.2}s", result.execution_time)
-                    }
-                    NodeStatus::Error => {
-                        let msg = result.message.as_deref().unwrap_or("error");
-                        format!("ERROR {msg}")
-                    }
-                    NodeStatus::Skipped => "SKIP".to_string(),
-                    _ => format!("{status:?}"),
-                };
+                let status = classify_result_status(result.status);
+                if status == NodeStatus::Error {
+                    *state.had_failure = true;
+                    state.failed_nodes.insert(unique_id.clone());
+                }
+                let tag =
+                    format_result_tag(status, result.message.as_deref(), result.execution_time);
                 state.log_lines.push(format!("{label}  [{tag}]"));
                 set_node_status(state.node_status, &unique_id, status);
                 state.all_results.push(result);
@@ -320,9 +301,12 @@ async fn execute_one_level(
     let level_had_failure = processed_in_level
         .iter()
         .any(|id| state.failed_nodes.contains(id));
-    let is_last = level_idx == state.plan.levels.len() - 1;
-    let periodic = (level_idx + 1).is_multiple_of(MEMO_UPSERT_EVERY_N_LEVELS);
-    if !is_last && (level_had_failure || periodic) {
+    if should_flush_memo(
+        level_idx,
+        state.plan.levels.len(),
+        level_had_failure,
+        MEMO_UPSERT_EVERY_N_LEVELS,
+    ) {
         upsert_memo_state(ctx, state.node_status, state.log_lines)?;
     }
 

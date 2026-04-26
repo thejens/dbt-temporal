@@ -104,3 +104,38 @@ impl DbtActivities {
         project_hooks::run_project_hooks_outer(&self, ctx, input).await
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn debug_redacts_registry_and_artifact_store_keeps_safe_fields() {
+        // Building a real ArtifactStore + ProjectRegistry needs the full dbt-fusion
+        // graph; for the Debug impl we only need a registry shape that prints. Use
+        // an empty ProjectRegistry, which has its own Debug impl that just lists
+        // project names — so no WorkerState construction is required.
+        let activities = DbtActivities {
+            registry: Arc::new(ProjectRegistry::new(BTreeMap::new())),
+            artifact_store: None,
+            search_attr_config: SearchAttributeConfig(
+                std::iter::once(("env".to_string(), "test".to_string())).collect(),
+            ),
+            registered_attrs: RegisteredSearchAttributes(BTreeSet::new()),
+            write_run_log: WriteRunLog(true),
+            write_artifacts: WriteArtifacts(false),
+        };
+        let s = format!("{activities:?}");
+        assert!(s.contains("DbtActivities"));
+        assert!(s.contains("search_attr_config"));
+        assert!(s.contains("write_run_log"));
+        assert!(s.contains("write_artifacts"));
+        // finish_non_exhaustive marker: registry/artifact_store omitted from Debug.
+        assert!(s.contains(".."));
+        assert!(!s.contains("registry"));
+        assert!(!s.contains("artifact_store"));
+    }
+}

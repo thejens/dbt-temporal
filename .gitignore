@@ -21,3 +21,4 @@ TODO.md
 
 # Local coverage / dbt run logs
 /logs
+*.profraw

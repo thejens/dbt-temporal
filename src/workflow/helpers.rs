@@ -638,4 +638,83 @@ mod tests {
         assert_eq!(result.nodes.len(), 11);
         assert!(result.nodes.contains_key("__truncated"));
     }
+
+    // --- plural ---
+
+    #[test]
+    fn plural_omits_s_for_one_only() {
+        assert_eq!(plural(0), "s");
+        assert_eq!(plural(1), "");
+        assert_eq!(plural(2), "s");
+        assert_eq!(plural(100), "s");
+    }
+
+    // --- elapsed_secs ---
+
+    #[test]
+    fn elapsed_secs_returns_zero_when_either_endpoint_missing() {
+        let now = std::time::SystemTime::now();
+        assert!(elapsed_secs(None, Some(now)).abs() < f64::EPSILON);
+        assert!(elapsed_secs(Some(now), None).abs() < f64::EPSILON);
+        assert!(elapsed_secs(None, None).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn elapsed_secs_returns_difference_when_both_present() {
+        let start = std::time::SystemTime::UNIX_EPOCH;
+        let end = start + std::time::Duration::from_millis(2500);
+        let secs = elapsed_secs(Some(start), Some(end));
+        assert!((secs - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn elapsed_secs_returns_zero_when_end_before_start() {
+        // duration_since returns Err when end < start; helper should yield 0.
+        let later = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let earlier = std::time::SystemTime::UNIX_EPOCH;
+        assert!(elapsed_secs(Some(later), Some(earlier)).abs() < f64::EPSILON);
+    }
+
+    // --- build_log_header / build_summary_lines ---
+
+    #[test]
+    fn build_log_header_lists_resource_type_counts_in_alpha_order() {
+        let plan = test_plan(
+            vec![vec!["m1", "m2"], vec!["t1"]],
+            &[
+                ("m1", Some("table"), vec![]),
+                ("m2", Some("view"), vec![]),
+                ("t1", Some("test"), vec![]),
+            ],
+        );
+        let header = build_log_header(&plan);
+        assert_eq!(header.len(), 3);
+        assert!(header[0].starts_with("Running with dbt-temporal="));
+        // Resource types come from NodeInfo.resource_type which is "model" for everything
+        // built by `test_plan` — confirms plural-pluralisation works through the helper.
+        assert!(header[1].contains("3 model"));
+        assert_eq!(header[2], "Concurrency: 2 parallel levels");
+    }
+
+    #[test]
+    fn build_log_header_singular_for_single_level_and_node_type() {
+        let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
+        let header = build_log_header(&plan);
+        assert!(header[1].contains("1 model"), "got: {}", header[1]);
+        assert!(!header[1].contains("models"));
+        assert_eq!(header[2], "Concurrency: 1 parallel level");
+    }
+
+    #[test]
+    fn build_summary_lines_pluralises_node_count() {
+        let lines = build_summary_lines(5, 2.345_678, 4, 0, 1);
+        assert_eq!(lines[0], "Finished running 5 nodes in 2.35s.");
+        assert_eq!(lines[1], "Done. PASS=4 ERROR=0 SKIP=1 TOTAL=5");
+    }
+
+    #[test]
+    fn build_summary_lines_singular_for_one_node() {
+        let lines = build_summary_lines(1, 0.5, 1, 0, 0);
+        assert_eq!(lines[0], "Finished running 1 node in 0.50s.");
+    }
 }

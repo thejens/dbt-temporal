@@ -36,7 +36,7 @@ COVERAGE_IGNORE := src/main\.rs
 
 coverage:
 	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
-		cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		RUST_MIN_STACK=16777216 cargo test --workspace --no-fail-fast -- --test-threads=1 && \
 		cargo llvm-cov report \
 			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
 			--summary-only \
@@ -44,7 +44,7 @@ coverage:
 
 coverage-html:
 	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
-		cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		RUST_MIN_STACK=16777216 cargo test --workspace --no-fail-fast -- --test-threads=1 && \
 		cargo llvm-cov report \
 			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
 			--html

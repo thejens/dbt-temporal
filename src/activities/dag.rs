@@ -65,10 +65,17 @@ fn promote_ephemeral_deps(
 /// also depend on T1..Tn. This ensures tests run before downstream models and gate
 /// the pipeline — if a test fails, downstreams are skipped.
 ///
-/// A test T is a *self-gate* of N when T also depends on N (typical when a single test
-/// references multiple sibling models in a dep chain — e.g. a Jinja loop refs both
-/// a model and its descendants). Adding `N → T` in that case would create a cycle, so
-/// the edge is skipped: T already runs after N via its existing forward edge.
+/// Skip the gate edge `N → T` whenever T already runs after N — i.e. T transitively
+/// depends on N. Adding the edge would close a cycle:
+///
+/// * Direct: a single test refs two siblings in a dep chain. Gating the lower sibling
+///   on the test it already refs is a 2-cycle.
+/// * Transitive: T refs M_x; M_x depends (via any chain) on a model M_y; another
+///   model N also depends on M_y but is not referenced by T. Gating N on T closes a
+///   cycle through the M_x→…→M_y chain. (The `logo_activity_model` case.)
+///
+/// Either way, T is already scheduled after N by the existing forward edge(s), so the
+/// gate would be redundant in addition to unsafe.
 pub fn inject_test_gates(
     nodes: &Nodes,
     selected_ids: &[String],
@@ -78,22 +85,15 @@ pub fn inject_test_gates(
 
     // Build model->tests map: for each model, collect all selected tests that depend on it.
     let mut model_tests: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    // Side-table of each test's depends_on (selected only) so we can check forward
-    // edges without re-walking nodes.depends_on for every (N, T) candidate.
-    let mut test_deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for id in selected_ids {
         if let Some(node) = nodes.get_node(id)
             && node.resource_type() == NodeType::Test
         {
-            let mut this_test_deps: BTreeSet<&str> = BTreeSet::new();
             for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
-                if !selected_set.contains(dep_id.as_str()) {
-                    continue;
-                }
-                this_test_deps.insert(dep_id.as_str());
-                if nodes
-                    .get_node(dep_id)
-                    .is_some_and(|n| n.resource_type() == NodeType::Model)
+                if selected_set.contains(dep_id.as_str())
+                    && nodes
+                        .get_node(dep_id)
+                        .is_some_and(|n| n.resource_type() == NodeType::Model)
                 {
                     model_tests
                         .entry(dep_id.as_str())
@@ -101,12 +101,44 @@ pub fn inject_test_gates(
                         .push(id.as_str());
                 }
             }
-            test_deps.insert(id.as_str(), this_test_deps);
         }
     }
 
+    // Compute each test's transitive ancestor set in the raw (pre-injection) dep
+    // graph — every node T depends on, directly or via chains of model→model edges.
+    let test_ids: Vec<&str> = selected_ids
+        .iter()
+        .filter(|id| {
+            nodes
+                .get_node(id)
+                .is_some_and(|n| n.resource_type() == NodeType::Test)
+        })
+        .map(String::as_str)
+        .collect();
+    let mut test_ancestors: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for test_id in &test_ids {
+        let mut ancestors: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<String> = deps
+            .get(*test_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        while let Some(cur) = stack.pop() {
+            if !ancestors.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(parent_deps) = deps.get(&cur) {
+                for p in parent_deps {
+                    if !ancestors.contains(p) {
+                        stack.push(p.clone());
+                    }
+                }
+            }
+        }
+        test_ancestors.insert(*test_id, ancestors);
+    }
+
     // For each non-test node that depends on a model with tests, add the test IDs
-    // as additional dependencies.
+    // as additional dependencies — except where doing so would close a cycle.
     for id in selected_ids {
         let is_test = nodes
             .get_node(id)
@@ -119,11 +151,9 @@ pub fn inject_test_gates(
             for dep_id in &node_deps {
                 if let Some(tests) = model_tests.get(dep_id.as_str()) {
                     for test_id in tests {
-                        // Skip if the test already depends on N — adding N → T would
-                        // create a cycle and make N (and its descendants) unreachable.
-                        if test_deps
+                        if test_ancestors
                             .get(test_id)
-                            .is_some_and(|d| d.contains(id.as_str()))
+                            .is_some_and(|a| a.contains(id.as_str()))
                         {
                             continue;
                         }
@@ -498,5 +528,122 @@ mod tests {
         assert_eq!(levels.len(), 1);
         assert!(levels[0].contains(&"model.m.real".to_string()));
         assert!(levels[0].contains(&"test.m.phantom".to_string()));
+    }
+
+    /// Regression: panda-cascade `logo_activity_model` transitive cycle.
+    ///
+    /// Reduced topology from the real project. The trigger is a test that refs
+    /// a *descendant* of a model M, while another node N depends on M without
+    /// being referenced by the test. Naive gate injection adds `N → T`, but T
+    /// transitively depends on N via the descendant chain, closing a cycle.
+    ///
+    /// Concrete trace:
+    ///   activity_events ← event_configuration
+    ///   activity_events ← daily_activity_events
+    ///   daily_activity_events, event_configuration ← logo_metadata
+    ///   daily_activity_events, event_configuration ← _daily_active_users
+    ///   _daily_active_users, logo_metadata ← logo_cohort_metrics
+    ///   logo_cohort_metrics ← logo_metrics
+    ///   test_dau refs daily_activity_events, event_configuration, logo_metrics
+    ///
+    /// Naively, `logo_metadata → test_dau` is injected (logo_metadata depends
+    /// on event_configuration which has test_dau). But test_dau transitively
+    /// depends on logo_metadata via logo_metrics → logo_cohort_metrics →
+    /// logo_metadata. The transitive ancestor check must catch this.
+    #[test]
+    fn inject_test_gates_skips_transitive_back_edge() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.l.activity_events", &[]);
+        add_model(&mut nodes, "model.l.event_configuration", &["model.l.activity_events"]);
+        add_model(&mut nodes, "model.l.daily_activity_events", &["model.l.activity_events"]);
+        add_model(
+            &mut nodes,
+            "model.l.logo_metadata",
+            &[
+                "model.l.daily_activity_events",
+                "model.l.event_configuration",
+            ],
+        );
+        add_model(
+            &mut nodes,
+            "model.l._daily_active_users",
+            &[
+                "model.l.daily_activity_events",
+                "model.l.event_configuration",
+            ],
+        );
+        add_model(
+            &mut nodes,
+            "model.l.logo_cohort_metrics",
+            &["model.l._daily_active_users", "model.l.logo_metadata"],
+        );
+        add_model(&mut nodes, "model.l.logo_metrics", &["model.l.logo_cohort_metrics"]);
+        add_test(
+            &mut nodes,
+            "test.l.test_dau",
+            &[
+                "model.l.daily_activity_events",
+                "model.l.event_configuration",
+                "model.l.logo_metrics",
+            ],
+        );
+
+        let selected: Vec<String> = [
+            "model.l.activity_events",
+            "model.l.event_configuration",
+            "model.l.daily_activity_events",
+            "model.l.logo_metadata",
+            "model.l._daily_active_users",
+            "model.l.logo_cohort_metrics",
+            "model.l.logo_metrics",
+            "test.l.test_dau",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        // Every model on the path test_dau → … → logo_metadata is a transitive
+        // ancestor of test_dau. Gating any of them on test_dau would cycle.
+        for upstream in [
+            "model.l.activity_events",
+            "model.l.event_configuration",
+            "model.l.daily_activity_events",
+            "model.l.logo_metadata",
+            "model.l._daily_active_users",
+            "model.l.logo_cohort_metrics",
+        ] {
+            assert!(
+                !deps_map[upstream].contains("test.l.test_dau"),
+                "{upstream} is a transitive ancestor of test_dau — gating it would cycle"
+            );
+        }
+
+        // The graph must planarise.
+        let levels = topological_levels(&deps_map).unwrap();
+        let level_of = |id: &str| {
+            levels
+                .iter()
+                .position(|l| l.iter().any(|n| n == id))
+                .unwrap()
+        };
+        // test_dau still runs after every model it depends on, transitively.
+        let test_level = level_of("test.l.test_dau");
+        for ancestor in [
+            "model.l.activity_events",
+            "model.l.event_configuration",
+            "model.l.daily_activity_events",
+            "model.l.logo_metadata",
+            "model.l._daily_active_users",
+            "model.l.logo_cohort_metrics",
+            "model.l.logo_metrics",
+        ] {
+            assert!(
+                level_of(ancestor) < test_level,
+                "{ancestor} should run before test.l.test_dau"
+            );
+        }
     }
 }

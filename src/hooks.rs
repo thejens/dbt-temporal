@@ -145,6 +145,20 @@ fn process_pre_run_completion(
     HookCompletionAction::Continue
 }
 
+/// Build the JSON-encoded input payload that the hook child workflow
+/// receives. When `hook.input` is set the user's override wins; otherwise the
+/// canonical `HookPayload` (event + invocation id + plan + output) is used.
+fn build_hook_input_payload(
+    hook: &HookConfig,
+    payload: &HookPayload,
+) -> anyhow::Result<Vec<temporalio_common::protos::temporal::api::common::v1::Payload>> {
+    if let Some(ref custom_input) = hook.input {
+        Ok(vec![custom_input.as_json_payload()?])
+    } else {
+        Ok(vec![payload.as_json_payload()?])
+    }
+}
+
 /// Apply the hook's `on_error` policy to a failure. Returns `Err` for `Fail`
 /// mode (the runner aborts), pushes to `outcome.errors` for `Warn`, drops the
 /// error silently for `Ignore`.
@@ -203,11 +217,7 @@ pub async fn execute_hooks(
             "starting hook child workflow"
         );
 
-        let input_payload = if let Some(ref custom_input) = hook.input {
-            vec![custom_input.as_json_payload()?]
-        } else {
-            vec![payload.as_json_payload()?]
-        };
+        let input_payload = build_hook_input_payload(hook, payload)?;
 
         let opts = build_hook_options(hook, workflow_id);
         let wf = UntypedWorkflow::new(&hook.workflow_type);
@@ -549,6 +559,43 @@ mod tests {
         assert_eq!(entry.hook_workflow_type, "notify");
         assert_eq!(entry.event, "pre_run");
         assert_eq!(entry.error, "warn-msg");
+    }
+
+    // --- build_hook_input_payload ---
+
+    #[test]
+    fn build_hook_input_payload_uses_custom_input_when_present() -> anyhow::Result<()> {
+        let mut hook = make_hook("notify", None, false);
+        hook.input = Some(serde_json::json!({"target": "bigquery", "force": true}));
+        let payload = empty_pre_run_payload();
+
+        let payloads = build_hook_input_payload(&hook, &payload)?;
+        assert_eq!(payloads.len(), 1);
+        // The serialized payload bytes should reflect the custom input, not
+        // the canonical HookPayload (which would include `event` etc).
+        let bytes = &payloads[0].data;
+        let json: serde_json::Value = serde_json::from_slice(bytes)?;
+        assert_eq!(json["target"], "bigquery");
+        assert_eq!(json["force"], true);
+        // No event field — confirms it's the custom input, not the default.
+        assert!(json.get("event").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn build_hook_input_payload_falls_back_to_default_payload() -> anyhow::Result<()> {
+        let hook = make_hook("notify", None, false);
+        // hook.input = None — fallback path
+        let payload = empty_pre_run_payload();
+
+        let payloads = build_hook_input_payload(&hook, &payload)?;
+        assert_eq!(payloads.len(), 1);
+        let bytes = &payloads[0].data;
+        let json: serde_json::Value = serde_json::from_slice(bytes)?;
+        // Default HookPayload includes `event`.
+        assert_eq!(json["event"], "pre_run");
+        assert_eq!(json["invocation_id"], "inv");
+        Ok(())
     }
 
     #[test]

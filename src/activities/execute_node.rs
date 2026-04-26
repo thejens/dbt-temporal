@@ -256,6 +256,36 @@ fn raw_sql_read_error_dispatch(
     }
 }
 
+/// Write a cached SQL string to disk under `dest`, creating parent dirs as
+/// needed. No-op when `cache` doesn't contain `node_path`.
+///
+/// Used at activity startup to seed the per-activity temp `out_dir` with the
+/// SQL captured during the worker's startup resolve — so materialization
+/// macros that read `target/compiled/<path>` see the right content even
+/// though each activity gets a fresh temp dir.
+fn write_cached_sql(
+    cache: &BTreeMap<String, String>,
+    node_path: &str,
+    dest: &std::path::Path,
+) -> std::io::Result<()> {
+    let Some(sql) = cache.get(node_path) else {
+        return Ok(());
+    };
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, sql)
+}
+
+/// Parse the invocation ID from the workflow input. Rejects malformed IDs
+/// with an actionable error message — falling back to the worker-state
+/// invocation_id would silently mis-tag artifacts and run-results under a
+/// different run.
+fn parse_invocation_id(raw: &str) -> Result<uuid::Uuid, anyhow::Error> {
+    raw.parse()
+        .map_err(|e| anyhow::anyhow!("invalid invocation_id {raw:?}: {e}"))
+}
+
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // Sequential adapter interaction with setup, execution, and result extraction.
 // Kept async so tokio::select! in execute_node_outer can poll it against
@@ -424,32 +454,18 @@ async fn execute_node_inner(
 
     let node_path = common.path.to_string_lossy().to_string();
 
-    // Write compiled SQL for this node into the temp dir.
-    if let Some(sql) = state.compiled_sql_cache.get(&node_path) {
-        let dest = temp_out.join("compiled").join(&common.path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, sql)?;
+    // Seed the temp out_dir with cached compiled / snapshot SQL — see
+    // `write_cached_sql` for why this is per-activity rather than shared.
+    write_cached_sql(
+        &state.compiled_sql_cache,
+        &node_path,
+        &temp_out.join("compiled").join(&common.path),
+    )?;
+    if rt == NodeType::Snapshot {
+        write_cached_sql(&state.snapshot_sql_cache, &node_path, &temp_out.join(&common.path))?;
     }
 
-    // Write snapshot raw SQL if this is a snapshot node.
-    if rt == NodeType::Snapshot
-        && let Some(sql) = state.snapshot_sql_cache.get(&node_path)
-    {
-        let dest = temp_out.join(&common.path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, sql)?;
-    }
-
-    // Reject malformed IDs loud; falling back to the worker-state invocation_id
-    // would silently mis-tag artifacts and run-results under a different run.
-    let invocation_id = input
-        .invocation_id
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid invocation_id {:?}: {e}", input.invocation_id))?;
+    let invocation_id = parse_invocation_id(&input.invocation_id)?;
     let io_args = dbt_common::io_args::IoArgs {
         in_dir: state.io_args.in_dir.clone(),
         out_dir: temp_out,
@@ -1101,5 +1117,57 @@ mod tests {
         let path = std::path::PathBuf::from("/missing/foo.sql");
         let io_err = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert!(raw_sql_read_error_dispatch(NodeType::Operation, "x", &path, &io_err).is_ok());
+    }
+
+    // --- write_cached_sql ---
+
+    #[test]
+    fn write_cached_sql_writes_when_cache_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = BTreeMap::new();
+        cache.insert("models/m.sql".to_string(), "SELECT 1".to_string());
+
+        let dest = dir.path().join("compiled/models/m.sql");
+        write_cached_sql(&cache, "models/m.sql", &dest).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "SELECT 1");
+    }
+
+    #[test]
+    fn write_cached_sql_noop_when_cache_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BTreeMap::new();
+        let dest = dir.path().join("compiled/models/m.sql");
+        write_cached_sql(&cache, "models/m.sql", &dest).unwrap();
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn write_cached_sql_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = BTreeMap::new();
+        cache.insert("a/b/c.sql".to_string(), "x".to_string());
+
+        // dest has multiple non-existent parent levels; the helper should
+        // create them all.
+        let dest = dir.path().join("nested/dirs/a/b/c.sql");
+        write_cached_sql(&cache, "a/b/c.sql", &dest).unwrap();
+        assert!(dest.exists());
+    }
+
+    // --- parse_invocation_id ---
+
+    #[test]
+    fn parse_invocation_id_accepts_valid_uuid() {
+        let raw = "00000000-0000-0000-0000-000000000001";
+        let id = parse_invocation_id(raw).unwrap();
+        assert_eq!(id.to_string(), raw);
+    }
+
+    #[test]
+    fn parse_invocation_id_rejects_garbage_with_actionable_message() {
+        let err = parse_invocation_id("not-a-uuid").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid invocation_id"));
+        assert!(msg.contains("not-a-uuid"));
     }
 }

@@ -90,9 +90,10 @@ make submit-workflow-single
 - Ephemeral materialization (`ephemeral_helper.sql`)
 - Custom macros (`safe_round`, `log_run_results`)
 - `var()` usage (`shared_var` in `station_summary.sql`)
-- Schema tests (unique, not_null, accepted_range via dbt_utils)
-- Pre/post hooks on models (in `schema.yml`)
-- Lifecycle hooks + retry policy (in `dbt_temporal.yml`)
+- Schema tests (`unique`, `not_null`)
+- Per-model pre/post hooks (in `schema.yml`)
+- `on-run-start` / `on-run-end` project hooks (in `dbt_project.yml`)
+- Retry policy with non-retryable error patterns (in `dbt_temporal.yml`)
 
 ---
 

@@ -47,29 +47,9 @@ pub async fn execute_node_outer(
                 Ok(result) => Ok(result),
                 Err(e) => {
                     tracing::error!(node = %unique_id, error = %e, "activity failed");
-                    // Try to preserve the original DbtTemporalError variant for
-                    // correct retry classification; fall back to Adapter (retryable).
-                    let dbt_err = match e.downcast::<DbtTemporalError>() {
-                        Ok(d) => d,
-                        Err(other) => DbtTemporalError::Adapter(other),
-                    };
-                    if dbt_err.is_retryable() {
-                        // Check user-configured non-retryable error patterns.
-                        if matches_non_retryable_pattern(&activities.registry, &project, &dbt_err) {
-                            Err(ActivityError::NonRetryable(
-                                anyhow::anyhow!("{dbt_err}").into(),
-                            ))
-                        } else {
-                            Err(ActivityError::Retryable {
-                                source: anyhow::anyhow!("{dbt_err}").into(),
-                                explicit_delay: None,
-                            })
-                        }
-                    } else {
-                        Err(ActivityError::NonRetryable(
-                            anyhow::anyhow!("{dbt_err}").into(),
-                        ))
-                    }
+                    let dbt_err = downcast_or_wrap_as_adapter(e);
+                    let patterns = registry_non_retryable_patterns(&activities.registry, &project);
+                    Err(classify_for_temporal(&dbt_err, patterns.as_deref().unwrap_or(&[])))
                 }
             }
         }
@@ -84,30 +64,76 @@ pub async fn execute_node_outer(
     }
 }
 
-/// Check if an adapter error message matches any user-configured non-retryable pattern.
-fn matches_non_retryable_pattern(
-    registry: &Arc<ProjectRegistry>,
-    project: &str,
+/// Whether to surface an error to Temporal as retryable or not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Retry within the activity's retry policy.
+    Retry,
+    /// Skip the policy — the error is permanent.
+    NoRetry,
+}
+
+/// Decide whether a `DbtTemporalError` should be surfaced to Temporal as retryable.
+///
+/// Adapter errors are retryable by default unless the user-supplied pattern
+/// list matches the error's display string. All other variants — Compilation,
+/// Configuration, ProjectNotFound, TestFailure — are permanent.
+pub fn decide_retry(
     err: &DbtTemporalError,
-) -> bool {
-    let Ok(state) = registry.get(Some(project)) else {
-        return false;
-    };
-
-    let patterns = &state.non_retryable_error_patterns;
-    if patterns.is_empty() {
-        return false;
+    non_retryable_patterns: &[regex::Regex],
+) -> RetryDecision {
+    if !err.is_retryable() {
+        return RetryDecision::NoRetry;
     }
-
+    if non_retryable_patterns.is_empty() {
+        return RetryDecision::Retry;
+    }
     let msg = err.to_string();
-    let matched = crate::error::matches_error_patterns(&msg, patterns);
-    if matched {
+    if crate::error::matches_error_patterns(&msg, non_retryable_patterns) {
         tracing::info!(
             error = %msg,
             "adapter error matched non-retryable pattern, suppressing retry"
         );
+        RetryDecision::NoRetry
+    } else {
+        RetryDecision::Retry
     }
-    matched
+}
+
+/// Wrap an `anyhow::Error` as an `ActivityError` whose retry classification
+/// follows from `decide_retry`.
+fn classify_for_temporal(
+    dbt_err: &DbtTemporalError,
+    non_retryable_patterns: &[regex::Regex],
+) -> ActivityError {
+    let source = anyhow::anyhow!("{dbt_err}").into();
+    match decide_retry(dbt_err, non_retryable_patterns) {
+        RetryDecision::Retry => ActivityError::Retryable {
+            source,
+            explicit_delay: None,
+        },
+        RetryDecision::NoRetry => ActivityError::NonRetryable(source),
+    }
+}
+
+/// Try to recover the original `DbtTemporalError` from an `anyhow::Error`,
+/// falling back to wrapping the error as `Adapter` (the retryable default).
+fn downcast_or_wrap_as_adapter(err: anyhow::Error) -> DbtTemporalError {
+    match err.downcast::<DbtTemporalError>() {
+        Ok(d) => d,
+        Err(other) => DbtTemporalError::Adapter(other),
+    }
+}
+
+/// Look up the user-configured non-retryable patterns for a project. Returns
+/// `None` when the project isn't registered (during tests or shutdown) so the
+/// caller can fall back to "all adapter errors retry".
+fn registry_non_retryable_patterns(
+    registry: &Arc<ProjectRegistry>,
+    project: &str,
+) -> Option<Vec<regex::Regex>> {
+    let state = registry.get(Some(project)).ok()?;
+    Some(state.non_retryable_error_patterns.clone())
 }
 
 #[allow(clippy::too_many_lines, clippy::unused_async)]
@@ -699,4 +725,143 @@ fn build_success_message(
     }
 
     None
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    use crate::error::compile_error_patterns;
+
+    // --- decide_retry ---
+
+    fn empty_patterns() -> Vec<regex::Regex> {
+        Vec::new()
+    }
+
+    #[test]
+    fn decide_retry_no_retry_for_compilation() {
+        let err = DbtTemporalError::Compilation("bad ref".into());
+        assert_eq!(decide_retry(&err, &empty_patterns()), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn decide_retry_no_retry_for_configuration() {
+        let err = DbtTemporalError::Configuration("missing profile".into());
+        assert_eq!(decide_retry(&err, &empty_patterns()), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn decide_retry_no_retry_for_project_not_found() {
+        let err = DbtTemporalError::ProjectNotFound("nope".into());
+        assert_eq!(decide_retry(&err, &empty_patterns()), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn decide_retry_no_retry_for_test_failure() {
+        let err = DbtTemporalError::TestFailure {
+            unique_id: "test.foo".into(),
+            failures: 5,
+        };
+        assert_eq!(decide_retry(&err, &empty_patterns()), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn decide_retry_retries_adapter_with_no_patterns() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection timeout"));
+        assert_eq!(decide_retry(&err, &empty_patterns()), RetryDecision::Retry);
+    }
+
+    #[test]
+    fn decide_retry_promotes_adapter_to_no_retry_when_pattern_matches() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("permission denied for table foo"));
+        let patterns = compile_error_patterns(&["permission denied".to_string()]);
+        assert_eq!(decide_retry(&err, &patterns), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn decide_retry_keeps_adapter_retryable_when_pattern_does_not_match() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection refused"));
+        let patterns = compile_error_patterns(&["permission denied".to_string()]);
+        assert_eq!(decide_retry(&err, &patterns), RetryDecision::Retry);
+    }
+
+    // --- downcast_or_wrap_as_adapter ---
+
+    #[test]
+    fn downcast_or_wrap_recovers_dbt_temporal_error_variant() {
+        let original = DbtTemporalError::Compilation("bad ref".into());
+        let any: anyhow::Error = anyhow::anyhow!(original);
+        let recovered = downcast_or_wrap_as_adapter(any);
+        // Compilation must survive the round-trip — without this, retry
+        // classification would silently demote Compilation to Adapter (retryable).
+        assert!(matches!(recovered, DbtTemporalError::Compilation(_)));
+        assert!(!recovered.is_retryable());
+    }
+
+    #[test]
+    fn downcast_or_wrap_recovers_test_failure_variant() {
+        let original = DbtTemporalError::TestFailure {
+            unique_id: "test.x".into(),
+            failures: 1,
+        };
+        let any: anyhow::Error = anyhow::anyhow!(original);
+        let recovered = downcast_or_wrap_as_adapter(any);
+        assert!(matches!(recovered, DbtTemporalError::TestFailure { .. }));
+    }
+
+    #[test]
+    fn downcast_or_wrap_falls_back_to_adapter_for_plain_anyhow() {
+        let any: anyhow::Error = anyhow::anyhow!("a plain error not from us");
+        let recovered = downcast_or_wrap_as_adapter(any);
+        // Adapter is the retryable default — keeps us out of false positives
+        // for transient warehouse issues that don't carry our typed variant.
+        assert!(matches!(recovered, DbtTemporalError::Adapter(_)));
+        assert!(recovered.is_retryable());
+    }
+
+    // --- build_success_message ---
+
+    #[test]
+    fn build_success_message_prefers_adapter_message_with_row_count() {
+        let mut response = BTreeMap::new();
+        response.insert("message".to_string(), serde_json::json!("CREATE TABLE"));
+        response.insert("rows_affected".to_string(), serde_json::json!(42));
+        let msg = build_success_message(&response, "table");
+        assert_eq!(msg.as_deref(), Some("CREATE TABLE (42 rows)"));
+    }
+
+    #[test]
+    fn build_success_message_uses_message_only_when_rows_unavailable() {
+        let mut response = BTreeMap::new();
+        response.insert("message".to_string(), serde_json::json!("CREATE VIEW"));
+        let msg = build_success_message(&response, "view");
+        assert_eq!(msg.as_deref(), Some("CREATE VIEW"));
+    }
+
+    #[test]
+    fn build_success_message_falls_back_to_materialization_when_no_response() {
+        let response = BTreeMap::new();
+        let msg = build_success_message(&response, "ephemeral");
+        assert_eq!(msg.as_deref(), Some("ephemeral"));
+    }
+
+    #[test]
+    fn build_success_message_returns_none_when_neither_available() {
+        let response = BTreeMap::new();
+        let msg = build_success_message(&response, "");
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn build_success_message_treats_non_string_message_as_absent() {
+        // A numeric "message" field doesn't satisfy as_str() — the builder
+        // must fall through to the materialization fallback rather than
+        // producing a malformed message.
+        let mut response = BTreeMap::new();
+        response.insert("message".to_string(), serde_json::json!(42));
+        let msg = build_success_message(&response, "table");
+        assert_eq!(msg.as_deref(), Some("table"));
+    }
 }

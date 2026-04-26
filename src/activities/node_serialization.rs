@@ -430,6 +430,56 @@ mod tests {
     }
 
     #[test]
+    fn get_node_yml_falls_back_for_unhandled_resource_types() {
+        // Operation / Source aren't in any of the typed node maps, so the
+        // catch-all arm in get_node_yml routes through fallback_node_yml.
+        // With nothing in the registry, fallback_node_yml errors with a
+        // "node not found" message.
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let err = get_node_yml(&nodes, "operation.shop.x", NodeType::Operation).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn fallback_node_yml_builds_minimal_mapping_from_present_node() {
+        use dbt_schemas::schemas::nodes::CommonAttributes;
+        // Add an operation-style node — DbtSource is the simplest catchall
+        // variant, but the fallback path needs *some* node present in
+        // resolver_state.nodes so get_node() returns Some.
+        // We use a model registered under an unhandled NodeType to exercise
+        // the catch-all arm in get_node_yml that delegates to fallback.
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        let common = CommonAttributes {
+            unique_id: "model.shop.fb".to_string(),
+            name: "fb".to_string(),
+            ..CommonAttributes::default()
+        };
+        nodes.models.insert(
+            "model.shop.fb".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: common,
+                ..DbtModel::default()
+            }),
+        );
+
+        // Pass NodeType::Operation (catch-all arm) for an id that lives in
+        // the models map — fallback_node_yml will find it via get_node()
+        // (which scans all node-type collections) and build a minimal map.
+        let val = get_node_yml(&nodes, "model.shop.fb", NodeType::Operation).unwrap();
+        let dbt_yaml::Value::Mapping(map, _) = val else {
+            panic!("expected mapping");
+        };
+        // Minimal map should have unique_id, name, resource_type, schema, database, alias.
+        let key = dbt_yaml::Value::string("unique_id".to_string());
+        assert!(map.get(key).is_some());
+        let key = dbt_yaml::Value::string("name".to_string());
+        let dbt_yaml::Value::String(name, _) = map.get(key).expect("name field") else {
+            panic!("expected name string");
+        };
+        assert_eq!(name, "fb");
+    }
+
+    #[test]
     fn build_agate_table_uses_custom_delimiter_from_seed_attrs() {
         use std::path::PathBuf;
 

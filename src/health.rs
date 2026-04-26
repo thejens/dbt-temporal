@@ -36,11 +36,12 @@ pub fn spawn_health_touch(path: PathBuf) -> tokio::task::JoinHandle<()> {
 }
 
 /// Check whether the health file exists and has been touched within the staleness threshold.
-fn is_healthy(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .is_some_and(|mtime| mtime.elapsed().unwrap_or(Duration::MAX) < STALE_THRESHOLD)
+async fn is_healthy(path: &Path) -> bool {
+    fs::metadata(path).await.is_ok_and(|m| {
+        m.modified()
+            .ok()
+            .is_some_and(|mtime| mtime.elapsed().unwrap_or(Duration::MAX) < STALE_THRESHOLD)
+    })
 }
 
 /// Spawn a minimal HTTP health server on the given port.
@@ -67,7 +68,7 @@ pub fn spawn_health_server(port: u16, path: PathBuf) -> tokio::task::JoinHandle<
                 }
             };
 
-            let healthy = is_healthy(&path);
+            let healthy = is_healthy(&path).await;
             let (status, body) = if healthy {
                 ("200 OK", "ok\n")
             } else {

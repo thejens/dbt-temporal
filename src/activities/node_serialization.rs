@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use dbt_schemas::schemas::telemetry::NodeType;
 
 /// Serialize a node to YmlValue for `build_run_node_context`.
@@ -173,11 +174,11 @@ pub fn build_agate_table(
         options.delimiter = *byte;
     }
     if let Some(column_types) = &seed.__seed_attr__.column_types {
-        options.text_columns = column_types.keys().map(|k| String::clone(k)).collect();
+        options.text_columns = column_types.keys().map(|k| (**k).clone()).collect();
     }
 
     let result = dbt_csv::read_to_arrow_records(&csv_path, &options)
-        .map_err(|e| anyhow::anyhow!("failed to read seed CSV {}: {e:#}", csv_path.display()))?;
+        .with_context(|| format!("reading seed CSV {}", csv_path.display()))?;
 
     let batches = result.batches;
     let first = batches
@@ -185,7 +186,7 @@ pub fn build_agate_table(
         .ok_or_else(|| anyhow::anyhow!("seed CSV {} produced no data", csv_path.display()))?;
     let schema = first.schema();
     let batch = arrow_select::concat::concat_batches(&schema, batches.iter())
-        .map_err(|e| anyhow::anyhow!("failed to concat seed CSV batches: {e:#}"))?;
+        .context("concatenating seed CSV batches")?;
 
     Ok(Some(dbt_agate::AgateTable::from_record_batch(Arc::new(batch))))
 }

@@ -110,11 +110,11 @@ pub fn render_profile_with_env(
     let rendered = jinja_env
         .env
         .render_str(&raw, BTreeMap::<String, String>::new(), &[])
-        .map_err(|e| anyhow::anyhow!("rendering profiles.yml with env overrides: {e:#}"))?;
+        .context("rendering profiles.yml with env overrides")?;
 
     // Parse the rendered YAML.
-    let yaml: dbt_yaml::Value = dbt_yaml::from_str(&rendered)
-        .map_err(|e| anyhow::anyhow!("parsing rendered profiles.yml: {e:#}"))?;
+    let yaml: dbt_yaml::Value =
+        dbt_yaml::from_str(&rendered).context("parsing rendered profiles.yml")?;
 
     // Navigate: profile -> outputs -> target.
     let profile_val = yaml
@@ -131,10 +131,17 @@ pub fn render_profile_with_env(
 
     // Deserialize into DbConfig (tagged by `type` field).
     dbt_yaml::from_value(target_config.clone())
-        .map_err(|e| anyhow::anyhow!("deserializing db config for target '{target}': {e:#}"))
+        .with_context(|| format!("deserialising db config for target '{target}'"))
 }
 
-/// Check whether a profiles.yml file contains `env_var()` calls.
+/// Heuristic: does this profiles.yml mention `env_var(` anywhere in the
+/// raw file? A substring match deliberately, not a YAML walk:
+///
+/// - The cost of a false positive is one extra adapter rebuild per workflow.
+/// - The cost of a false negative is silently stale credentials at runtime.
+///
+/// So we lean toward the harmless direction. Strings that *mention* the
+/// substring (comments, doc keys) trigger the rebuild — that's fine.
 pub fn profile_uses_env_vars(profiles_path: &std::path::Path) -> bool {
     std::fs::read_to_string(profiles_path)
         .map(|content| content.contains("env_var("))
@@ -383,7 +390,9 @@ mod tests {
         let Err(err) = result else {
             anyhow::bail!("expected error")
         };
-        assert!(err.to_string().contains("DBTT_TEST_MISSING_VAR_12345"));
+        // Use `{:#}` to walk the anyhow cause chain — the missing var name
+        // sits on the inner minijinja error, not the top-level context.
+        assert!(format!("{err:#}").contains("DBTT_TEST_MISSING_VAR_12345"));
         std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
         Ok(())
     }

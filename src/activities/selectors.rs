@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use anyhow::Context;
 use dbt_common::node_selector::{
     MethodName, SelectExpression, SelectionCriteria, parse_model_specifiers,
 };
@@ -27,8 +28,7 @@ pub fn apply_selectors(
     if let Some(sel) = select {
         let tokens: Vec<String> = sel.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
-            let expr = parse_model_specifiers(&tokens)
-                .map_err(|e| anyhow::anyhow!("invalid --select: {e:#}"))?;
+            let expr = parse_model_specifiers(&tokens).context("invalid --select")?;
             let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
             selected_ids.retain(|uid| matched.contains(uid.as_str()));
         }
@@ -37,8 +37,7 @@ pub fn apply_selectors(
     if let Some(excl) = exclude {
         let tokens: Vec<String> = excl.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
-            let expr = parse_model_specifiers(&tokens)
-                .map_err(|e| anyhow::anyhow!("invalid --exclude: {e:#}"))?;
+            let expr = parse_model_specifiers(&tokens).context("invalid --exclude")?;
             let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
             selected_ids.retain(|uid| !matched.contains(uid.as_str()));
         }

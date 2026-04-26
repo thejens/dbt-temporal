@@ -85,13 +85,14 @@ impl ObjectStoreArtifactStore {
 #[async_trait]
 impl ArtifactStore for ObjectStoreArtifactStore {
     async fn store(&self, invocation_id: &str, filename: &str, content: &[u8]) -> Result<String> {
-        let key = format!("{}/{invocation_id}/{filename}", self.prefix);
-        let path = Path::from(key.as_str());
+        let path = Path::from(self.prefix.as_str())
+            .child(invocation_id)
+            .child(filename);
         self.store
             .put(&path, content.to_vec().into())
             .await
-            .with_context(|| format!("writing artifact: {key}"))?;
-        Ok(key)
+            .with_context(|| format!("writing artifact: {path}"))?;
+        Ok(path.to_string())
     }
 
     async fn retrieve(&self, path: &str) -> Result<Vec<u8>> {

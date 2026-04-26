@@ -21,9 +21,12 @@ use crate::project_registry::ProjectRegistry;
 use crate::worker_state::WorkerState;
 use crate::workflow::DbtRunWorkflow;
 
-// Re-export commonly used items for external callers.
-pub use self::adapter::build_artifact_store;
-pub use self::profile::rebuild_adapter_engine_with_env;
+// `worker` is `pub mod`, so `pub use` here would leak these out of the
+// crate. The clippy lint mistakenly assumes the parent is private.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) use self::adapter::build_artifact_store;
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) use self::profile::rebuild_adapter_engine_with_env;
 
 /// Build a fully configured Temporal worker (without starting it).
 ///
@@ -116,10 +119,12 @@ pub async fn connect_and_register(
 ) -> Result<Worker> {
     // Set up Temporal runtime
     let telemetry_options = TelemetryOptions::builder().build();
+    // RuntimeOptionsBuilder::build returns Result<_, String>; String doesn't
+    // impl std::error::Error, so .context() can't wrap it.
     let runtime_options = RuntimeOptions::builder()
         .telemetry_options(telemetry_options)
         .build()
-        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("building Temporal runtime options: {e}"))?;
     let runtime = CoreRuntime::new_assume_tokio(runtime_options)?;
 
     // Connect to Temporal (new Connection + Client API)
@@ -145,7 +150,7 @@ pub async fn connect_and_register(
         .context("connecting to Temporal server")?;
 
     let client = Client::new(connection, ClientOptions::new(&config.temporal_namespace).build())
-        .map_err(|e| anyhow::anyhow!("creating Temporal client: {e:#}"))?;
+        .context("creating Temporal client")?;
 
     // List registered search attributes so we can skip unregistered ones at runtime.
     let registered_attrs =
@@ -163,8 +168,9 @@ pub async fn connect_and_register(
 
     // Build worker options and create worker
     let worker_options = temporal::build_worker_options(config);
+    // Worker::new returns Box<dyn Error>; not Send+Sync, so can't .context().
     let mut worker = Worker::new(&runtime, client, worker_options)
-        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e:#}"))?;
+        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e}"))?;
 
     // Register activities and workflow on the worker
     worker.register_activities(activities);
@@ -310,7 +316,7 @@ pub async fn initialize_project(
     let dbt_state =
         dbt_loader::load(&load_args, std::borrow::Cow::Borrowed(&invocation_args), None, &token)
             .await
-            .map_err(|e| anyhow::anyhow!("dbt load failed: {e:#}"))?;
+            .context("dbt load")?;
     let dbt_state = Arc::new(dbt_state);
 
     let project_name = dbt_state
@@ -341,7 +347,7 @@ pub async fn initialize_project(
         listener_factory,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("dbt resolve failed: {e:#}"))?;
+    .context("dbt resolve")?;
 
     let node_count = resolver_state.nodes.iter().count();
     info!(project = %project_name, nodes = node_count, "project resolved");

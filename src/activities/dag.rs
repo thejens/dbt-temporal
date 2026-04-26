@@ -128,11 +128,13 @@ pub fn topological_levels(
     let mut reverse: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
 
     for (node, node_deps) in deps {
-        in_degree.entry(node.as_str()).or_insert(0);
+        let node_str = node.as_str();
+        // Ensures source nodes (no deps) land in the map with in-degree 0
+        // so they end up in the initial queue.
+        *in_degree.entry(node_str).or_insert(0) += node_deps.len();
         for dep in node_deps {
-            in_degree.entry(dep.as_str()).or_insert(0); // ensure dep exists
-            *in_degree.entry(node.as_str()).or_insert(0) += 1;
-            reverse.entry(dep.as_str()).or_default().push(node.as_str());
+            in_degree.entry(dep.as_str()).or_insert(0);
+            reverse.entry(dep.as_str()).or_default().push(node_str);
         }
     }
 

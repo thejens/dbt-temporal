@@ -209,20 +209,15 @@ fn persist_ephemeral_chain(
 /// the dep DAG before each ephemeral is persisted, and the upstream version
 /// isn't exported.
 fn extract_ephemeral_names(sql: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut pos = 0;
-    while let Some(start) = sql[pos..].find(DBT_CTE_PREFIX) {
-        pos += start + DBT_CTE_PREFIX.len();
-        let name_end = sql[pos..]
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or_else(|| sql[pos..].len());
-        let name = sql[pos..pos + name_end].to_string();
-        if !name.is_empty() && !names.contains(&name) {
-            names.push(name);
-        }
-        pos += name_end;
-    }
-    names
+    #[allow(clippy::expect_used)]
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(&format!(r"{DBT_CTE_PREFIX}(\w+)")).expect("ephemeral CTE name regex")
+    });
+    RE.captures_iter(sql)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Extract the test failure count from the ResultStore.

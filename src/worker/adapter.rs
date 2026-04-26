@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::artifact_store::{ArtifactStore, LocalArtifactStore};
 use crate::config::DbtTemporalConfig;
@@ -25,9 +25,7 @@ pub fn build_adapter_engine(
         dbt_auth::auth_for_backend(backend).into()
     });
 
-    let mapping = db_config
-        .to_mapping()
-        .map_err(|e| anyhow::anyhow!("failed to serialize db config: {e:#}"))?;
+    let mapping = db_config.to_mapping().context("serialising db config")?;
 
     let adapter_config = dbt_auth::AdapterConfig::new(mapping);
 

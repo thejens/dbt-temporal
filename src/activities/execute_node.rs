@@ -286,6 +286,23 @@ fn parse_invocation_id(raw: &str) -> Result<uuid::Uuid, anyhow::Error> {
         .map_err(|e| anyhow::anyhow!("invalid invocation_id {raw:?}: {e}"))
 }
 
+/// Materialise generic-test `_dbt_generic_test_kwargs` for the node context.
+///
+/// The kwargs map is on `TestMetadata`. Each YAML value is converted through
+/// `yml_value_to_minijinja_with_jinja` so brace-quoted Jinja expressions
+/// (e.g. `"{{ get_where_subquery(ref('m')) }}"`) are evaluated against the
+/// current context — matching dbt-fusion's generic-test executor.
+fn build_test_kwargs_map(
+    meta_kwargs: &BTreeMap<String, dbt_yaml::Value>,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    node_context: &BTreeMap<String, minijinja::Value>,
+) -> BTreeMap<String, minijinja::Value> {
+    meta_kwargs
+        .iter()
+        .map(|(k, v)| (k.clone(), yml_value_to_minijinja_with_jinja(v, jinja_env, node_context)))
+        .collect()
+}
+
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // Sequential adapter interaction with setup, execution, and result extraction.
 // Kept async so tokio::select! in execute_node_outer can poll it against
@@ -537,13 +554,7 @@ async fn execute_node_inner(
         && let Some(test) = state.resolver_state.nodes.tests.get(unique_id)
         && let Some(ref meta) = test.__test_attr__.test_metadata
     {
-        let kwargs_map: BTreeMap<String, minijinja::Value> = meta
-            .kwargs
-            .iter()
-            .map(|(k, v)| {
-                (k.clone(), yml_value_to_minijinja_with_jinja(v, &jinja_env, &node_context))
-            })
-            .collect();
+        let kwargs_map = build_test_kwargs_map(&meta.kwargs, &jinja_env, &node_context);
         node_context
             .insert("_dbt_generic_test_kwargs".to_owned(), minijinja::Value::from(kwargs_map));
     }
@@ -1205,5 +1216,49 @@ mod tests {
 
         let registry = Arc::new(ProjectRegistry::new(BTreeMap::new()));
         assert!(registry_non_retryable_patterns(&registry, "missing").is_none());
+    }
+
+    // --- build_test_kwargs_map ---
+
+    fn empty_jinja_env() -> dbt_jinja_utils::jinja_environment::JinjaEnv {
+        dbt_jinja_utils::jinja_environment::JinjaEnv::new(minijinja::Environment::new())
+    }
+
+    #[test]
+    fn build_test_kwargs_map_passes_through_scalar_values() {
+        let mut kwargs: BTreeMap<String, dbt_yaml::Value> = BTreeMap::new();
+        kwargs.insert("threshold".to_string(), dbt_yaml::from_str("42").unwrap());
+        kwargs.insert("name".to_string(), dbt_yaml::from_str("\"customer_id\"").unwrap());
+
+        let env = empty_jinja_env();
+        let ctx = BTreeMap::new();
+        let result = build_test_kwargs_map(&kwargs, &env, &ctx);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("threshold").unwrap().to_string(), "42");
+        assert_eq!(result.get("name").unwrap().as_str(), Some("customer_id"));
+    }
+
+    #[test]
+    fn build_test_kwargs_map_evaluates_braced_jinja_expressions() {
+        // dbt-fusion's generic-test executor expects `"{{ ... }}"` strings to
+        // be evaluated against the node context. We mirror that here.
+        let mut kwargs: BTreeMap<String, dbt_yaml::Value> = BTreeMap::new();
+        kwargs.insert("value".to_string(), dbt_yaml::from_str("\"{{ x + 1 }}\"").unwrap());
+
+        let env = empty_jinja_env();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("x".to_string(), minijinja::Value::from(7));
+        let result = build_test_kwargs_map(&kwargs, &env, &ctx);
+
+        assert_eq!(result.get("value").unwrap().to_string(), "8");
+    }
+
+    #[test]
+    fn build_test_kwargs_map_returns_empty_for_empty_input() {
+        let env = empty_jinja_env();
+        let ctx = BTreeMap::new();
+        let result = build_test_kwargs_map(&BTreeMap::new(), &env, &ctx);
+        assert!(result.is_empty());
     }
 }

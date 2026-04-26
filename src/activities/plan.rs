@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
+use tracing::warn;
 
 use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo};
 
@@ -29,11 +30,16 @@ pub async fn plan_project_inner(
     // Collect all node IDs that match the command (run vs build).
     // Ephemeral models are excluded — they're inlined as CTEs wherever they're ref()'d
     // and never executed as standalone activities.
+    // Generic-test macro definitions (`{% test foo(model, column_name) %}…{% endtest %}`)
+    // are excluded — dbt-fusion's parser registers them as runnable test nodes with
+    // empty `depends_on`, but the body is a macro definition, not a runnable query.
+    // Executing them produces empty SQL and a `Syntax error: Unexpected ")"`.
+    let mut skipped_macro_defs: Vec<String> = Vec::new();
     let selected_ids: Vec<String> = state
         .resolver_state
         .nodes
         .iter()
-        .filter(|(_, node)| {
+        .filter(|(id, node)| {
             let rt = node.resource_type();
             let is_ephemeral = node
                 .base()
@@ -43,10 +49,32 @@ pub async fn plan_project_inner(
             if is_ephemeral {
                 return false;
             }
-            command_includes_node_type(input.command.as_str(), rt)
+            if !command_includes_node_type(input.command.as_str(), rt) {
+                return false;
+            }
+            if rt == NodeType::Test
+                && node
+                    .common()
+                    .raw_code
+                    .as_deref()
+                    .is_some_and(raw_code_is_generic_test_macro_def)
+            {
+                skipped_macro_defs.push((*id).clone());
+                return false;
+            }
+            true
         })
         .map(|(id, _)| id.clone())
         .collect();
+
+    if !skipped_macro_defs.is_empty() {
+        warn!(
+            count = skipped_macro_defs.len(),
+            ids = ?skipped_macro_defs,
+            "skipping generic-test macro definitions misregistered as runnable tests \
+             (file body is `{{% test ... %}}...{{% endtest %}}`, not an applied test)"
+        );
+    }
 
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes found for command '{}'", input.command);
@@ -165,6 +193,27 @@ pub async fn plan_project_inner(
     })
 }
 
+/// True if `raw_code` is the body of a generic-test macro definition rather than
+/// an applied test: `{% test name(model, column_name) %}…{% endtest %}` (with
+/// optional Jinja whitespace marks). dbt-fusion's parser misregisters these
+/// files in `test-paths/` as runnable test nodes, but the body is a macro
+/// definition, so executing it produces empty SQL.
+fn raw_code_is_generic_test_macro_def(raw_code: &str) -> bool {
+    let s = raw_code.trim_start();
+    let Some(s) = s.strip_prefix("{%") else {
+        return false;
+    };
+    // Optional whitespace-control marks: `{%-`, `{%+`.
+    let s = s.strip_prefix(['-', '+']).unwrap_or(s);
+    let s = s.trim_start();
+    let Some(after_tag) = s.strip_prefix("test") else {
+        return false;
+    };
+    // The tag name must end here — `{% test foo(...)` and `{% test(` count, but
+    // `{% test_anything %}` (a different macro/keyword) does not.
+    matches!(after_tag.chars().next(), Some(c) if c.is_whitespace() || c == '(')
+}
+
 /// Decide whether a node of resource type `rt` belongs in the plan for `command`.
 ///
 /// `compile` renders SQL templates without executing — seeds are CSV (no SQL),
@@ -241,5 +290,43 @@ mod tests {
     fn unknown_command_excludes_everything() {
         assert!(!command_includes_node_type("freshness", NodeType::Model));
         assert!(!command_includes_node_type("", NodeType::Model));
+    }
+
+    /// Regression: panda-cascade phantom-test macro defs must be detected so the
+    /// planner can skip them. dbt-fusion registers each generic-test definition
+    /// in `test-paths/` as a runnable test; the body looks like a macro def and
+    /// renders to empty SQL → `Syntax error: Unexpected ")"`.
+    #[test]
+    fn raw_code_macro_def_detected_for_phantom_test() {
+        let body = "{% test not_empty(model, column_name) %}\n\
+            SELECT 'Table {{ model.table }} has no rows' AS error_message\n\
+            FROM `{{ model.project }}.{{ model.dataset }}.__TABLES__`\n\
+            WHERE table_id = '{{ model.table }}' AND row_count = 0\n\
+            {% endtest %}\n";
+        assert!(raw_code_is_generic_test_macro_def(body));
+    }
+
+    #[test]
+    fn raw_code_macro_def_detected_with_jinja_whitespace_marks() {
+        assert!(raw_code_is_generic_test_macro_def("{%- test x(m) -%}body{%- endtest -%}"));
+        assert!(raw_code_is_generic_test_macro_def("{%+ test x(m) +%}body{%+ endtest +%}"));
+        assert!(raw_code_is_generic_test_macro_def("  \n{% test x(m) %}body{% endtest %}"));
+    }
+
+    #[test]
+    fn raw_code_macro_def_not_triggered_by_applied_test_or_unrelated_jinja() {
+        // Real one-off test using ref() — the body starts with SQL, not `{% test`.
+        assert!(!raw_code_is_generic_test_macro_def(
+            "SELECT * FROM {{ ref('marketing_spend_daily') }} WHERE country_code IS NULL"
+        ));
+        // A user macro whose name happens to start with "test_" must not match.
+        assert!(!raw_code_is_generic_test_macro_def(
+            "{% macro test_something(x) %}select 1{% endmacro %}"
+        ));
+        // Bare `{% set ... %}` etc. obviously not.
+        assert!(!raw_code_is_generic_test_macro_def("{% set x = 1 %}select 1"));
+        // Empty / whitespace-only.
+        assert!(!raw_code_is_generic_test_macro_def(""));
+        assert!(!raw_code_is_generic_test_macro_def("   \n  "));
     }
 }

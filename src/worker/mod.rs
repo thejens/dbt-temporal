@@ -504,6 +504,7 @@ fn build_sql_caches(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -528,5 +529,131 @@ mod tests {
         let dirs = resolve_project_sources(&entries).await?;
         assert!(dirs.is_empty());
         Ok(())
+    }
+
+    // --- build_sql_caches ---
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use dbt_schemas::schemas::Nodes;
+    use dbt_schemas::schemas::nodes::{
+        CommonAttributes, DbtModel, DbtSnapshot, DbtTest, NodeBaseAttributes,
+    };
+
+    fn write(path: &std::path::Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn make_model(unique_id: &str, name: &str, path: &str) -> Arc<DbtModel> {
+        Arc::new(DbtModel {
+            __common_attr__: CommonAttributes {
+                unique_id: unique_id.to_string(),
+                name: name.to_string(),
+                path: PathBuf::from(path),
+                ..CommonAttributes::default()
+            },
+            ..DbtModel::default()
+        })
+    }
+
+    fn make_snapshot(unique_id: &str, name: &str, path: &str) -> Arc<DbtSnapshot> {
+        Arc::new(DbtSnapshot {
+            __common_attr__: CommonAttributes {
+                unique_id: unique_id.to_string(),
+                name: name.to_string(),
+                path: PathBuf::from(path),
+                ..CommonAttributes::default()
+            },
+            __base_attr__: NodeBaseAttributes::default(),
+            ..DbtSnapshot::default()
+        })
+    }
+
+    fn make_test(unique_id: &str, name: &str, path: &str) -> Arc<DbtTest> {
+        Arc::new(DbtTest {
+            __common_attr__: CommonAttributes {
+                unique_id: unique_id.to_string(),
+                name: name.to_string(),
+                path: PathBuf::from(path),
+                ..CommonAttributes::default()
+            },
+            ..DbtTest::default()
+        })
+    }
+
+    #[test]
+    fn build_sql_caches_picks_up_compiled_sql_for_each_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+
+        let mut nodes = Nodes::default();
+        nodes
+            .models
+            .insert("model.shop.m".to_string(), make_model("model.shop.m", "m", "models/m.sql"));
+        write(&out.join("compiled/models/m.sql"), "SELECT 1 -- compiled");
+
+        // snapshot — both compiled SQL and raw snapshot file are checked
+        nodes.snapshots.insert(
+            "snapshot.shop.s".to_string(),
+            make_snapshot("snapshot.shop.s", "s", "snapshots/s.sql"),
+        );
+        write(&out.join("compiled/snapshots/s.sql"), "SELECT compiled_snap");
+        write(&out.join("snapshots/s.sql"), "{% snapshot s %}...{% endsnapshot %}");
+
+        // test — compiled SQL + the generic-test-generated SQL beside it
+        nodes.tests.insert(
+            "test.shop.t".to_string(),
+            make_test("test.shop.t", "t", "generic_tests/t.sql"),
+        );
+        write(&out.join("compiled/generic_tests/t.sql"), "SELECT compiled_test");
+        write(&out.join("generic_tests/t.sql"), "SELECT generated_test_sql");
+
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, out);
+
+        assert_eq!(compiled["models/m.sql"], "SELECT 1 -- compiled");
+        assert_eq!(compiled["snapshots/s.sql"], "SELECT compiled_snap");
+        assert_eq!(compiled["generic_tests/t.sql"], "SELECT compiled_test");
+
+        // Snapshot raw is keyed by the SAME path as compiled (just lives in
+        // a different sub-tree) — only snapshot nodes contribute here.
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots["snapshots/s.sql"], "{% snapshot s %}...{% endsnapshot %}");
+        assert!(!snapshots.contains_key("models/m.sql"));
+
+        // Test SQL cache is just for tests with on-disk generated SQL.
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests["generic_tests/t.sql"], "SELECT generated_test_sql");
+        assert!(!tests.contains_key("models/m.sql"));
+    }
+
+    #[test]
+    fn build_sql_caches_silently_skips_missing_files() {
+        // out_dir is empty — nothing on disk for any node. The caches return
+        // empty maps rather than erroring; the workflow re-renders SQL when
+        // the cache misses.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+
+        let mut nodes = Nodes::default();
+        nodes
+            .models
+            .insert("model.shop.m".to_string(), make_model("model.shop.m", "m", "models/m.sql"));
+
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, out);
+        assert!(compiled.is_empty());
+        assert!(snapshots.is_empty());
+        assert!(tests.is_empty());
+    }
+
+    #[test]
+    fn build_sql_caches_returns_empty_for_empty_node_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = Nodes::default();
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, dir.path());
+        assert!(compiled.is_empty());
+        assert!(snapshots.is_empty());
+        assert!(tests.is_empty());
     }
 }

@@ -25,21 +25,29 @@ test-examples:
 # Excludes main.rs (binary entrypoint) — all real logic is in lib.rs.
 # Runs single-threaded to avoid a dbt-fusion loader race when two tests load
 # the same project in parallel (loader.rs:638 RwLock unwrap).
+#
+# Runs as `cargo test` under the env that `cargo llvm-cov show-env` exports
+# rather than letting `cargo llvm-cov` invoke cargo itself. The latter spawns
+# the test binaries through a path that the local sandbox SIGKILLs on this
+# machine (only --workspace mode); the former runs identical tests with
+# instrumentation and produces the same coverage data.
 COVERAGE_FLOOR ?= 85
 COVERAGE_IGNORE := src/main\.rs
 
 coverage:
-	cargo llvm-cov --workspace --no-fail-fast \
-		--ignore-filename-regex '$(COVERAGE_IGNORE)' \
-		--fail-under-lines $(COVERAGE_FLOOR) \
-		--summary-only \
-		-- --test-threads=1
+	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
+		cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		cargo llvm-cov report \
+			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
+			--summary-only \
+			--fail-under-lines $(COVERAGE_FLOOR)
 
 coverage-html:
-	cargo llvm-cov --workspace --no-fail-fast \
-		--ignore-filename-regex '$(COVERAGE_IGNORE)' \
-		--html \
-		-- --test-threads=1
+	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
+		cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		cargo llvm-cov report \
+			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
+			--html
 	@echo "Open target/llvm-cov/html/index.html"
 
 clippy:

@@ -43,6 +43,14 @@ fn expand_env_vars(s: &str) -> Result<String> {
 /// Entries can be local paths or remote URLs. Local paths are validated for
 /// `dbt_project.yml`; remote URLs are passed through to be resolved at startup.
 pub fn discover_project_dirs() -> Result<Vec<String>> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    discover_project_dirs_in(&cwd)
+}
+
+/// Internal worker for [`discover_project_dirs`] taking the cwd as a parameter.
+/// Lets unit tests cover the cwd-fallback branches (steps 4a/4b) without
+/// process-global `chdir`.
+fn discover_project_dirs_in(cwd: &Path) -> Result<Vec<String>> {
     // 1. Explicit list: DBT_PROJECT_DIRS=path1,path2,git+https://...
     //    Supports ${VAR} env var substitution for pinning versions in URLs.
     if let Ok(val) = std::env::var("DBT_PROJECT_DIRS") {
@@ -93,13 +101,11 @@ pub fn discover_project_dirs() -> Result<Vec<String>> {
     }
 
     // 4. Fallback: use cwd
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
-
     if cwd.join("dbt_project.yml").exists() {
         return Ok(vec![cwd.to_string_lossy().to_string()]);
     }
 
-    let dirs = scan_for_projects(&cwd)?;
+    let dirs = scan_for_projects(cwd)?;
     if dirs.is_empty() {
         bail!(
             "no dbt projects found in {} (set DBT_PROJECT_DIRS or DBT_PROJECTS_DIR)",
@@ -334,6 +340,82 @@ mod tests {
             || {
                 let dirs = discover_project_dirs()?;
                 assert_eq!(dirs, vec![tmp.to_string_lossy().to_string()]);
+                Ok(())
+            },
+        )?;
+
+        std::fs::remove_dir_all(&tmp)?;
+        Ok(())
+    }
+
+    // --- discover_project_dirs_in (cwd fallback) ---
+
+    #[test]
+    fn discover_dirs_cwd_with_project_yml_returns_cwd() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("dbtt-cwd-self-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp)?;
+        std::fs::write(tmp.join("dbt_project.yml"), "name: cwd_project")?;
+
+        with_env(
+            &[
+                ("DBT_PROJECT_DIRS", None),
+                ("DBT_PROJECTS_DIR", None),
+                ("DBT_PROJECT_DIR", None),
+            ],
+            || {
+                let dirs = discover_project_dirs_in(&tmp)?;
+                assert_eq!(dirs, vec![tmp.to_string_lossy().to_string()]);
+                Ok(())
+            },
+        )?;
+
+        std::fs::remove_dir_all(&tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discover_dirs_cwd_scans_subdirs_when_no_project_at_root() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("dbtt-cwd-scan-{}", uuid::Uuid::new_v4()));
+        let proj = tmp.join("inner");
+        std::fs::create_dir_all(&proj)?;
+        std::fs::write(proj.join("dbt_project.yml"), "name: inner")?;
+
+        with_env(
+            &[
+                ("DBT_PROJECT_DIRS", None),
+                ("DBT_PROJECTS_DIR", None),
+                ("DBT_PROJECT_DIR", None),
+            ],
+            || {
+                let dirs = discover_project_dirs_in(&tmp)?;
+                assert_eq!(dirs.len(), 1);
+                assert!(dirs[0].ends_with("inner"));
+                Ok(())
+            },
+        )?;
+
+        std::fs::remove_dir_all(&tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discover_dirs_cwd_empty_errors_with_actionable_hint() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("dbtt-cwd-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp)?;
+
+        with_env(
+            &[
+                ("DBT_PROJECT_DIRS", None),
+                ("DBT_PROJECTS_DIR", None),
+                ("DBT_PROJECT_DIR", None),
+            ],
+            || {
+                let Err(err) = discover_project_dirs_in(&tmp) else {
+                    anyhow::bail!("expected error for empty cwd");
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("no dbt projects found"), "got: {msg}");
+                assert!(msg.contains("DBT_PROJECT_DIRS"), "should hint at env vars: {msg}");
                 Ok(())
             },
         )?;

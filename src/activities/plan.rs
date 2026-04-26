@@ -252,6 +252,7 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -328,5 +329,64 @@ mod tests {
         // Empty / whitespace-only.
         assert!(!raw_code_is_generic_test_macro_def(""));
         assert!(!raw_code_is_generic_test_macro_def("   \n  "));
+    }
+
+    // --- build_node_info ---
+
+    #[test]
+    fn build_node_info_returns_none_for_unknown_id() {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        assert!(build_node_info(&nodes, "model.shop.nope").is_none());
+    }
+
+    #[test]
+    fn build_node_info_extracts_fields_and_dependencies() {
+        use std::sync::Arc;
+
+        use dbt_common::CodeLocationWithFile;
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::common::NodeDependsOn;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel, NodeBaseAttributes};
+
+        let mut nodes = Nodes::default();
+        let common = CommonAttributes {
+            unique_id: "model.shop.orders".to_string(),
+            name: "orders".to_string(),
+            package_name: "shop".to_string(),
+            ..CommonAttributes::default()
+        };
+        let depends_on = NodeDependsOn {
+            nodes_with_ref_location: vec![
+                ("model.shop.stg_orders".to_string(), CodeLocationWithFile::default()),
+                ("model.shop.stg_customers".to_string(), CodeLocationWithFile::default()),
+            ],
+            ..NodeDependsOn::default()
+        };
+        nodes.models.insert(
+            "model.shop.orders".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: common,
+                __base_attr__: NodeBaseAttributes {
+                    depends_on,
+                    ..NodeBaseAttributes::default()
+                },
+                ..DbtModel::default()
+            }),
+        );
+
+        let info = build_node_info(&nodes, "model.shop.orders").expect("orders is in the registry");
+        assert_eq!(info.unique_id, "model.shop.orders");
+        assert_eq!(info.name, "orders");
+        assert_eq!(info.package_name, "shop");
+        assert_eq!(info.resource_type, "NODE_TYPE_MODEL");
+        assert_eq!(info.depends_on.len(), 2);
+        assert!(
+            info.depends_on
+                .contains(&"model.shop.stg_orders".to_string())
+        );
+        assert!(
+            info.depends_on
+                .contains(&"model.shop.stg_customers".to_string())
+        );
     }
 }

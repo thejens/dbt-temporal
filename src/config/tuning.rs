@@ -156,6 +156,92 @@ mod tests {
         Ok(())
     }
 
+    // --- parse_env_u64 / parse_env_f32 ---
+
+    #[test]
+    fn parse_env_u64_valid_invalid_and_default() -> Result<()> {
+        with_env(&[("TEST_CFG_U64_VALID", Some("123"))], || {
+            assert_eq!(parse_env_u64("TEST_CFG_U64_VALID", 0)?, 123);
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_U64_INVALID", Some("nope"))], || {
+            assert!(parse_env_u64("TEST_CFG_U64_INVALID", 0).is_err());
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_U64_MISSING", None)], || {
+            assert_eq!(parse_env_u64("TEST_CFG_U64_MISSING", 7)?, 7);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_env_f32_valid_invalid_and_default() -> Result<()> {
+        with_env(&[("TEST_CFG_F32_VALID", Some("0.5"))], || {
+            let val = parse_env_f32("TEST_CFG_F32_VALID", 0.0)?;
+            assert!((val - 0.5).abs() < f32::EPSILON);
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_F32_INVALID", Some("xx"))], || {
+            assert!(parse_env_f32("TEST_CFG_F32_INVALID", 0.0).is_err());
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_F32_MISSING", None)], || {
+            let val = parse_env_f32("TEST_CFG_F32_MISSING", 0.3)?;
+            assert!((val - 0.3).abs() < f32::EPSILON);
+            Ok(())
+        })
+    }
+
+    // --- parse_optional_env_f64 / parse_optional_env_u64 ---
+
+    #[test]
+    fn parse_optional_env_f64_returns_none_for_missing_or_empty() -> Result<()> {
+        with_env(&[("TEST_CFG_OPT_F64", None)], || {
+            assert!(parse_optional_env_f64("TEST_CFG_OPT_F64")?.is_none());
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_OPT_F64", Some(""))], || {
+            assert!(parse_optional_env_f64("TEST_CFG_OPT_F64")?.is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_optional_env_f64_parses_value_and_errors_on_garbage() -> Result<()> {
+        with_env(&[("TEST_CFG_OPT_F64", Some("12.5"))], || {
+            assert_eq!(parse_optional_env_f64("TEST_CFG_OPT_F64")?, Some(12.5));
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_OPT_F64", Some("nope"))], || {
+            assert!(parse_optional_env_f64("TEST_CFG_OPT_F64").is_err());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_optional_env_u64_returns_none_for_missing_or_empty() -> Result<()> {
+        with_env(&[("TEST_CFG_OPT_U64", None)], || {
+            assert!(parse_optional_env_u64("TEST_CFG_OPT_U64")?.is_none());
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_OPT_U64", Some(""))], || {
+            assert!(parse_optional_env_u64("TEST_CFG_OPT_U64")?.is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_optional_env_u64_parses_value_and_errors_on_garbage() -> Result<()> {
+        with_env(&[("TEST_CFG_OPT_U64", Some("9001"))], || {
+            assert_eq!(parse_optional_env_u64("TEST_CFG_OPT_U64")?, Some(9001));
+            Ok(())
+        })?;
+        with_env(&[("TEST_CFG_OPT_U64", Some("nope"))], || {
+            assert!(parse_optional_env_u64("TEST_CFG_OPT_U64").is_err());
+            Ok(())
+        })
+    }
+
     // --- parse_search_attributes ---
 
     #[test]

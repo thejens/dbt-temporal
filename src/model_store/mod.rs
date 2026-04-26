@@ -60,6 +60,7 @@ fn scan_for_projects(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -105,5 +106,23 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(not(any(feature = "gcs", feature = "aws")))]
+    async fn fetch_models_rejects_cloud_url_without_feature() {
+        // Without gcs/aws compile flags, gs:// and s3:// must error with an
+        // actionable hint pointing at the feature flag.
+        let err = fetch_models("s3://bucket/prefix")
+            .await
+            .expect_err("s3:// URL without aws feature should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("gcs") || msg.contains("aws"), "got: {msg}");
+        assert!(msg.contains("feature"), "got: {msg}");
+
+        let err = fetch_models("gs://bucket/prefix")
+            .await
+            .expect_err("gs:// URL without gcs feature should fail");
+        assert!(err.to_string().contains("feature"));
     }
 }

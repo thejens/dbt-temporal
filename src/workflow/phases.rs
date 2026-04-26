@@ -147,6 +147,29 @@ pub fn select_post_run_hooks(
     }
 }
 
+/// Convert search-attribute strings into the JSON-encoded payloads Temporal's
+/// `upsert_search_attributes` API expects. Pure: just serializes each value
+/// and wraps any failure into `WorkflowTermination::failed` with the
+/// attribute key in the error message.
+pub fn build_search_attribute_payloads(
+    attributes: &BTreeMap<String, String>,
+) -> Result<
+    Vec<(String, temporalio_common::protos::temporal::api::common::v1::Payload)>,
+    WorkflowTermination,
+> {
+    attributes
+        .iter()
+        .map(|(k, v)| {
+            let payload = v.as_json_payload().map_err(|e| {
+                WorkflowTermination::failed(anyhow::anyhow!(
+                    "serializing search attribute '{k}' as JSON payload: {e:#}"
+                ))
+            })?;
+            Ok((k.clone(), payload))
+        })
+        .collect()
+}
+
 pub fn write_command_memo(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
@@ -178,18 +201,7 @@ pub async fn plan_and_announce(
         })?;
 
     if !plan.search_attributes.is_empty() {
-        let sa_payloads: Vec<(String, _)> = plan
-            .search_attributes
-            .iter()
-            .map(|(k, v)| {
-                let payload = v.as_json_payload().map_err(|e| {
-                    WorkflowTermination::failed(anyhow::anyhow!(
-                        "serializing search attribute '{k}' as JSON payload: {e:#}"
-                    ))
-                })?;
-                Ok((k.clone(), payload))
-            })
-            .collect::<Result<_, WorkflowTermination>>()?;
+        let sa_payloads = build_search_attribute_payloads(&plan.search_attributes)?;
         ctx.upsert_search_attributes(sa_payloads);
     }
 
@@ -634,5 +646,32 @@ mod tests {
         let (sel_fail, _) = select_post_run_hooks(false, &hooks);
         assert!(sel_succ.is_empty());
         assert!(sel_fail.is_empty());
+    }
+
+    // --- build_search_attribute_payloads ---
+
+    #[test]
+    fn build_search_attribute_payloads_empty_input() {
+        let attrs = BTreeMap::new();
+        let result = build_search_attribute_payloads(&attrs).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_search_attribute_payloads_serializes_each_string() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("DbtProject".to_string(), "shop".to_string());
+        attrs.insert("DbtCommand".to_string(), "build".to_string());
+
+        let result = build_search_attribute_payloads(&attrs).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Order is BTreeMap-deterministic (alphabetical by key).
+        assert_eq!(result[0].0, "DbtCommand");
+        assert_eq!(result[1].0, "DbtProject");
+
+        // Each Payload contains the JSON-encoded string value.
+        let payload_value: serde_json::Value = serde_json::from_slice(&result[1].1.data).unwrap();
+        assert_eq!(payload_value, serde_json::json!("shop"));
     }
 }

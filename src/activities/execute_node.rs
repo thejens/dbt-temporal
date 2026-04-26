@@ -136,6 +136,126 @@ fn registry_non_retryable_patterns(
     Some(state.non_retryable_error_patterns.clone())
 }
 
+/// Patch refs in compiled SQL when a per-workflow env override changed the
+/// profile schema. Replaces quoted occurrences of the worker-startup default
+/// schema with the workflow's schema; otherwise returns the input unchanged.
+///
+/// `env_schema = None` (no override active) and `env_schema == default_schema`
+/// (override matches startup) are both no-ops.
+fn patch_compiled_schema(
+    compiled: String,
+    env_schema: Option<&str>,
+    default_schema: &str,
+) -> String {
+    let Some(wf_schema) = env_schema else {
+        return compiled;
+    };
+    if wf_schema == default_schema {
+        return compiled;
+    }
+    compiled.replace(&format!("\"{default_schema}\""), &format!("\"{wf_schema}\""))
+}
+
+/// Pick the materialization name to dispatch on. Seeds are forced to "seed"
+/// because dbt-fusion still reports their `base.materialized` as "table"
+/// (issue #1345); without the override `materialization_table_default` would
+/// be invoked with empty SQL and produce invalid CREATE statements.
+fn select_materialization_name(rt: NodeType, base_materialized: &str) -> String {
+    if rt == NodeType::Seed {
+        "seed".to_string()
+    } else {
+        base_materialized.to_lowercase()
+    }
+}
+
+/// True if the node is one we expect `create_schema(this)` to be called for
+/// before materialization. Tests and operations don't get a schema-create
+/// pass — they only read.
+const fn is_create_schema_eligible(rt: NodeType) -> bool {
+    matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot)
+}
+
+/// True if a node of this resource_type + materialization should produce an
+/// adapter response. Used as a no-op guard: an empty adapter response on a
+/// node that *should* execute SQL is a sign that `statement('main')` never
+/// ran (likely a buggy materialization template).
+const fn expects_adapter_response(rt: NodeType, materialization: &str) -> bool {
+    match rt {
+        // Ephemeral models never execute against the warehouse — they're
+        // inlined as CTEs in their downstream consumer's SQL.
+        NodeType::Model => !matches!(materialization.as_bytes(), b"ephemeral"),
+        NodeType::Seed | NodeType::Snapshot | NodeType::Test => true,
+        _ => false,
+    }
+}
+
+/// Pick the final `compiled_code` for the result. Prefer the SQL the context
+/// captured during render (the canonical compile output); fall back to the
+/// stripped rendered output only when the context didn't get a `sql` set.
+fn finalize_compiled_code(compiled_sql: Option<String>, rendered: &str) -> Option<String> {
+    compiled_sql.or_else(|| {
+        let trimmed = rendered.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Build the compile + execute `TimingEntry` pair returned to the workflow.
+fn build_timing_entries(
+    compile_start: chrono::DateTime<chrono::Utc>,
+    compile_end: chrono::DateTime<chrono::Utc>,
+    execute_start: chrono::DateTime<chrono::Utc>,
+    execute_end: chrono::DateTime<chrono::Utc>,
+) -> Vec<TimingEntry> {
+    vec![
+        TimingEntry {
+            name: "compile".to_string(),
+            started_at: compile_start.to_rfc3339(),
+            completed_at: compile_end.to_rfc3339(),
+        },
+        TimingEntry {
+            name: "execute".to_string(),
+            started_at: execute_start.to_rfc3339(),
+            completed_at: execute_end.to_rfc3339(),
+        },
+    ]
+}
+
+/// Decide what to do when raw SQL came back empty. Models, snapshots, and
+/// tests *must* have a non-empty body — empty SQL there is a real bug.
+/// Hooks and operations are allowed to compile to nothing.
+fn empty_raw_sql_dispatch(rt: NodeType, unique_id: &str) -> Result<(), DbtTemporalError> {
+    match rt {
+        NodeType::Model | NodeType::Snapshot | NodeType::Test => {
+            Err(DbtTemporalError::Compilation(format!("raw SQL is empty for {unique_id}")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Decide what to do when reading raw SQL from disk failed. Same shape as
+/// `empty_raw_sql_dispatch` — hard error for nodes that need SQL, soft for
+/// hooks/operations.
+fn raw_sql_read_error_dispatch(
+    rt: NodeType,
+    unique_id: &str,
+    path: &std::path::Path,
+    err: &std::io::Error,
+) -> Result<(), DbtTemporalError> {
+    match rt {
+        NodeType::Model | NodeType::Snapshot | NodeType::Test => {
+            Err(DbtTemporalError::Compilation(format!(
+                "reading raw SQL for {unique_id} at {}: {err:#}",
+                path.display()
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // Sequential adapter interaction with setup, execution, and result extraction.
 // Kept async so tokio::select! in execute_node_outer can poll it against
@@ -458,18 +578,8 @@ async fn execute_node_inner(
             // but per-workflow env overrides may change the schema. Replace quoted occurrences
             // of the startup schema with the per-workflow schema so downstream refs find tables
             // in the correct schema.
-            let compiled = if let Some(ref wf_schema) = env_schema {
-                if *wf_schema == state.default_schema {
-                    compiled
-                } else {
-                    compiled.replace(
-                        &format!("\"{}\"", state.default_schema),
-                        &format!("\"{wf_schema}\""),
-                    )
-                }
-            } else {
-                compiled
-            };
+            let compiled =
+                patch_compiled_schema(compiled, env_schema.as_deref(), &state.default_schema);
 
             // Set both `sql` and `compiled_code` in the context. View materializations
             // reference `sql`, while table/incremental materializations reference
@@ -496,34 +606,19 @@ async fn execute_node_inner(
                 ))
             })?;
         }
-        Ok(_) => match rt {
-            NodeType::Model | NodeType::Snapshot | NodeType::Test => {
-                return Err(DbtTemporalError::Compilation(format!(
-                    "raw SQL is empty for {unique_id}"
-                ))
-                .into());
-            }
-            _ => {
-                info!(node = %unique_id, "raw SQL is empty");
-            }
-        },
-        Err((path, e)) => match rt {
-            NodeType::Model | NodeType::Snapshot | NodeType::Test => {
-                return Err(DbtTemporalError::Compilation(format!(
-                    "reading raw SQL for {unique_id} at {}: {e:#}",
-                    path.display()
-                ))
-                .into());
-            }
-            _ => {
-                info!(
-                    node = %unique_id,
-                    path = %path.display(),
-                    error = %e,
-                    "failed to read raw SQL file"
-                );
-            }
-        },
+        Ok(_) => {
+            empty_raw_sql_dispatch(rt, unique_id)?;
+            info!(node = %unique_id, "raw SQL is empty");
+        }
+        Err((path, e)) => {
+            raw_sql_read_error_dispatch(rt, unique_id, &path, &e)?;
+            info!(
+                node = %unique_id,
+                path = %path.display(),
+                error = %e,
+                "failed to read raw SQL file"
+            );
+        }
     }
 
     // Keep temp_dir alive until after rendering completes (dropped at end of scope).
@@ -562,24 +657,16 @@ async fn execute_node_inner(
     // Ensure the target schema/dataset exists (dbt does this before materializations).
     // Dispatches to the adapter-specific create_schema macro (e.g. CREATE SCHEMA IF NOT EXISTS).
     // Uses `this` which is the target relation (database + schema + identifier).
-    if matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot)
+    if is_create_schema_eligible(rt)
         && let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", &node_context, &[])
     {
         tracing::warn!(node = %unique_id, error = %e, "create_schema failed (non-fatal)");
     }
 
     // Resolve the materialization template using dbt-fusion's MaterializationResolver.
-    // This applies proper adapter prefix inheritance (e.g. redshift→postgres→default)
-    // and package precedence (Root > Imported > Core for builtins).
-    // Seeds are forced to "seed" because base.materialized still returns "table" for them
-    // (dbt-fusion#1345 — DbtMaterialization::Seed exists for comparisons but node data
-    // hasn't been updated to use it). Without this, materialization_table_default is called
-    // with an empty sql body, producing invalid SQL.
-    let materialization = if rt == NodeType::Seed {
-        "seed".to_string()
-    } else {
-        base.materialized.to_string().to_lowercase()
-    };
+    // Dispatches with adapter prefix inheritance (e.g. redshift→postgres→default) and
+    // package precedence (Root > Imported > Core for builtins).
+    let materialization = select_materialization_name(rt, &base.materialized.to_string());
 
     // Extract compiled SQL from the node context before rendering.
     let compiled_sql = node_context
@@ -599,31 +686,13 @@ async fn execute_node_inner(
     let rendered = render_materialization(&jinja_env, &fq_name, &node_context)?;
 
     // Prefer the compiled SQL from the context; fall back to rendered output if non-empty.
-    let compiled_code = compiled_sql.or_else(|| {
-        let trimmed = rendered.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
+    let compiled_code = finalize_compiled_code(compiled_sql, &rendered);
 
     let execute_end = chrono::Utc::now();
 
     let execution_time = start_instant.elapsed().as_secs_f64();
 
-    let timing = vec![
-        TimingEntry {
-            name: "compile".to_string(),
-            started_at: compile_start.to_rfc3339(),
-            completed_at: compile_end.to_rfc3339(),
-        },
-        TimingEntry {
-            name: "execute".to_string(),
-            started_at: execute_start.to_rfc3339(),
-            completed_at: execute_end.to_rfc3339(),
-        },
-    ];
+    let timing = build_timing_entries(compile_start, compile_end, execute_start, execute_end);
 
     // Extract adapter response from the ResultStore.
     // Materialization macros call store_result('main', response) during rendering.
@@ -631,12 +700,7 @@ async fn execute_node_inner(
 
     // Guard against silent no-op executions. For nodes that should execute SQL, an empty
     // adapter response indicates that statement('main') likely never ran.
-    let expects_adapter_response = match rt {
-        NodeType::Model => materialization != "ephemeral",
-        NodeType::Seed | NodeType::Snapshot | NodeType::Test => true,
-        _ => false,
-    };
-    if expects_adapter_response && adapter_response.is_empty() {
+    if expects_adapter_response(rt, &materialization) && adapter_response.is_empty() {
         return Err(DbtTemporalError::Adapter(anyhow::anyhow!(
             "node {unique_id} finished without adapter response (resource_type={}, materialization={materialization}); no query appears to have run",
             rt.as_str_name()
@@ -863,5 +927,179 @@ mod tests {
         response.insert("message".to_string(), serde_json::json!(42));
         let msg = build_success_message(&response, "table");
         assert_eq!(msg.as_deref(), Some("table"));
+    }
+
+    // --- patch_compiled_schema ---
+
+    #[test]
+    fn patch_compiled_schema_replaces_quoted_default_with_workflow_schema() {
+        let sql = "select * from \"raw\".\"orders\" join \"raw\".\"customers\" using (id)";
+        let out = patch_compiled_schema(sql.to_string(), Some("workflow_42"), "raw");
+        assert_eq!(
+            out,
+            "select * from \"workflow_42\".\"orders\" join \"workflow_42\".\"customers\" using (id)"
+        );
+    }
+
+    #[test]
+    fn patch_compiled_schema_no_op_when_env_schema_absent() {
+        let sql = "select 1 from \"raw\".\"x\"";
+        let out = patch_compiled_schema(sql.to_string(), None, "raw");
+        assert_eq!(out, sql);
+    }
+
+    #[test]
+    fn patch_compiled_schema_no_op_when_workflow_matches_default() {
+        let sql = "select 1 from \"raw\".\"x\"";
+        let out = patch_compiled_schema(sql.to_string(), Some("raw"), "raw");
+        assert_eq!(out, sql);
+    }
+
+    #[test]
+    fn patch_compiled_schema_only_replaces_quoted_occurrences() {
+        // An unquoted match is left alone: only `"raw"` (with quotes) matters.
+        // Bare `raw.foo` is something else (e.g. a column reference).
+        let sql = "with raw as (select 1) select \"raw\".\"x\" from raw";
+        let out = patch_compiled_schema(sql.to_string(), Some("env_a"), "raw");
+        assert_eq!(out, "with raw as (select 1) select \"env_a\".\"x\" from raw");
+    }
+
+    // --- select_materialization_name ---
+
+    #[test]
+    fn select_materialization_name_forces_seed_for_seed_nodes() {
+        // base.materialized still says "table" for seeds in dbt-fusion (#1345).
+        assert_eq!(select_materialization_name(NodeType::Seed, "table"), "seed");
+        assert_eq!(select_materialization_name(NodeType::Seed, "view"), "seed");
+    }
+
+    #[test]
+    fn select_materialization_name_lowercases_for_non_seed() {
+        assert_eq!(select_materialization_name(NodeType::Model, "Table"), "table");
+        assert_eq!(select_materialization_name(NodeType::Model, "VIEW"), "view");
+        assert_eq!(select_materialization_name(NodeType::Snapshot, "snapshot"), "snapshot");
+        assert_eq!(select_materialization_name(NodeType::Test, "test"), "test");
+    }
+
+    // --- is_create_schema_eligible ---
+
+    #[test]
+    fn is_create_schema_eligible_for_writers_only() {
+        assert!(is_create_schema_eligible(NodeType::Model));
+        assert!(is_create_schema_eligible(NodeType::Seed));
+        assert!(is_create_schema_eligible(NodeType::Snapshot));
+        // Tests and operations don't need a schema-create pass.
+        assert!(!is_create_schema_eligible(NodeType::Test));
+        assert!(!is_create_schema_eligible(NodeType::Operation));
+    }
+
+    // --- expects_adapter_response ---
+
+    #[test]
+    fn expects_adapter_response_for_writer_resource_types() {
+        assert!(expects_adapter_response(NodeType::Model, "table"));
+        assert!(expects_adapter_response(NodeType::Model, "view"));
+        assert!(expects_adapter_response(NodeType::Seed, "seed"));
+        assert!(expects_adapter_response(NodeType::Snapshot, "snapshot"));
+        assert!(expects_adapter_response(NodeType::Test, "test"));
+    }
+
+    #[test]
+    fn expects_adapter_response_skips_ephemeral_models() {
+        // Ephemeral models compile to CTEs in their downstream consumer — they
+        // never execute against the warehouse, so an empty adapter response is
+        // expected and not a bug.
+        assert!(!expects_adapter_response(NodeType::Model, "ephemeral"));
+    }
+
+    #[test]
+    fn expects_adapter_response_false_for_other_node_types() {
+        // Hooks, operations, sources etc. don't run as standalone activities;
+        // even if they did, they don't need adapter response inspection.
+        assert!(!expects_adapter_response(NodeType::Operation, "view"));
+        assert!(!expects_adapter_response(NodeType::Source, "view"));
+    }
+
+    // --- finalize_compiled_code ---
+
+    #[test]
+    fn finalize_compiled_code_prefers_context_sql() {
+        // When the context captured an explicit `sql`, the rendered output
+        // (often just an empty string from materialization templates) is
+        // ignored.
+        let code = finalize_compiled_code(Some("SELECT 1".to_string()), "");
+        assert_eq!(code.as_deref(), Some("SELECT 1"));
+        let code = finalize_compiled_code(Some("SELECT 1".to_string()), "ignored");
+        assert_eq!(code.as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn finalize_compiled_code_falls_back_to_rendered_when_context_absent() {
+        let code = finalize_compiled_code(None, "  CREATE VIEW foo AS SELECT 1  ");
+        assert_eq!(code.as_deref(), Some("CREATE VIEW foo AS SELECT 1"));
+    }
+
+    #[test]
+    fn finalize_compiled_code_returns_none_when_both_empty() {
+        assert!(finalize_compiled_code(None, "").is_none());
+        assert!(finalize_compiled_code(None, "   \n  ").is_none());
+    }
+
+    // --- build_timing_entries ---
+
+    #[test]
+    fn build_timing_entries_emits_compile_then_execute() {
+        let t0 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let t1 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_001, 0).unwrap();
+        let t2 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_002, 0).unwrap();
+        let t3 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_003, 0).unwrap();
+        let entries = build_timing_entries(t0, t1, t2, t3);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "compile");
+        assert_eq!(entries[0].started_at, t0.to_rfc3339());
+        assert_eq!(entries[0].completed_at, t1.to_rfc3339());
+        assert_eq!(entries[1].name, "execute");
+        assert_eq!(entries[1].started_at, t2.to_rfc3339());
+        assert_eq!(entries[1].completed_at, t3.to_rfc3339());
+    }
+
+    // --- empty_raw_sql_dispatch / raw_sql_read_error_dispatch ---
+
+    #[test]
+    fn empty_raw_sql_dispatch_errors_for_writer_types() {
+        for rt in [NodeType::Model, NodeType::Snapshot, NodeType::Test] {
+            let err = empty_raw_sql_dispatch(rt, "model.x.foo").unwrap_err();
+            assert!(matches!(err, DbtTemporalError::Compilation(_)));
+            assert!(err.to_string().contains("model.x.foo"));
+            assert!(err.to_string().contains("empty"));
+        }
+    }
+
+    #[test]
+    fn empty_raw_sql_dispatch_ok_for_other_types() {
+        // Hooks and operations are allowed to compile to nothing.
+        for rt in [NodeType::Operation, NodeType::Seed] {
+            assert!(empty_raw_sql_dispatch(rt, "x").is_ok());
+        }
+    }
+
+    #[test]
+    fn raw_sql_read_error_dispatch_errors_for_writer_types() {
+        let path = std::path::PathBuf::from("/missing/foo.sql");
+        let io_err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        for rt in [NodeType::Model, NodeType::Snapshot, NodeType::Test] {
+            let err = raw_sql_read_error_dispatch(rt, "model.x.foo", &path, &io_err).unwrap_err();
+            assert!(matches!(err, DbtTemporalError::Compilation(_)));
+            let msg = err.to_string();
+            assert!(msg.contains("model.x.foo"));
+            assert!(msg.contains("/missing/foo.sql"));
+        }
+    }
+
+    #[test]
+    fn raw_sql_read_error_dispatch_ok_for_other_types() {
+        let path = std::path::PathBuf::from("/missing/foo.sql");
+        let io_err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(raw_sql_read_error_dispatch(NodeType::Operation, "x", &path, &io_err).is_ok());
     }
 }

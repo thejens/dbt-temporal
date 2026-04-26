@@ -1170,4 +1170,40 @@ mod tests {
         assert!(msg.contains("invalid invocation_id"));
         assert!(msg.contains("not-a-uuid"));
     }
+
+    // --- classify_for_temporal ---
+
+    #[test]
+    fn classify_for_temporal_marks_retryable_adapter_error() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection timeout"));
+        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        assert!(matches!(activity_err, ActivityError::Retryable { .. }));
+    }
+
+    #[test]
+    fn classify_for_temporal_marks_compilation_as_non_retryable() {
+        let err = DbtTemporalError::Compilation("bad ref".into());
+        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        assert!(matches!(activity_err, ActivityError::NonRetryable(_)));
+    }
+
+    #[test]
+    fn classify_for_temporal_promotes_pattern_match_to_non_retryable() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("permission denied for table foo"));
+        let patterns = compile_error_patterns(&["permission denied".to_string()]);
+        let activity_err = classify_for_temporal(&err, &patterns);
+        assert!(matches!(activity_err, ActivityError::NonRetryable(_)));
+    }
+
+    // --- registry_non_retryable_patterns ---
+
+    #[test]
+    fn registry_non_retryable_patterns_returns_none_for_unknown_project() {
+        // Empty registry → unknown project lookup returns None, signalling
+        // the caller to fall back to "all adapter errors retry".
+        use std::collections::BTreeMap;
+
+        let registry = Arc::new(ProjectRegistry::new(BTreeMap::new()));
+        assert!(registry_non_retryable_patterns(&registry, "missing").is_none());
+    }
 }

@@ -1,4 +1,7 @@
+mod raw_sql;
+mod schema_patch;
 mod schema_patcher;
+mod yml_to_value;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -6,9 +9,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
+use raw_sql::resolve_raw_sql;
+use schema_patch::{apply_patched_relation, compute_patched_relation};
 use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
+use yml_to_value::yml_value_to_minijinja_with_jinja;
 
 use crate::error::DbtTemporalError;
 use crate::project_registry::ProjectRegistry;
@@ -343,160 +349,24 @@ async fn execute_node_inner(
         minijinja::Value::from(common.package_name.clone()),
     );
 
-    // Patch `this`, `database`, `schema` when per-workflow env overrides changed the profile
-    // schema/database. build_run_node_context builds `this` from node.base() which was resolved
-    // at startup — it doesn't reflect the per-workflow profile values.
-    //
-    // Strategy: recompute the schema/database using the same pattern as dbt's default
-    // generate_schema_name / generate_database_name macros, substituting the per-workflow
-    // target values. This handles both nodes with no custom schema (target.schema directly)
-    // and nodes with static custom schemas (target.schema + "_" + custom).
-    //
-    // Note: the `target` Jinja global is already patched above, so macros invoked during
-    // subsequent rendering (raw SQL compilation, materialization) will also see correct values.
-    if let Some(ref wf_schema) = env_schema {
-        let wf_database = env_database.as_deref().unwrap_or(&base.database);
-        let default_prefix = format!("{}_", state.default_schema);
-
-        // Recompute schema: default generate_schema_name returns target.schema when no custom
-        // schema, or target.schema + "_" + custom_schema_name when custom schema is set.
-        let new_schema = if base.schema == state.default_schema {
-            wf_schema.clone()
-        } else if let Some(custom) = base.schema.strip_prefix(&default_prefix) {
-            format!("{wf_schema}_{custom}")
-        } else if state.has_custom_schema_name_macro {
-            // Project overrides generate_schema_name — we can't reproduce its
-            // logic from outside, so any patched value risks writing into the
-            // wrong schema. Reject the workflow rather than silently using a
-            // stale schema; the user can rebuild the worker with the right
-            // env or move the override to profiles.yml.
-            return Err(DbtTemporalError::Configuration(format!(
-                "node {unique_id} can't be safely retargeted: project overrides \
-                 generate_schema_name and node schema {:?} does not follow the \
-                 default `<target_schema>_<custom>` pattern, so per-workflow env \
-                 overrides for schema cannot be honoured. Move the override into \
-                 profiles.yml, or remove the custom generate_schema_name macro.",
-                base.schema
-            ))
-            .into());
-        } else {
-            // Schema doesn't follow default pattern but project uses the
-            // default macro — keep base.schema unchanged.
-            base.schema.clone()
-        };
-
-        // Recompute database: default generate_database_name returns target.database when
-        // no custom database, or the custom database directly (no prefix pattern).
-        let new_database = if base.database == state.default_database {
-            wf_database.to_string()
-        } else {
-            base.database.clone()
-        };
-
-        let needs_schema_patch = new_schema != base.schema;
-        let needs_db_patch = new_database != base.database;
-
-        if needs_schema_patch || needs_db_patch {
-            let patched_schema = if needs_schema_patch {
-                new_schema.as_str()
-            } else {
-                &base.schema
-            };
-            let patched_database = if needs_db_patch {
-                new_database.as_str()
-            } else {
-                &base.database
-            };
-
-            // Rebuild the `this` Relation with the corrected schema/database.
-            if let Ok(relation) = dbt_adapter::relation::do_create_relation(
-                state.resolver_state.adapter_type,
-                patched_database.to_string(),
-                patched_schema.to_string(),
-                Some(base.alias.clone()),
-                None,
-                base.quoting,
-            ) {
-                let relation_value =
-                    dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value();
-                node_context.insert("this".to_owned(), relation_value);
-            }
-            if needs_schema_patch {
-                node_context.insert("schema".to_owned(), minijinja::Value::from(patched_schema));
-            }
-            if needs_db_patch {
-                node_context
-                    .insert("database".to_owned(), minijinja::Value::from(patched_database));
-            }
-        }
+    // Patch `this`, `database`, `schema` when per-workflow env overrides
+    // changed the profile schema/database. `build_run_node_context` built
+    // `this` from `node.base()`, which reflects worker-startup values.
+    if let Some(patch) = compute_patched_relation(
+        state,
+        base,
+        env_schema.as_deref(),
+        env_database.as_deref(),
+        unique_id,
+    )? {
+        apply_patched_relation(state, base, &patch, &mut node_context);
     }
 
-    // Compile the node's raw SQL by rendering it through Jinja (resolves ref/source/config).
-    // build_run_node_context does NOT populate the top-level "sql" context variable — that's
-    // the caller's responsibility. The materialization template uses {{ sql }} as the compiled
-    // model query (e.g. in `get_create_view_as_sql(target_relation, sql)`).
-    //
-    // For tests, prefer the generated SQL file in out_dir. dbt-fusion persists generic tests
-    // with fully inlined kwargs there (e.g. accepted_values values=[...]), while `raw_code`
-    // can be a reduced template that references `_dbt_generic_test_kwargs`.
-    #[allow(clippy::option_if_let_else)] // if-let-else is clearer here
-    let raw_sql_result = if rt == NodeType::Seed {
-        // Seeds have no SQL body — data comes from agate_table (loaded above).
-        // Reading original_file_path here would pick up the CSV file and embed it
-        // verbatim in CREATE TABLE AS (csv_content...), producing invalid SQL.
-        Ok(String::new())
-    } else if rt == NodeType::Test {
-        if let Some(sql) = state.test_sql_cache.get(&node_path) {
-            Ok(sql.clone())
-        } else {
-            // Fallback: try reading from disk (out_dir then in_dir).
-            let candidates: Vec<(std::path::PathBuf, &'static str)> = vec![
-                (
-                    state.io_args.out_dir.join(&common.original_file_path),
-                    "out_dir/original_file_path",
-                ),
-                (state.io_args.out_dir.join(&common.path), "out_dir/path"),
-                (
-                    state.io_args.in_dir.join(&common.original_file_path),
-                    "in_dir/original_file_path",
-                ),
-                (state.io_args.in_dir.join(&common.path), "in_dir/path"),
-            ];
-            if let Some((sql, _, _)) = read_first_non_empty_sql(&candidates) {
-                Ok(sql)
-            } else {
-                // Last resort: use raw_code from the node (may lack inlined kwargs).
-                common
-                    .raw_code
-                    .as_deref()
-                    .filter(|s| !s.is_empty() && *s != "--placeholder--")
-                    .map(ToString::to_string)
-                    .map_or_else(
-                        || {
-                            Err((
-                                state.io_args.out_dir.join(&common.original_file_path),
-                                std::io::Error::from(std::io::ErrorKind::NotFound),
-                            ))
-                        },
-                        Ok,
-                    )
-            }
-        }
-    } else {
-        let raw_sql_from_node = common
-            .raw_code
-            .as_deref()
-            .filter(|s| !s.is_empty() && *s != "--placeholder--")
-            .map(ToString::to_string);
-
-        raw_sql_from_node.map_or_else(
-            || {
-                let raw_sql_path = state.io_args.in_dir.join(&common.original_file_path);
-                std::fs::read_to_string(&raw_sql_path).map_err(|e| (raw_sql_path, e))
-            },
-            Ok,
-        )
-    };
+    // Resolve raw SQL: build_run_node_context does NOT populate the top-level
+    // "sql" context variable — that's the caller's responsibility. The
+    // materialization template uses {{ sql }} as the compiled model query
+    // (e.g. in `get_create_view_as_sql(target_relation, sql)`).
+    let raw_sql_result = resolve_raw_sql(state, common, rt, &node_path);
 
     // For generic tests, inject _dbt_generic_test_kwargs from test metadata.
     // The primary path uses generated SQL with inlined kwargs (from test_sql_cache),
@@ -828,95 +698,5 @@ fn build_success_message(
         return Some(materialization.to_string());
     }
 
-    None
-}
-
-/// Convert a `dbt_yaml::Value` to a native `minijinja::Value`.
-///
-/// Unlike `minijinja::Value::from_serialize()`, this produces native minijinja
-/// types (Vec for sequences, BTreeMap for mappings) that support iteration and
-/// interpolation in Jinja templates. This is critical for generic test kwargs
-/// like `values=["active",...]` (accepted_values) and `threshold=0` (greater_than).
-#[allow(clippy::option_if_let_else)]
-fn yml_value_to_minijinja(v: &dbt_yaml::Value) -> minijinja::Value {
-    match v {
-        dbt_yaml::Value::Null(_) => minijinja::Value::from(()),
-        dbt_yaml::Value::Bool(b, _) => minijinja::Value::from(*b),
-        dbt_yaml::Value::Number(n, _) => {
-            if let Some(i) = n.as_i64() {
-                minijinja::Value::from(i)
-            } else if let Some(u) = n.as_u64() {
-                minijinja::Value::from(u)
-            } else if let Some(f) = n.as_f64() {
-                minijinja::Value::from(f)
-            } else {
-                minijinja::Value::from(n.to_string())
-            }
-        }
-        dbt_yaml::Value::String(s, _) => minijinja::Value::from(s.clone()),
-        dbt_yaml::Value::Sequence(seq, _) => {
-            let items: Vec<minijinja::Value> = seq.iter().map(yml_value_to_minijinja).collect();
-            minijinja::Value::from(items)
-        }
-        dbt_yaml::Value::Mapping(map, _) => {
-            let items: BTreeMap<String, minijinja::Value> = map
-                .iter()
-                .map(|(k, v)| {
-                    let key = match k {
-                        dbt_yaml::Value::String(s, _) => s.clone(),
-                        other => format!("{other:?}"),
-                    };
-                    (key, yml_value_to_minijinja(v))
-                })
-                .collect();
-            minijinja::Value::from(items)
-        }
-        dbt_yaml::Value::Tagged(tagged, _) => yml_value_to_minijinja(&tagged.value),
-    }
-}
-
-/// Convert a `dbt_yaml::Value` to minijinja and evaluate wrapped Jinja expressions.
-///
-/// Generic test kwargs can include expression strings like
-/// "{{ get_where_subquery(ref('my_model')) }}". Evaluate these into runtime objects so
-/// `**_dbt_generic_test_kwargs` behaves like dbt-fusion's executor path.
-fn yml_value_to_minijinja_with_jinja(
-    v: &dbt_yaml::Value,
-    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
-    node_context: &BTreeMap<String, minijinja::Value>,
-) -> minijinja::Value {
-    let base = yml_value_to_minijinja(v);
-    let Some(raw) = base.as_str() else {
-        return base;
-    };
-
-    let Some(expr) = raw
-        .trim()
-        .strip_prefix("{{")
-        .and_then(|s| s.strip_suffix("}}"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return base;
-    };
-
-    jinja_env
-        .env
-        .compile_expression(expr)
-        .and_then(|compiled| compiled.eval(node_context, &[]))
-        .unwrap_or(base)
-}
-
-fn read_first_non_empty_sql(
-    candidates: &[(std::path::PathBuf, &'static str)],
-) -> Option<(String, &'static str, std::path::PathBuf)> {
-    for (path, source) in candidates {
-        let Ok(sql) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if !sql.trim().is_empty() {
-            return Some((sql, *source, path.clone()));
-        }
-    }
     None
 }

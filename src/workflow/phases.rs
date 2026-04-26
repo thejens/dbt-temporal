@@ -147,6 +147,33 @@ pub fn select_post_run_hooks(
     }
 }
 
+/// Merge a successful `HookExecutionOutcome` into the parent run state and
+/// decide whether the workflow should short-circuit.
+///
+/// `hook_errors` and `effective_env` are mutated in place; the returned
+/// `ControlFlow` is `Break(output)` when the hooks signalled skip (the
+/// caller returns `output` immediately) or `Continue(())` to proceed with
+/// the run.
+pub fn apply_pre_run_outcome(
+    plan: &ExecutionPlan,
+    outcome: crate::types::HookExecutionOutcome,
+    effective_env: &mut BTreeMap<String, String>,
+    hook_errors: &mut Vec<HookError>,
+    elapsed: f64,
+) -> ControlFlow<DbtRunOutput, ()> {
+    hook_errors.extend(outcome.errors);
+    effective_env.extend(outcome.extra_env);
+    if outcome.skip {
+        return ControlFlow::Break(build_skip_output(
+            plan,
+            outcome.skip_reason,
+            hook_errors,
+            elapsed,
+        ));
+    }
+    ControlFlow::Continue(())
+}
+
 /// Convert search-attribute strings into the JSON-encoded payloads Temporal's
 /// `upsert_search_attributes` API expects. Pure: just serializes each value
 /// and wraps any failure into `WorkflowTermination::failed` with the
@@ -245,18 +272,8 @@ pub async fn run_pre_run_hooks(
     let payload = build_pre_run_payload(plan, input);
     match execute_hooks(ctx, &hooks.pre_run, &payload).await {
         Ok(outcome) => {
-            hook_errors.extend(outcome.errors);
-            effective_env.extend(outcome.extra_env);
-            if outcome.skip {
-                let elapsed = elapsed_secs(start, ctx.workflow_time());
-                return Ok(ControlFlow::Break(build_skip_output(
-                    plan,
-                    outcome.skip_reason,
-                    hook_errors,
-                    elapsed,
-                )));
-            }
-            Ok(ControlFlow::Continue(()))
+            let elapsed = elapsed_secs(start, ctx.workflow_time());
+            Ok(apply_pre_run_outcome(plan, outcome, effective_env, hook_errors, elapsed))
         }
         Err(e) => Err(WorkflowTermination::failed(e)),
     }
@@ -655,6 +672,91 @@ mod tests {
         let attrs = BTreeMap::new();
         let result = build_search_attribute_payloads(&attrs).unwrap();
         assert!(result.is_empty());
+    }
+
+    // --- apply_pre_run_outcome ---
+
+    fn make_outcome(
+        skip: bool,
+        reason: Option<&str>,
+        extra_env: &[(&str, &str)],
+        errors: usize,
+    ) -> crate::types::HookExecutionOutcome {
+        crate::types::HookExecutionOutcome {
+            errors: (0..errors)
+                .map(|i| HookError {
+                    hook_workflow_type: format!("hook-{i}"),
+                    event: "pre_run".to_string(),
+                    error: format!("err-{i}"),
+                })
+                .collect(),
+            skip,
+            skip_reason: reason.map(String::from),
+            extra_env: extra_env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn apply_pre_run_outcome_continues_when_no_skip_signal() {
+        let plan = empty_plan();
+        let mut env = BTreeMap::new();
+        let mut hook_errors = Vec::new();
+        let outcome = make_outcome(false, None, &[("X", "y")], 1);
+
+        let action = apply_pre_run_outcome(&plan, outcome, &mut env, &mut hook_errors, 0.5);
+        assert!(matches!(action, ControlFlow::Continue(())));
+        // Side effects: env merged, errors collected.
+        assert_eq!(env.get("X").map(String::as_str), Some("y"));
+        assert_eq!(hook_errors.len(), 1);
+    }
+
+    #[test]
+    fn apply_pre_run_outcome_breaks_with_output_on_skip() {
+        let plan = ExecutionPlan {
+            invocation_id: "inv-skip".to_string(),
+            ..empty_plan()
+        };
+        let mut env = BTreeMap::new();
+        let mut hook_errors = Vec::new();
+        let outcome = make_outcome(true, Some("not today"), &[("Y", "z")], 0);
+
+        let action = apply_pre_run_outcome(&plan, outcome, &mut env, &mut hook_errors, 1.5);
+        let ControlFlow::Break(out) = action else {
+            panic!("skip outcome must Break");
+        };
+        assert!(out.success);
+        assert!(out.skipped);
+        assert_eq!(out.skip_reason.as_deref(), Some("not today"));
+        // env still merged before the break (matches dbt-core: env state is
+        // observable even on skip).
+        assert_eq!(env.get("Y").map(String::as_str), Some("z"));
+    }
+
+    #[test]
+    fn apply_pre_run_outcome_drains_hook_errors_on_skip() {
+        // Skip path: any errors collected by the pre_run hooks are drained
+        // into the returned DbtRunOutput.hook_errors so the caller can
+        // surface them to the user.
+        let plan = empty_plan();
+        let mut env = BTreeMap::new();
+        let mut hook_errors = vec![HookError {
+            hook_workflow_type: "previous".to_string(),
+            event: "pre_run".to_string(),
+            error: "warn-1".to_string(),
+        }];
+        let outcome = make_outcome(true, None, &[], 1);
+
+        let action = apply_pre_run_outcome(&plan, outcome, &mut env, &mut hook_errors, 0.0);
+        let ControlFlow::Break(out) = action else {
+            panic!("skip must Break");
+        };
+        // Outer accumulator drained.
+        assert!(hook_errors.is_empty());
+        // Output collected the previous warn + the new one from the outcome.
+        assert_eq!(out.hook_errors.len(), 2);
     }
 
     #[test]

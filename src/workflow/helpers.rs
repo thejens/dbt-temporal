@@ -717,4 +717,46 @@ mod tests {
         let lines = build_summary_lines(1, 0.5, 1, 0, 0);
         assert_eq!(lines[0], "Finished running 1 node in 0.50s.");
     }
+
+    // --- short_activity_error ---
+
+    fn make_failed_error(message: &str) -> temporalio_sdk::ActivityExecutionError {
+        use temporalio_common::protos::temporal::api::failure::v1::Failure;
+        temporalio_sdk::ActivityExecutionError::Failed(Box::new(Failure {
+            message: message.to_string(),
+            ..Failure::default()
+        }))
+    }
+
+    #[test]
+    fn short_activity_error_passes_short_messages_through() {
+        let err = make_failed_error("relation does not exist");
+        let short = short_activity_error(&err);
+        // Display formats as "Activity failed: <message>" — must be unchanged for short.
+        assert_eq!(short, "Activity failed: relation does not exist");
+    }
+
+    #[test]
+    fn short_activity_error_truncates_long_messages_to_200_plus_ellipsis() {
+        // Message of 250 chars → full Display is even longer; truncated form is
+        // exactly 200 chars + "..." suffix.
+        let long_msg: String = "A".repeat(250);
+        let err = make_failed_error(&long_msg);
+        let short = short_activity_error(&err);
+        assert!(short.ends_with("..."), "got: {short}");
+        // 200 chars before the `...` suffix.
+        assert_eq!(short.len(), 203);
+    }
+
+    #[test]
+    fn short_activity_error_does_not_truncate_at_exactly_200() {
+        // Construct a Failed with a message such that the full Display is exactly
+        // 200 chars — no truncation should be applied.
+        // Display is "Activity failed: <message>" (17 + len(message) chars).
+        let msg = "B".repeat(200 - "Activity failed: ".len());
+        let err = make_failed_error(&msg);
+        let short = short_activity_error(&err);
+        assert_eq!(short.len(), 200);
+        assert!(!short.ends_with("..."));
+    }
 }

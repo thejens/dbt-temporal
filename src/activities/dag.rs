@@ -64,6 +64,11 @@ fn promote_ephemeral_deps(
 /// For each model M with tests T1..Tn, any non-test node N that depends on M should
 /// also depend on T1..Tn. This ensures tests run before downstream models and gate
 /// the pipeline — if a test fails, downstreams are skipped.
+///
+/// A test T is a *self-gate* of N when T also depends on N (typical when a single test
+/// references multiple sibling models in a dep chain — e.g. a Jinja loop refs both
+/// a model and its descendants). Adding `N → T` in that case would create a cycle, so
+/// the edge is skipped: T already runs after N via its existing forward edge.
 pub fn inject_test_gates(
     nodes: &Nodes,
     selected_ids: &[String],
@@ -73,15 +78,22 @@ pub fn inject_test_gates(
 
     // Build model->tests map: for each model, collect all selected tests that depend on it.
     let mut model_tests: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // Side-table of each test's depends_on (selected only) so we can check forward
+    // edges without re-walking nodes.depends_on for every (N, T) candidate.
+    let mut test_deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for id in selected_ids {
         if let Some(node) = nodes.get_node(id)
             && node.resource_type() == NodeType::Test
         {
+            let mut this_test_deps: BTreeSet<&str> = BTreeSet::new();
             for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
-                if selected_set.contains(dep_id.as_str())
-                    && nodes
-                        .get_node(dep_id)
-                        .is_some_and(|n| n.resource_type() == NodeType::Model)
+                if !selected_set.contains(dep_id.as_str()) {
+                    continue;
+                }
+                this_test_deps.insert(dep_id.as_str());
+                if nodes
+                    .get_node(dep_id)
+                    .is_some_and(|n| n.resource_type() == NodeType::Model)
                 {
                     model_tests
                         .entry(dep_id.as_str())
@@ -89,6 +101,7 @@ pub fn inject_test_gates(
                         .push(id.as_str());
                 }
             }
+            test_deps.insert(id.as_str(), this_test_deps);
         }
     }
 
@@ -106,6 +119,14 @@ pub fn inject_test_gates(
             for dep_id in &node_deps {
                 if let Some(tests) = model_tests.get(dep_id.as_str()) {
                     for test_id in tests {
+                        // Skip if the test already depends on N — adding N → T would
+                        // create a cycle and make N (and its descendants) unreachable.
+                        if test_deps
+                            .get(test_id)
+                            .is_some_and(|d| d.contains(id.as_str()))
+                        {
+                            continue;
+                        }
                         extra.insert((*test_id).to_string());
                     }
                 }
@@ -186,6 +207,12 @@ pub fn topological_levels(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::sync::Arc;
+
+    use dbt_common::CodeLocationWithFile;
+    use dbt_schemas::schemas::common::NodeDependsOn;
+    use dbt_schemas::schemas::{CommonAttributes, DbtModel, DbtTest, NodeBaseAttributes};
+
     use super::*;
 
     fn deps(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
@@ -195,6 +222,49 @@ mod tests {
                 (node.to_string(), node_deps.iter().map(ToString::to_string).collect())
             })
             .collect()
+    }
+
+    fn make_common(unique_id: &str) -> CommonAttributes {
+        CommonAttributes {
+            unique_id: unique_id.to_string(),
+            name: unique_id
+                .rsplit('.')
+                .next()
+                .unwrap_or(unique_id)
+                .to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn make_base(dep_ids: &[&str]) -> NodeBaseAttributes {
+        NodeBaseAttributes {
+            depends_on: NodeDependsOn {
+                nodes_with_ref_location: dep_ids
+                    .iter()
+                    .map(|d| ((*d).to_string(), CodeLocationWithFile::default()))
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn add_model(nodes: &mut Nodes, unique_id: &str, dep_ids: &[&str]) {
+        let model = DbtModel {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(dep_ids),
+            ..Default::default()
+        };
+        nodes.models.insert(unique_id.to_string(), Arc::new(model));
+    }
+
+    fn add_test(nodes: &mut Nodes, unique_id: &str, dep_ids: &[&str]) {
+        let test = DbtTest {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(dep_ids),
+            ..Default::default()
+        };
+        nodes.tests.insert(unique_id.to_string(), Arc::new(test));
     }
 
     #[test]
@@ -255,5 +325,178 @@ mod tests {
         let d = deps(&[("a", &["b"]), ("b", &["a"])]);
         let err = topological_levels(&d).unwrap_err();
         assert!(err.to_string().contains("cyclic dependency"), "{err}");
+    }
+
+    /// Regression: panda-cascade marketing_model phantom cycle.
+    ///
+    /// `test_country_base` refs four sibling models in a dep chain via a Jinja
+    /// loop — `marketing_spend_{daily,weekly,monthly,quarterly}`. Naively
+    /// gating each model on every test of its upstream models adds an edge
+    /// `weekly → test_country_base`, but `test_country_base` already depends
+    /// on `weekly`, so a cycle appears and Kahn's algorithm flags
+    /// `{weekly, monthly, quarterly, test_country_base}` as unreachable.
+    #[test]
+    fn inject_test_gates_skips_back_edges_to_self_gating_test() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.daily", &[]);
+        add_model(&mut nodes, "model.m.weekly", &["model.m.daily"]);
+        add_model(&mut nodes, "model.m.monthly", &["model.m.daily"]);
+        add_model(&mut nodes, "model.m.quarterly", &["model.m.monthly"]);
+        add_test(
+            &mut nodes,
+            "test.m.country_base",
+            &[
+                "model.m.daily",
+                "model.m.weekly",
+                "model.m.monthly",
+                "model.m.quarterly",
+            ],
+        );
+
+        let selected: Vec<String> = [
+            "model.m.daily",
+            "model.m.weekly",
+            "model.m.monthly",
+            "model.m.quarterly",
+            "test.m.country_base",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        // None of the spend models should have been gated on a test that already depends on them.
+        for sibling in ["model.m.weekly", "model.m.monthly", "model.m.quarterly"] {
+            assert!(
+                !deps_map[sibling].contains("test.m.country_base"),
+                "{sibling} was gated on test.m.country_base, which would create a cycle"
+            );
+        }
+
+        // And the graph must still planarise.
+        let levels = topological_levels(&deps_map).unwrap();
+        let placed: BTreeSet<&str> = levels.iter().flatten().map(String::as_str).collect();
+        for id in &selected {
+            assert!(placed.contains(id.as_str()), "{id} missing from levels");
+        }
+        // Test runs strictly after every model it depends on.
+        let level_of = |id: &str| {
+            levels
+                .iter()
+                .position(|l| l.iter().any(|n| n == id))
+                .unwrap()
+        };
+        let test_level = level_of("test.m.country_base");
+        for model in [
+            "model.m.daily",
+            "model.m.weekly",
+            "model.m.monthly",
+            "model.m.quarterly",
+        ] {
+            assert!(level_of(model) < test_level, "{model} should run before test.m.country_base");
+        }
+    }
+
+    /// The standard gate must still fire when a downstream model has no
+    /// reverse path to the test — i.e. the test only depends on the upstream
+    /// model, not on the downstream consumer.
+    #[test]
+    fn inject_test_gates_adds_normal_forward_gate() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.upstream", &[]);
+        add_model(&mut nodes, "model.m.downstream", &["model.m.upstream"]);
+        add_test(&mut nodes, "test.m.upstream_check", &["model.m.upstream"]);
+
+        let selected: Vec<String> = [
+            "model.m.upstream",
+            "model.m.downstream",
+            "test.m.upstream_check",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(
+            deps_map["model.m.downstream"].contains("test.m.upstream_check"),
+            "downstream model should be gated on its upstream model's test"
+        );
+
+        let levels = topological_levels(&deps_map).unwrap();
+        let level_of = |id: &str| {
+            levels
+                .iter()
+                .position(|l| l.iter().any(|n| n == id))
+                .unwrap()
+        };
+        assert!(level_of("model.m.upstream") < level_of("test.m.upstream_check"));
+        assert!(level_of("test.m.upstream_check") < level_of("model.m.downstream"));
+    }
+
+    /// A test that depends on a model and its descendant should not gate
+    /// either of those models on itself, but should still gate any *other*
+    /// downstream consumer of the same upstream.
+    #[test]
+    fn inject_test_gates_partial_back_edge_still_gates_other_consumers() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.parent", &[]);
+        add_model(&mut nodes, "model.m.child_a", &["model.m.parent"]);
+        add_model(&mut nodes, "model.m.child_b", &["model.m.parent"]);
+        // Test refs parent + child_a → must not gate child_a, but child_b is fair game.
+        add_test(&mut nodes, "test.m.shared", &["model.m.parent", "model.m.child_a"]);
+
+        let selected: Vec<String> = [
+            "model.m.parent",
+            "model.m.child_a",
+            "model.m.child_b",
+            "test.m.shared",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(
+            !deps_map["model.m.child_a"].contains("test.m.shared"),
+            "child_a is referenced by the test — gating it would create a cycle"
+        );
+        assert!(
+            deps_map["model.m.child_b"].contains("test.m.shared"),
+            "child_b shares parent's test gate but is not referenced by the test"
+        );
+
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// Phantom test nodes (zero `depends_on` — issue #2's symptom) must not
+    /// disrupt gate injection. They should appear at level 0 with no extra
+    /// edges added.
+    #[test]
+    fn inject_test_gates_tolerates_phantom_test_with_no_deps() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.real", &[]);
+        add_test(&mut nodes, "test.m.phantom", &[]);
+
+        let selected: Vec<String> = ["model.m.real", "test.m.phantom"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.real"].is_empty());
+        assert!(deps_map["test.m.phantom"].is_empty());
+
+        let levels = topological_levels(&deps_map).unwrap();
+        assert_eq!(levels.len(), 1);
+        assert!(levels[0].contains(&"model.m.real".to_string()));
+        assert!(levels[0].contains(&"test.m.phantom".to_string()));
     }
 }

@@ -30,6 +30,123 @@ use crate::types::{
 use super::DbtRunWorkflow;
 use super::helpers::{elapsed_secs, plural};
 
+/// Build the workflow-detail line shown after `plan_project` returns:
+/// "planned 17 nodes across 8 levels".
+pub fn build_planned_details(node_count: usize, level_count: usize) -> String {
+    format!(
+        "planned {node_count} node{} across {level_count} level{}",
+        plural(node_count),
+        plural(level_count),
+    )
+}
+
+/// Build the input for the `resolve_config` activity. Pure projection of
+/// project name + caller-supplied hook overrides.
+pub fn build_resolve_config_input(plan: &ExecutionPlan, input: &DbtRunInput) -> ResolveConfigInput {
+    ResolveConfigInput {
+        project: Some(plan.project.clone()),
+        input_hooks: input.hooks.clone(),
+    }
+}
+
+/// Build the `HookPayload` that pre_run hooks receive. Output is always None
+/// at this point — the run hasn't produced one yet.
+pub fn build_pre_run_payload(plan: &ExecutionPlan, input: &DbtRunInput) -> HookPayload {
+    HookPayload {
+        event: HookEvent::PreRun,
+        invocation_id: plan.invocation_id.clone(),
+        input: input.clone(),
+        plan: Some(plan.clone()),
+        output: None,
+    }
+}
+
+/// Build the `HookPayload` for on_success / on_failure hooks. The `event`
+/// determines which list of hooks runs; the output snapshot is what the run
+/// finished with so far.
+pub fn build_post_hook_payload(
+    event: HookEvent,
+    plan: &ExecutionPlan,
+    input: &DbtRunInput,
+    output_snapshot: &DbtRunOutput,
+) -> HookPayload {
+    HookPayload {
+        event,
+        invocation_id: plan.invocation_id.clone(),
+        input: input.clone(),
+        plan: Some(plan.clone()),
+        output: Some(output_snapshot.clone()),
+    }
+}
+
+/// Build the `DbtRunOutput` returned when pre_run hooks signal skip. Drains
+/// `hook_errors` so the caller can return the output without leaving stale
+/// errors in the parent's accumulator.
+pub fn build_skip_output(
+    plan: &ExecutionPlan,
+    skip_reason: Option<String>,
+    hook_errors: &mut Vec<HookError>,
+    elapsed: f64,
+) -> DbtRunOutput {
+    DbtRunOutput {
+        invocation_id: plan.invocation_id.clone(),
+        success: true,
+        skipped: true,
+        skip_reason,
+        node_results: vec![],
+        elapsed_time: elapsed,
+        artifacts: None,
+        log_path: None,
+        hook_errors: std::mem::take(hook_errors),
+    }
+}
+
+/// Build the input for `run_project_hooks` (on-run-start or on-run-end).
+/// `node_results` is empty for on-run-start, populated for on-run-end.
+pub fn build_project_hooks_input(
+    phase: ProjectHookPhase,
+    plan: &ExecutionPlan,
+    input: &DbtRunInput,
+    effective_env: &BTreeMap<String, String>,
+    node_results: &[NodeExecutionResult],
+) -> ProjectHooksInput {
+    ProjectHooksInput {
+        phase,
+        project: plan.project.clone(),
+        invocation_id: plan.invocation_id.clone(),
+        env: effective_env.clone(),
+        target: input.target.clone(),
+        node_results: node_results.to_vec(),
+    }
+}
+
+/// Build the input for `store_artifacts` from the plan + run accumulators.
+pub fn build_store_artifacts_input(
+    plan: &ExecutionPlan,
+    all_results: &[NodeExecutionResult],
+    log_lines: &[String],
+) -> StoreArtifactsInput {
+    StoreArtifactsInput {
+        invocation_id: plan.invocation_id.clone(),
+        node_results: all_results.to_vec(),
+        manifest_json: plan.manifest_json.clone(),
+        manifest_ref: plan.manifest_ref.clone(),
+        run_log: Some(log_lines.join("\n")),
+    }
+}
+
+/// Pick the post-run hook list and event from the run's success flag.
+pub fn select_post_run_hooks(
+    success: bool,
+    hooks: &HooksConfig,
+) -> (&[crate::types::HookConfig], HookEvent) {
+    if success {
+        (&hooks.on_success, HookEvent::OnSuccess)
+    } else {
+        (&hooks.on_failure, HookEvent::OnFailure)
+    }
+}
+
 pub fn write_command_memo(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
@@ -76,13 +193,7 @@ pub async fn plan_and_announce(
         ctx.upsert_search_attributes(sa_payloads);
     }
 
-    ctx.set_current_details(format!(
-        "planned {} node{} across {} level{}",
-        plan.nodes.len(),
-        plural(plan.nodes.len()),
-        plan.levels.len(),
-        plural(plan.levels.len()),
-    ));
+    ctx.set_current_details(build_planned_details(plan.nodes.len(), plan.levels.len()));
 
     Ok(plan)
 }
@@ -92,13 +203,9 @@ pub async fn resolve_project_config(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
 ) -> Result<ResolvedProjectConfig, WorkflowTermination> {
-    let resolve_input = ResolveConfigInput {
-        project: Some(plan.project.clone()),
-        input_hooks: input.hooks.clone(),
-    };
     ctx.start_activity(
         DbtActivities::resolve_config,
-        resolve_input,
+        build_resolve_config_input(plan, input),
         ActivityOptions::start_to_close_timeout(Duration::from_secs(10)),
     )
     .await
@@ -123,29 +230,19 @@ pub async fn run_pre_run_hooks(
         return Ok(ControlFlow::Continue(()));
     }
 
-    let payload = HookPayload {
-        event: HookEvent::PreRun,
-        invocation_id: plan.invocation_id.clone(),
-        input: input.clone(),
-        plan: Some(plan.clone()),
-        output: None,
-    };
+    let payload = build_pre_run_payload(plan, input);
     match execute_hooks(ctx, &hooks.pre_run, &payload).await {
         Ok(outcome) => {
             hook_errors.extend(outcome.errors);
             effective_env.extend(outcome.extra_env);
             if outcome.skip {
-                return Ok(ControlFlow::Break(DbtRunOutput {
-                    invocation_id: plan.invocation_id.clone(),
-                    success: true,
-                    skipped: true,
-                    skip_reason: outcome.skip_reason,
-                    node_results: vec![],
-                    elapsed_time: elapsed_secs(start, ctx.workflow_time()),
-                    artifacts: None,
-                    log_path: None,
-                    hook_errors: std::mem::take(hook_errors),
-                }));
+                let elapsed = elapsed_secs(start, ctx.workflow_time());
+                return Ok(ControlFlow::Break(build_skip_output(
+                    plan,
+                    outcome.skip_reason,
+                    hook_errors,
+                    elapsed,
+                )));
             }
             Ok(ControlFlow::Continue(()))
         }
@@ -165,14 +262,7 @@ pub async fn run_on_run_start(
     ctx.set_current_details("running on-run-start hooks".to_string());
     ctx.start_activity(
         DbtActivities::run_project_hooks,
-        ProjectHooksInput {
-            phase: ProjectHookPhase::OnRunStart,
-            project: plan.project.clone(),
-            invocation_id: plan.invocation_id.clone(),
-            env: effective_env.clone(),
-            target: input.target.clone(),
-            node_results: vec![],
-        },
+        build_project_hooks_input(ProjectHookPhase::OnRunStart, plan, input, effective_env, &[]),
         ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
             .heartbeat_timeout(Duration::from_secs(120))
             .build(),
@@ -190,18 +280,10 @@ pub async fn store_run_artifacts(
     if !plan.write_artifacts {
         return Ok((None, None));
     }
-    let store_input = StoreArtifactsInput {
-        invocation_id: plan.invocation_id.clone(),
-        node_results: all_results.to_vec(),
-        manifest_json: plan.manifest_json.clone(),
-        manifest_ref: plan.manifest_ref.clone(),
-        run_log: Some(log_lines.join("\n")),
-    };
-
     let artifacts: StoreArtifactsOutput = ctx
         .start_activity(
             DbtActivities::store_artifacts,
-            store_input,
+            build_store_artifacts_input(plan, all_results, log_lines),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(120)),
         )
         .await
@@ -230,14 +312,13 @@ pub async fn run_on_run_end(
     let result = ctx
         .start_activity(
             DbtActivities::run_project_hooks,
-            ProjectHooksInput {
-                phase: ProjectHookPhase::OnRunEnd,
-                project: plan.project.clone(),
-                invocation_id: plan.invocation_id.clone(),
-                env: effective_env.clone(),
-                target: input.target.clone(),
-                node_results: all_results.to_vec(),
-            },
+            build_project_hooks_input(
+                ProjectHookPhase::OnRunEnd,
+                plan,
+                input,
+                effective_env,
+                all_results,
+            ),
             ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
                 .heartbeat_timeout(Duration::from_secs(120))
                 .build(),
@@ -265,28 +346,13 @@ pub async fn run_post_hooks(
     success_in: bool,
     hook_errors: &mut Vec<HookError>,
 ) -> bool {
-    let post_hooks = if success_in {
-        &hooks.on_success
-    } else {
-        &hooks.on_failure
-    };
-    let event = if success_in {
-        HookEvent::OnSuccess
-    } else {
-        HookEvent::OnFailure
-    };
+    let (post_hooks, event) = select_post_run_hooks(success_in, hooks);
 
     if post_hooks.is_empty() {
         return success_in;
     }
 
-    let payload = HookPayload {
-        event,
-        invocation_id: plan.invocation_id.clone(),
-        input: input.clone(),
-        plan: Some(plan.clone()),
-        output: Some(output_snapshot.clone()),
-    };
+    let payload = build_post_hook_payload(event, plan, input, output_snapshot);
     match execute_hooks(ctx, post_hooks, &payload).await {
         Ok(outcome) => {
             hook_errors.extend(outcome.errors);
@@ -296,5 +362,277 @@ pub async fn run_post_hooks(
             tracing::error!(event = %event, error = %e, "post-hook failed, marking workflow as failed");
             false
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    use crate::types::HookConfig;
+
+    fn empty_plan() -> ExecutionPlan {
+        ExecutionPlan {
+            project: "shop".to_string(),
+            levels: vec![],
+            nodes: BTreeMap::new(),
+            manifest_json: None,
+            manifest_ref: None,
+            invocation_id: "inv-42".to_string(),
+            search_attributes: BTreeMap::new(),
+            write_artifacts: false,
+            has_on_run_start: false,
+            has_on_run_end: false,
+        }
+    }
+
+    fn empty_input() -> DbtRunInput {
+        DbtRunInput {
+            project: Some("shop".to_string()),
+            command: "build".to_string(),
+            select: None,
+            exclude: None,
+            vars: BTreeMap::new(),
+            target: None,
+            full_refresh: false,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::new(),
+        }
+    }
+
+    // --- build_planned_details ---
+
+    #[test]
+    fn build_planned_details_pluralises_both_counts() {
+        assert_eq!(build_planned_details(0, 0), "planned 0 nodes across 0 levels");
+        assert_eq!(build_planned_details(1, 1), "planned 1 node across 1 level");
+        assert_eq!(build_planned_details(17, 8), "planned 17 nodes across 8 levels");
+    }
+
+    // --- build_resolve_config_input ---
+
+    #[test]
+    fn build_resolve_config_input_carries_project_and_input_hooks() {
+        let plan = ExecutionPlan {
+            project: "shop".to_string(),
+            ..empty_plan()
+        };
+        let input = DbtRunInput {
+            hooks: Some(HooksConfig::default()),
+            ..empty_input()
+        };
+        let resolved = build_resolve_config_input(&plan, &input);
+        assert_eq!(resolved.project.as_deref(), Some("shop"));
+        assert!(resolved.input_hooks.is_some());
+    }
+
+    #[test]
+    fn build_resolve_config_input_passes_through_none_input_hooks() {
+        let plan = empty_plan();
+        let input = empty_input(); // hooks = None
+        let resolved = build_resolve_config_input(&plan, &input);
+        assert!(resolved.input_hooks.is_none());
+    }
+
+    // --- build_pre_run_payload / build_post_hook_payload ---
+
+    #[test]
+    fn build_pre_run_payload_pins_event_invocation_and_omits_output() {
+        let plan = ExecutionPlan {
+            invocation_id: "inv-pre".to_string(),
+            ..empty_plan()
+        };
+        let payload = build_pre_run_payload(&plan, &empty_input());
+        assert_eq!(payload.event, HookEvent::PreRun);
+        assert_eq!(payload.invocation_id, "inv-pre");
+        assert!(payload.plan.is_some());
+        // pre_run hasn't produced output yet — explicitly None.
+        assert!(payload.output.is_none());
+    }
+
+    #[test]
+    fn build_post_hook_payload_includes_output_snapshot() {
+        let plan = empty_plan();
+        let input = empty_input();
+        let snapshot = DbtRunOutput {
+            invocation_id: plan.invocation_id.clone(),
+            success: true,
+            skipped: false,
+            skip_reason: None,
+            node_results: vec![],
+            elapsed_time: 1.5,
+            artifacts: None,
+            log_path: None,
+            hook_errors: vec![],
+        };
+        let payload = build_post_hook_payload(HookEvent::OnSuccess, &plan, &input, &snapshot);
+        assert_eq!(payload.event, HookEvent::OnSuccess);
+        let out = payload
+            .output
+            .expect("post-hook payload must carry the snapshot");
+        assert!(out.success);
+        assert!((out.elapsed_time - 1.5).abs() < f64::EPSILON);
+    }
+
+    // --- build_skip_output ---
+
+    #[test]
+    fn build_skip_output_drains_hook_errors_and_records_reason() {
+        let plan = ExecutionPlan {
+            invocation_id: "inv-skip".to_string(),
+            ..empty_plan()
+        };
+        let mut hook_errors = vec![HookError {
+            hook_workflow_type: "notify".to_string(),
+            event: "pre_run".to_string(),
+            error: "warn-1".to_string(),
+        }];
+        let out = build_skip_output(&plan, Some("no new data".to_string()), &mut hook_errors, 0.42);
+        assert!(out.success); // skip is success — the run reached its end intentionally.
+        assert!(out.skipped);
+        assert_eq!(out.skip_reason.as_deref(), Some("no new data"));
+        assert!(out.node_results.is_empty());
+        assert!((out.elapsed_time - 0.42).abs() < f64::EPSILON);
+        // Drained — caller's accumulator is reset.
+        assert!(hook_errors.is_empty());
+        assert_eq!(out.hook_errors.len(), 1);
+    }
+
+    #[test]
+    fn build_skip_output_handles_no_skip_reason() {
+        let plan = empty_plan();
+        let mut hook_errors: Vec<HookError> = vec![];
+        let out = build_skip_output(&plan, None, &mut hook_errors, 0.0);
+        assert!(out.skipped);
+        assert!(out.skip_reason.is_none());
+    }
+
+    // --- build_project_hooks_input ---
+
+    #[test]
+    fn build_project_hooks_input_on_run_start_has_no_node_results() {
+        let plan = ExecutionPlan {
+            project: "shop".to_string(),
+            invocation_id: "inv-1".to_string(),
+            ..empty_plan()
+        };
+        let env = BTreeMap::from([("DBT_TARGET".to_string(), "prod".to_string())]);
+        let mut input = empty_input();
+        input.target = Some("prod".to_string());
+
+        let phs = build_project_hooks_input(
+            ProjectHookPhase::OnRunStart,
+            &plan,
+            &input,
+            &env,
+            &[], // on-run-start has no results yet
+        );
+        assert_eq!(phs.phase, ProjectHookPhase::OnRunStart);
+        assert_eq!(phs.project, "shop");
+        assert_eq!(phs.invocation_id, "inv-1");
+        assert_eq!(phs.target.as_deref(), Some("prod"));
+        assert!(phs.node_results.is_empty());
+        assert_eq!(phs.env.get("DBT_TARGET").map(String::as_str), Some("prod"));
+    }
+
+    #[test]
+    fn build_project_hooks_input_on_run_end_carries_node_results() {
+        use crate::types::{NodeExecutionResult, NodeStatus};
+        let plan = empty_plan();
+        let input = empty_input();
+        let env = BTreeMap::new();
+        let results = vec![NodeExecutionResult {
+            unique_id: "model.shop.a".to_string(),
+            status: NodeStatus::Success,
+            execution_time: 0.1,
+            message: None,
+            adapter_response: BTreeMap::new(),
+            compiled_code: None,
+            timing: vec![],
+            failures: None,
+        }];
+        let phs =
+            build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &results);
+        assert_eq!(phs.phase, ProjectHookPhase::OnRunEnd);
+        assert_eq!(phs.node_results.len(), 1);
+    }
+
+    // --- build_store_artifacts_input ---
+
+    #[test]
+    fn build_store_artifacts_input_joins_log_lines_and_carries_manifest() {
+        let plan = ExecutionPlan {
+            invocation_id: "inv-store".to_string(),
+            manifest_json: Some("{\"k\":1}".to_string()),
+            manifest_ref: None,
+            ..empty_plan()
+        };
+        let log_lines = vec!["line one".to_string(), "line two".to_string()];
+        let store_input = build_store_artifacts_input(&plan, &[], &log_lines);
+        assert_eq!(store_input.invocation_id, "inv-store");
+        assert_eq!(store_input.manifest_json.as_deref(), Some("{\"k\":1}"));
+        assert!(store_input.manifest_ref.is_none());
+        assert_eq!(store_input.run_log.as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn build_store_artifacts_input_uses_manifest_ref_when_provided() {
+        let plan = ExecutionPlan {
+            invocation_id: "inv".to_string(),
+            manifest_json: None,
+            manifest_ref: Some("/path/to/manifest.json".to_string()),
+            ..empty_plan()
+        };
+        let store_input = build_store_artifacts_input(&plan, &[], &[]);
+        assert!(store_input.manifest_json.is_none());
+        assert_eq!(store_input.manifest_ref.as_deref(), Some("/path/to/manifest.json"));
+        // Empty log_lines join to empty string — still wrapped in Some.
+        assert_eq!(store_input.run_log.as_deref(), Some(""));
+    }
+
+    // --- select_post_run_hooks ---
+
+    fn dummy_hook(name: &str) -> HookConfig {
+        HookConfig {
+            workflow_type: name.to_string(),
+            task_queue: "q".to_string(),
+            timeout_secs: None,
+            on_error: crate::types::HookErrorMode::default(),
+            input: None,
+            fire_and_forget: false,
+        }
+    }
+
+    #[test]
+    fn select_post_run_hooks_picks_on_success_when_run_succeeded() {
+        let mut hooks = HooksConfig::default();
+        hooks.on_success.push(dummy_hook("succ"));
+        hooks.on_failure.push(dummy_hook("fail"));
+        let (selected, event) = select_post_run_hooks(true, &hooks);
+        assert_eq!(event, HookEvent::OnSuccess);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].workflow_type, "succ");
+    }
+
+    #[test]
+    fn select_post_run_hooks_picks_on_failure_when_run_failed() {
+        let mut hooks = HooksConfig::default();
+        hooks.on_success.push(dummy_hook("succ"));
+        hooks.on_failure.push(dummy_hook("fail"));
+        let (selected, event) = select_post_run_hooks(false, &hooks);
+        assert_eq!(event, HookEvent::OnFailure);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].workflow_type, "fail");
+    }
+
+    #[test]
+    fn select_post_run_hooks_returns_empty_slice_when_corresponding_list_unset() {
+        let hooks = HooksConfig::default();
+        let (sel_succ, _) = select_post_run_hooks(true, &hooks);
+        let (sel_fail, _) = select_post_run_hooks(false, &hooks);
+        assert!(sel_succ.is_empty());
+        assert!(sel_fail.is_empty());
     }
 }

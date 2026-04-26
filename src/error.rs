@@ -90,6 +90,7 @@ pub fn matches_error_patterns(error_message: &str, patterns: &[regex::Regex]) ->
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -104,6 +105,49 @@ mod tests {
         assert!(!DbtTemporalError::Compilation("bad sql".into()).is_retryable());
         assert!(!DbtTemporalError::Configuration("bad config".into()).is_retryable());
         assert!(!DbtTemporalError::ProjectNotFound("nope".into()).is_retryable());
+        assert!(
+            !DbtTemporalError::TestFailure {
+                unique_id: "test.foo".into(),
+                failures: 3,
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn test_failure_display_includes_id_and_count() {
+        let err = DbtTemporalError::TestFailure {
+            unique_id: "test.unique_customers".into(),
+            failures: 5,
+        };
+        let s = err.to_string();
+        assert!(s.contains("test.unique_customers"));
+        assert!(s.contains('5'));
+    }
+
+    #[test]
+    fn source_is_none_for_test_failure() {
+        use std::error::Error;
+        let err = DbtTemporalError::TestFailure {
+            unique_id: "t".into(),
+            failures: 1,
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn source_is_none_for_configuration_and_project_not_found() {
+        use std::error::Error;
+        assert!(
+            DbtTemporalError::Configuration("x".into())
+                .source()
+                .is_none()
+        );
+        assert!(
+            DbtTemporalError::ProjectNotFound("p".into())
+                .source()
+                .is_none()
+        );
     }
 
     #[test]

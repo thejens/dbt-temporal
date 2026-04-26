@@ -135,44 +135,7 @@ pub fn scan_for_projects(base: &Path) -> Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
 
-    use std::sync::Mutex;
-    static CFG_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// RAII guard that restores env vars on drop, including when `f()` panics.
-    /// The previous version restored after `f()` returned normally, so an assertion
-    /// panic would leak polluted env into the next test.
-    struct EnvVarGuard<'a> {
-        saved: Vec<(&'a str, Option<String>)>,
-    }
-
-    impl Drop for EnvVarGuard<'_> {
-        fn drop(&mut self) {
-            for (k, orig) in &self.saved {
-                match orig {
-                    Some(v) => unsafe { std::env::set_var(k, v) },
-                    None => unsafe { std::env::remove_var(k) },
-                }
-            }
-        }
-    }
-
-    fn with_env<F: FnOnce() -> Result<()>>(vars: &[(&str, Option<&str>)], f: F) -> Result<()> {
-        // PoisonError holds a non-Send MutexGuard, so anyhow::Error::from doesn't impl
-        // From<PoisonError<...>>. Convert via display string.
-        let _lock = CFG_ENV_LOCK.lock().map_err(|e| anyhow!("{e}"))?;
-        let saved: Vec<(&str, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| (*k, std::env::var(k).ok()))
-            .collect();
-        let _restore = EnvVarGuard { saved };
-        for (k, v) in vars {
-            match v {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-        f()
-    }
+    use crate::config::test_util::with_env;
 
     // --- scan_for_projects ---
 

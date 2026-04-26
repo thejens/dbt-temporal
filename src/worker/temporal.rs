@@ -157,6 +157,7 @@ fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -230,5 +231,81 @@ mod tests {
     #[test]
     fn normalize_address_rejects_garbage() {
         assert!(normalize_address("").is_err());
+    }
+
+    #[test]
+    fn build_tls_options_returns_none_without_credentials() -> Result<()> {
+        let config = test_config();
+        let opts = build_tls_options(&config)?;
+        assert!(opts.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn build_tls_options_returns_some_with_api_key_only() -> Result<()> {
+        // API-key auth still requires the encrypted transport, so we wrap it in
+        // a TlsOptions even though no client cert is set.
+        let mut config = test_config();
+        config.temporal_api_key = Some("secret".into());
+        let opts = build_tls_options(&config)?;
+        let opts = opts.expect("expected TlsOptions for api-key auth");
+        assert!(opts.client_tls_options.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn build_tls_options_reads_cert_and_key_files() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, b"cert-bytes")?;
+        std::fs::write(&key_path, b"key-bytes")?;
+
+        let mut config = test_config();
+        config.temporal_tls_cert = Some(cert_path.to_string_lossy().into_owned());
+        config.temporal_tls_key = Some(key_path.to_string_lossy().into_owned());
+
+        let opts = build_tls_options(&config)?
+            .expect("expected TlsOptions when both cert and key are set");
+        let client_tls = opts
+            .client_tls_options
+            .expect("expected ClientTlsOptions for mTLS");
+        assert_eq!(client_tls.client_cert, b"cert-bytes");
+        assert_eq!(client_tls.client_private_key, b"key-bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn build_tls_options_rejects_only_one_of_cert_or_key() {
+        let mut only_cert = test_config();
+        only_cert.temporal_tls_cert = Some("/nope".into());
+        let err = build_tls_options(&only_cert).unwrap_err();
+        assert!(err.to_string().contains("both be set"), "got: {err}");
+
+        let mut only_key = test_config();
+        only_key.temporal_tls_key = Some("/nope".into());
+        let err = build_tls_options(&only_key).unwrap_err();
+        assert!(err.to_string().contains("both be set"), "got: {err}");
+    }
+
+    #[test]
+    fn build_tls_options_reports_missing_cert_file() {
+        let mut config = test_config();
+        config.temporal_tls_cert = Some("/dbtt/does-not-exist/cert.pem".into());
+        config.temporal_tls_key = Some("/dbtt/does-not-exist/key.pem".into());
+        let err = build_tls_options(&config).unwrap_err();
+        assert!(err.to_string().contains("TEMPORAL_TLS_CERT"), "got: {err}");
+    }
+
+    #[test]
+    fn build_worker_options_applies_optional_rate_limits() {
+        let mut config = test_config();
+        config.max_worker_activities_per_second = Some(50.0);
+        config.max_task_queue_activities_per_second = Some(200.0);
+        config.graceful_shutdown_secs = Some(15);
+        let opts = build_worker_options(&config);
+        assert_eq!(opts.max_worker_activities_per_second, Some(50.0));
+        assert_eq!(opts.max_task_queue_activities_per_second, Some(200.0));
+        assert_eq!(opts.graceful_shutdown_period, Some(Duration::from_secs(15)));
     }
 }

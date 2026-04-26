@@ -165,4 +165,26 @@ mod tests {
         let reg = test_registry(&["z_proj", "a_proj", "m_proj"]);
         assert_eq!(reg.project_names(), vec!["a_proj", "m_proj", "z_proj"]);
     }
+
+    #[test]
+    fn debug_includes_project_names_and_default() {
+        let reg = test_registry(&["waffle"]);
+        let s = format!("{reg:?}");
+        assert!(s.contains("Registry"));
+        assert!(s.contains("waffle"));
+        assert!(s.contains("default_project"));
+
+        let multi = test_registry(&["a", "b"]);
+        let s = format!("{multi:?}");
+        assert!(s.contains('a'));
+        assert!(s.contains('b'));
+        // Multiple projects → no default, formatted as `None`.
+        assert!(s.contains("None"));
+    }
+
+    #[test]
+    fn is_empty_distinguishes_zero_from_nonzero() {
+        assert!(test_registry(&[]).is_empty());
+        assert!(!test_registry(&["x"]).is_empty());
+    }
 }

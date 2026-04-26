@@ -299,4 +299,51 @@ mod tests {
         assert!(!hook.fire_and_forget);
         Ok(())
     }
+
+    #[test]
+    fn hook_event_as_str_for_each_variant() {
+        assert_eq!(HookEvent::PreRun.as_str(), "pre_run");
+        assert_eq!(HookEvent::OnSuccess.as_str(), "on_success");
+        assert_eq!(HookEvent::OnFailure.as_str(), "on_failure");
+    }
+
+    #[test]
+    fn hook_event_display_matches_as_str() {
+        assert_eq!(format!("{}", HookEvent::PreRun), "pre_run");
+        assert_eq!(format!("{}", HookEvent::OnSuccess), "on_success");
+        assert_eq!(format!("{}", HookEvent::OnFailure), "on_failure");
+    }
+
+    #[test]
+    fn hook_event_serde_round_trip() -> anyhow::Result<()> {
+        let s = serde_json::to_string(&HookEvent::OnSuccess)?;
+        assert_eq!(s, "\"on_success\"");
+        let back: HookEvent = serde_json::from_str(&s)?;
+        assert_eq!(back, HookEvent::OnSuccess);
+        Ok(())
+    }
+
+    #[test]
+    fn hook_execution_outcome_default_is_clean_slate() {
+        let outcome = HookExecutionOutcome::default();
+        assert!(outcome.errors.is_empty());
+        assert!(!outcome.skip);
+        assert!(outcome.skip_reason.is_none());
+        assert!(outcome.extra_env.is_empty());
+    }
+
+    #[test]
+    fn hook_error_round_trip() -> anyhow::Result<()> {
+        let err = HookError {
+            hook_workflow_type: "notify".into(),
+            event: "on_failure".into(),
+            error: "child failed".into(),
+        };
+        let json = serde_json::to_string(&err)?;
+        let back: HookError = serde_json::from_str(&json)?;
+        assert_eq!(back.hook_workflow_type, "notify");
+        assert_eq!(back.event, "on_failure");
+        assert_eq!(back.error, "child failed");
+        Ok(())
+    }
 }

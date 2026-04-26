@@ -191,10 +191,13 @@ fn matches_base_criteria(
             .original_file_path
             .to_string_lossy()
             .contains(&criteria.value),
-        MethodName::ResourceType => node
-            .resource_type()
-            .as_str_name()
-            .eq_ignore_ascii_case(&criteria.value),
+        MethodName::ResourceType => {
+            // `as_str_name()` returns the proto enum constant ("NODE_TYPE_TEST");
+            // dbt-style selectors pass the bare name ("test"). Normalize both ends.
+            let raw = node.resource_type().as_str_name();
+            let bare = raw.strip_prefix("NODE_TYPE_").unwrap_or(raw);
+            bare.eq_ignore_ascii_case(&criteria.value)
+        }
         MethodName::Package => node.common().package_name == criteria.value,
         MethodName::Config => {
             if criteria.method_args.first().map(String::as_str) == Some("materialized") {
@@ -211,9 +214,17 @@ fn matches_base_criteria(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use dbt_schemas::schemas::Nodes;
+    use dbt_schemas::schemas::nodes::{
+        CommonAttributes, DbtModel, DbtSeed, DbtTest, NodeBaseAttributes,
+    };
 
     fn deps(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
         entries
@@ -278,5 +289,337 @@ mod tests {
                 .is_empty()
         );
         Ok(())
+    }
+
+    // --- apply_selectors ---
+
+    /// Build a model node with the selector-relevant fields populated.
+    fn make_model(
+        unique_id: &str,
+        name: &str,
+        package: &str,
+        path: &str,
+        tags: &[&str],
+        fqn_extra: &[&str],
+    ) -> Arc<DbtModel> {
+        let common = CommonAttributes {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            package_name: package.to_string(),
+            original_file_path: PathBuf::from(path),
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            fqn: std::iter::once(package.to_string())
+                .chain(fqn_extra.iter().map(|s| (*s).to_string()))
+                .chain(std::iter::once(name.to_string()))
+                .collect(),
+            ..CommonAttributes::default()
+        };
+
+        Arc::new(DbtModel {
+            __common_attr__: common,
+            __base_attr__: NodeBaseAttributes::default(),
+            ..DbtModel::default()
+        })
+    }
+
+    fn build_three_model_project() -> (Vec<String>, Nodes) {
+        let mut nodes = Nodes::default();
+        nodes.models.insert(
+            "model.shop.stg_customers".to_string(),
+            make_model(
+                "model.shop.stg_customers",
+                "stg_customers",
+                "shop",
+                "models/staging/stg_customers.sql",
+                &["nightly"],
+                &["staging"],
+            ),
+        );
+        nodes.models.insert(
+            "model.shop.stg_orders".to_string(),
+            make_model(
+                "model.shop.stg_orders",
+                "stg_orders",
+                "shop",
+                "models/staging/stg_orders.sql",
+                &["nightly", "hourly"],
+                &["staging"],
+            ),
+        );
+        nodes.models.insert(
+            "model.shop.customers".to_string(),
+            make_model(
+                "model.shop.customers",
+                "customers",
+                "shop",
+                "models/customers.sql",
+                &["hourly"],
+                &[],
+            ),
+        );
+
+        let ids = vec![
+            "model.shop.stg_customers".to_string(),
+            "model.shop.stg_orders".to_string(),
+            "model.shop.customers".to_string(),
+        ];
+        (ids, nodes)
+    }
+
+    #[test]
+    fn apply_selectors_no_filters_returns_input() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids.clone(), &nodes, None, None).unwrap();
+        assert_eq!(out, ids);
+    }
+
+    #[test]
+    fn apply_selectors_filters_by_tag() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), None).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "model.shop.stg_customers".to_string(),
+                "model.shop.stg_orders".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_selectors_filters_by_fqn_name_exact() {
+        // The fqn matcher accepts an exact name OR a substring of the dotted fqn,
+        // so a search like "customers" matches anything whose fqn contains it
+        // (including "stg_customers"). Use a name that's only one node's exact match.
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("stg_orders"), None).unwrap();
+        assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
+    }
+
+    #[test]
+    fn apply_selectors_filters_by_path_prefix() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("path:models/staging"), None).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "model.shop.stg_customers".to_string(),
+                "model.shop.stg_orders".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_selectors_filters_by_package() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("package:shop"), None).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn apply_selectors_excludes_subset() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, None, Some("tag:nightly")).unwrap();
+        assert_eq!(out, vec!["model.shop.customers".to_string()]);
+    }
+
+    #[test]
+    fn apply_selectors_select_and_exclude_combined() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), Some("tag:hourly")).unwrap();
+        assert_eq!(out, vec!["model.shop.stg_customers".to_string()]);
+    }
+
+    #[test]
+    fn apply_selectors_intersection_via_comma() {
+        let (ids, nodes) = build_three_model_project();
+        // Comma is intersection: nodes that are nightly AND hourly.
+        let out = apply_selectors(ids, &nodes, Some("tag:nightly,tag:hourly"), None).unwrap();
+        assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
+    }
+
+    #[test]
+    fn apply_selectors_union_via_space() {
+        let (ids, nodes) = build_three_model_project();
+        // Whitespace-separated tokens are union (each parsed independently).
+        let out = apply_selectors(ids, &nodes, Some("tag:hourly tag:nightly"), None).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn apply_selectors_unknown_config_field_returns_empty() {
+        // Some malformed selectors are accepted by the parser but match nothing;
+        // the contract for apply_selectors here is "either error or return empty".
+        let (ids, nodes) = build_three_model_project();
+        let result = apply_selectors(ids, &nodes, Some("config:not_a_field=foo"), None);
+        if let Ok(out) = result {
+            assert!(out.is_empty());
+        }
+    }
+
+    /// Build a 4-node DAG: stg_customers, stg_orders -> orders -> ar_summary
+    fn build_dag_project() -> (Vec<String>, Nodes) {
+        use dbt_common::CodeLocationWithFile;
+        use dbt_schemas::schemas::common::NodeDependsOn;
+
+        let mut nodes = Nodes::default();
+
+        let mk = |uid: &str, name: &str, depends_on_uids: &[&str]| {
+            let common = CommonAttributes {
+                unique_id: uid.to_string(),
+                name: name.to_string(),
+                package_name: "shop".to_string(),
+                fqn: vec!["shop".to_string(), name.to_string()],
+                ..CommonAttributes::default()
+            };
+            let depends_on = NodeDependsOn {
+                nodes_with_ref_location: depends_on_uids
+                    .iter()
+                    .map(|d| ((*d).to_string(), CodeLocationWithFile::default()))
+                    .collect(),
+                ..NodeDependsOn::default()
+            };
+            Arc::new(DbtModel {
+                __common_attr__: common,
+                __base_attr__: NodeBaseAttributes {
+                    depends_on,
+                    ..NodeBaseAttributes::default()
+                },
+                ..DbtModel::default()
+            })
+        };
+
+        nodes.models.insert(
+            "model.shop.stg_customers".to_string(),
+            mk("model.shop.stg_customers", "stg_customers", &[]),
+        );
+        nodes.models.insert(
+            "model.shop.stg_orders".to_string(),
+            mk("model.shop.stg_orders", "stg_orders", &[]),
+        );
+        nodes.models.insert(
+            "model.shop.orders".to_string(),
+            mk("model.shop.orders", "orders", &["model.shop.stg_orders"]),
+        );
+        nodes.models.insert(
+            "model.shop.ar_summary".to_string(),
+            mk(
+                "model.shop.ar_summary",
+                "ar_summary",
+                &["model.shop.orders", "model.shop.stg_customers"],
+            ),
+        );
+
+        let ids = vec![
+            "model.shop.stg_customers".to_string(),
+            "model.shop.stg_orders".to_string(),
+            "model.shop.orders".to_string(),
+            "model.shop.ar_summary".to_string(),
+        ];
+        (ids, nodes)
+    }
+
+    #[test]
+    fn apply_selectors_parents_walks_upstream() {
+        let (ids, nodes) = build_dag_project();
+        // `+ar_summary` selects ar_summary plus all transitive parents.
+        let out = apply_selectors(ids, &nodes, Some("+ar_summary"), None).unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("model.shop.ar_summary"));
+        assert!(set.contains("model.shop.orders"));
+        assert!(set.contains("model.shop.stg_orders"));
+        assert!(set.contains("model.shop.stg_customers"));
+    }
+
+    #[test]
+    fn apply_selectors_parents_depth_limited() {
+        let (ids, nodes) = build_dag_project();
+        // `1+ar_summary` selects ar_summary plus direct parents only.
+        let out = apply_selectors(ids, &nodes, Some("1+ar_summary"), None).unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("model.shop.ar_summary"));
+        assert!(set.contains("model.shop.orders"));
+        assert!(set.contains("model.shop.stg_customers"));
+        // stg_orders is two hops away → excluded.
+        assert!(!set.contains("model.shop.stg_orders"));
+    }
+
+    #[test]
+    fn apply_selectors_children_walks_downstream() {
+        let (ids, nodes) = build_dag_project();
+        // `stg_orders+` selects stg_orders plus everything downstream.
+        let out = apply_selectors(ids, &nodes, Some("stg_orders+"), None).unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("model.shop.stg_orders"));
+        assert!(set.contains("model.shop.orders"));
+        assert!(set.contains("model.shop.ar_summary"));
+        // stg_customers is unrelated → excluded.
+        assert!(!set.contains("model.shop.stg_customers"));
+    }
+
+    #[test]
+    fn apply_selectors_children_depth_limited() {
+        let (ids, nodes) = build_dag_project();
+        // `stg_orders+1` selects stg_orders + direct children only.
+        let out = apply_selectors(ids, &nodes, Some("stg_orders+1"), None).unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("model.shop.stg_orders"));
+        assert!(set.contains("model.shop.orders"));
+        // ar_summary is two hops away → excluded.
+        assert!(!set.contains("model.shop.ar_summary"));
+    }
+
+    #[test]
+    fn apply_selectors_at_operator_includes_direct_parents_and_children() {
+        let (ids, nodes) = build_dag_project();
+        // `@orders` per the implementation: orders + direct parents + direct
+        // children (one hop in each direction). Multi-hop transitive expansion
+        // is intentionally not done here.
+        let out = apply_selectors(ids, &nodes, Some("@orders"), None).unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert!(set.contains("model.shop.orders"));
+        assert!(set.contains("model.shop.stg_orders"), "direct parent");
+        assert!(set.contains("model.shop.ar_summary"), "direct child");
+        // stg_customers is two hops away (ar_summary's other parent) — not pulled in.
+        assert!(!set.contains("model.shop.stg_customers"));
+    }
+
+    #[test]
+    fn apply_selectors_resource_type_filter() {
+        let mut nodes = Nodes::default();
+        nodes.models.insert(
+            "model.shop.m".to_string(),
+            make_model("model.shop.m", "m", "shop", "models/m.sql", &[], &[]),
+        );
+        nodes.tests.insert(
+            "test.shop.t".to_string(),
+            Arc::new({
+                let mut t = DbtTest::default();
+                t.__common_attr__.unique_id = "test.shop.t".to_string();
+                t.__common_attr__.name = "t".to_string();
+                t.__common_attr__.package_name = "shop".to_string();
+                t.__common_attr__.fqn = vec!["shop".to_string(), "t".to_string()];
+                t
+            }),
+        );
+        nodes.seeds.insert(
+            "seed.shop.s".to_string(),
+            Arc::new({
+                let mut s = DbtSeed::default();
+                s.__common_attr__.unique_id = "seed.shop.s".to_string();
+                s.__common_attr__.name = "s".to_string();
+                s.__common_attr__.package_name = "shop".to_string();
+                s.__common_attr__.fqn = vec!["shop".to_string(), "s".to_string()];
+                s
+            }),
+        );
+
+        let ids = vec![
+            "model.shop.m".to_string(),
+            "test.shop.t".to_string(),
+            "seed.shop.s".to_string(),
+        ];
+        let out = apply_selectors(ids, &nodes, Some("resource_type:test"), None).unwrap();
+        assert_eq!(out, vec!["test.shop.t".to_string()]);
     }
 }

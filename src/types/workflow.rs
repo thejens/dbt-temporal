@@ -307,6 +307,7 @@ pub struct ResolvedProjectConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -436,6 +437,43 @@ mod tests {
         let back: ResolvedProjectConfig = serde_json::from_str(&json)?;
         assert!(back.hooks.pre_run.is_empty());
         assert_eq!(back.retry.max_attempts, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn node_status_display_matches_as_str() {
+        for s in [
+            NodeStatus::Pending,
+            NodeStatus::Running,
+            NodeStatus::Success,
+            NodeStatus::Error,
+            NodeStatus::Skipped,
+            NodeStatus::Cancelled,
+        ] {
+            assert_eq!(format!("{s}"), s.as_str());
+        }
+    }
+
+    #[test]
+    fn project_hook_phase_round_trip() {
+        assert_eq!(ProjectHookPhase::OnRunStart.as_str(), "on_run_start");
+        assert_eq!(ProjectHookPhase::OnRunEnd.as_str(), "on_run_end");
+        assert_eq!(format!("{}", ProjectHookPhase::OnRunStart), "on_run_start");
+        assert_eq!(format!("{}", ProjectHookPhase::OnRunEnd), "on_run_end");
+
+        let s = serde_json::to_string(&ProjectHookPhase::OnRunStart).unwrap();
+        assert_eq!(s, "\"on_run_start\"");
+        let back: ProjectHookPhase = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ProjectHookPhase::OnRunStart);
+    }
+
+    #[test]
+    fn dbt_run_input_command_defaults_to_build() -> anyhow::Result<()> {
+        // Other fields all use the same `#[serde(default)]` shape; the explicit
+        // `command` default is the interesting one (build vs. empty).
+        let json = r#"{"project": null}"#;
+        let input: DbtRunInput = serde_json::from_str(json)?;
+        assert_eq!(input.command, "build");
         Ok(())
     }
 }

@@ -19,6 +19,29 @@ test:
 test-examples:
 	./tests/test_examples.sh
 
+# Coverage. Floor ratchets up over time toward 100% — never down.
+# Raise COVERAGE_FLOOR whenever the full-suite coverage rises above the current
+# floor by more than ~1pp; never lower it just to land a PR.
+# Excludes main.rs (binary entrypoint) — all real logic is in lib.rs.
+# Runs single-threaded to avoid a dbt-fusion loader race when two tests load
+# the same project in parallel (loader.rs:638 RwLock unwrap).
+COVERAGE_FLOOR ?= 85
+COVERAGE_IGNORE := src/main\.rs
+
+coverage:
+	cargo llvm-cov --workspace --no-fail-fast \
+		--ignore-filename-regex '$(COVERAGE_IGNORE)' \
+		--fail-under-lines $(COVERAGE_FLOOR) \
+		--summary-only \
+		-- --test-threads=1
+
+coverage-html:
+	cargo llvm-cov --workspace --no-fail-fast \
+		--ignore-filename-regex '$(COVERAGE_IGNORE)' \
+		--html \
+		-- --test-threads=1
+	@echo "Open target/llvm-cov/html/index.html"
+
 clippy:
 	cargo clippy -- -D warnings
 

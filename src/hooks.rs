@@ -53,17 +53,27 @@ pub fn resolve_config_impl(
     input: ResolveConfigInput,
 ) -> anyhow::Result<ResolvedProjectConfig> {
     let state = registry.get(input.project.as_deref())?;
+    Ok(merge_resolved_config(
+        input.input_hooks,
+        &state.default_hooks,
+        &state.default_retry,
+    ))
+}
 
-    // If the caller provided explicit hooks, use those (full override).
-    // Retry config always comes from file defaults.
-    let hooks = input
-        .input_hooks
-        .unwrap_or_else(|| state.default_hooks.clone());
-
-    Ok(ResolvedProjectConfig {
-        hooks,
-        retry: state.default_retry.clone(),
-    })
+/// Pure config-merge step extracted from `resolve_config_impl` so it can be
+/// unit-tested without standing up a full `WorkerState`.
+///
+/// The caller's `input_hooks` is a full override (when present); retry config
+/// always comes from the worker-state defaults.
+fn merge_resolved_config(
+    input_hooks: Option<HooksConfig>,
+    default_hooks: &HooksConfig,
+    default_retry: &RetryConfig,
+) -> ResolvedProjectConfig {
+    ResolvedProjectConfig {
+        hooks: input_hooks.unwrap_or_else(|| default_hooks.clone()),
+        retry: default_retry.clone(),
+    }
 }
 
 /// Execute a list of hooks sequentially as child workflows.
@@ -283,8 +293,67 @@ async fn run_child_workflow(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    use crate::types::{HookConfig, HookErrorMode};
+
+    #[test]
+    fn merge_resolved_config_uses_input_hooks_when_present() {
+        let mut input_hooks = HooksConfig::default();
+        input_hooks.pre_run.push(HookConfig {
+            workflow_type: "from_input".to_string(),
+            task_queue: "q".to_string(),
+            timeout_secs: None,
+            on_error: HookErrorMode::default(),
+            input: None,
+            fire_and_forget: false,
+        });
+
+        let mut default_hooks = HooksConfig::default();
+        default_hooks.pre_run.push(HookConfig {
+            workflow_type: "from_default".to_string(),
+            task_queue: "q".to_string(),
+            timeout_secs: None,
+            on_error: HookErrorMode::default(),
+            input: None,
+            fire_and_forget: false,
+        });
+
+        let default_retry = RetryConfig {
+            max_attempts: 7,
+            ..RetryConfig::default()
+        };
+
+        let resolved = merge_resolved_config(Some(input_hooks), &default_hooks, &default_retry);
+
+        assert_eq!(resolved.hooks.pre_run.len(), 1);
+        assert_eq!(resolved.hooks.pre_run[0].workflow_type, "from_input");
+        // Retry comes from defaults regardless of input.
+        assert_eq!(resolved.retry.max_attempts, 7);
+    }
+
+    #[test]
+    fn merge_resolved_config_falls_back_to_defaults_when_input_hooks_absent() {
+        let mut default_hooks = HooksConfig::default();
+        default_hooks.on_success.push(HookConfig {
+            workflow_type: "publish".to_string(),
+            task_queue: "q".to_string(),
+            timeout_secs: Some(120),
+            on_error: HookErrorMode::default(),
+            input: None,
+            fire_and_forget: false,
+        });
+
+        let default_retry = RetryConfig::default();
+
+        let resolved = merge_resolved_config(None, &default_hooks, &default_retry);
+
+        assert_eq!(resolved.hooks.on_success.len(), 1);
+        assert_eq!(resolved.hooks.on_success[0].workflow_type, "publish");
+        assert_eq!(resolved.retry.max_attempts, RetryConfig::default().max_attempts);
+    }
 
     #[test]
     fn load_project_config_missing_file_returns_defaults() -> anyhow::Result<()> {

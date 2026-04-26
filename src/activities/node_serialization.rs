@@ -206,8 +206,11 @@ pub fn get_sql_header(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    use dbt_schemas::schemas::nodes::{DbtModel, DbtSeed, DbtSnapshot, DbtTest};
 
     #[test]
     fn get_node_config_yml_missing_node_returns_empty_mapping() {
@@ -244,5 +247,154 @@ mod tests {
     fn get_sql_header_missing_model_returns_none() {
         let nodes = dbt_schemas::schemas::Nodes::default();
         assert!(get_sql_header(&nodes, "model.waffle.nope", NodeType::Model).is_none());
+    }
+
+    fn assert_resource_type(yml: &dbt_yaml::Value, expected: &str) {
+        let dbt_yaml::Value::Mapping(map, _) = yml else {
+            panic!("expected mapping, got {yml:?}");
+        };
+        let got = map
+            .get(dbt_yaml::Value::string("resource_type".to_string()))
+            .expect("resource_type key");
+        let dbt_yaml::Value::String(s, _) = got else {
+            panic!("resource_type should be a string");
+        };
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn get_node_yml_injects_model_resource_type() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .models
+            .insert("model.waffle.stg".to_string(), Arc::new(DbtModel::default()));
+        let yml = get_node_yml(&nodes, "model.waffle.stg", NodeType::Model).unwrap();
+        assert_resource_type(&yml, "model");
+    }
+
+    #[test]
+    fn get_node_yml_injects_seed_resource_type() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .seeds
+            .insert("seed.waffle.raw".to_string(), Arc::new(DbtSeed::default()));
+        let yml = get_node_yml(&nodes, "seed.waffle.raw", NodeType::Seed).unwrap();
+        assert_resource_type(&yml, "seed");
+    }
+
+    #[test]
+    fn get_node_yml_injects_snapshot_resource_type() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .snapshots
+            .insert("snapshot.waffle.s".to_string(), Arc::new(DbtSnapshot::default()));
+        let yml = get_node_yml(&nodes, "snapshot.waffle.s", NodeType::Snapshot).unwrap();
+        assert_resource_type(&yml, "snapshot");
+    }
+
+    #[test]
+    fn get_node_yml_injects_test_resource_type() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .tests
+            .insert("test.waffle.t".to_string(), Arc::new(DbtTest::default()));
+        let yml = get_node_yml(&nodes, "test.waffle.t", NodeType::Test).unwrap();
+        assert_resource_type(&yml, "test");
+    }
+
+    #[test]
+    fn get_node_config_yml_returns_serialized_model_config() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .models
+            .insert("model.waffle.stg".to_string(), Arc::new(DbtModel::default()));
+        let yml = get_node_config_yml(&nodes, "model.waffle.stg", NodeType::Model);
+        // Serializing default config produces a mapping (possibly empty); the contract
+        // is "anything but the empty-mapping fallback for a present node".
+        let dbt_yaml::Value::Mapping(_, _) = &yml else {
+            panic!("expected mapping config");
+        };
+    }
+
+    #[test]
+    fn get_node_config_yml_returns_serialized_seed_config() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .seeds
+            .insert("seed.waffle.raw".to_string(), Arc::new(DbtSeed::default()));
+        let yml = get_node_config_yml(&nodes, "seed.waffle.raw", NodeType::Seed);
+        let dbt_yaml::Value::Mapping(_, _) = &yml else {
+            panic!("expected mapping config");
+        };
+    }
+
+    #[test]
+    fn get_node_config_yml_returns_serialized_snapshot_config() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .snapshots
+            .insert("snapshot.waffle.s".to_string(), Arc::new(DbtSnapshot::default()));
+        let yml = get_node_config_yml(&nodes, "snapshot.waffle.s", NodeType::Snapshot);
+        let dbt_yaml::Value::Mapping(_, _) = &yml else {
+            panic!("expected mapping config");
+        };
+    }
+
+    #[test]
+    fn get_node_config_yml_returns_serialized_test_config() {
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes
+            .tests
+            .insert("test.waffle.t".to_string(), Arc::new(DbtTest::default()));
+        let yml = get_node_config_yml(&nodes, "test.waffle.t", NodeType::Test);
+        let dbt_yaml::Value::Mapping(_, _) = &yml else {
+            panic!("expected mapping config");
+        };
+    }
+
+    #[test]
+    fn build_agate_table_skips_non_seeds() {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let io_args = dbt_common::io_args::IoArgs::default();
+        for rt in [
+            NodeType::Model,
+            NodeType::Test,
+            NodeType::Snapshot,
+            NodeType::Operation,
+        ] {
+            let result = build_agate_table(&nodes, "any.id", rt, &io_args).unwrap();
+            assert!(result.is_none(), "rt={rt:?} should return None");
+        }
+    }
+
+    #[test]
+    fn build_agate_table_errors_when_seed_not_found() {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let io_args = dbt_common::io_args::IoArgs::default();
+        let err =
+            build_agate_table(&nodes, "seed.missing.x", NodeType::Seed, &io_args).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn inject_resource_type_into_existing_mapping() {
+        let mut map = dbt_yaml::Mapping::new();
+        map.insert(
+            dbt_yaml::Value::string("name".to_string()),
+            dbt_yaml::Value::string("foo".to_string()),
+        );
+        let mut val = dbt_yaml::Value::mapping(map);
+        inject_resource_type(&mut val, "model");
+        assert_resource_type(&val, "model");
+    }
+
+    #[test]
+    fn inject_resource_type_noop_on_non_mapping() {
+        // Sequences and scalars must not panic when receiving an injection attempt.
+        let mut seq = dbt_yaml::Value::sequence(Vec::new());
+        inject_resource_type(&mut seq, "model");
+        let dbt_yaml::Value::Sequence(_, _) = seq else {
+            panic!("expected unchanged sequence");
+        };
     }
 }

@@ -32,3 +32,31 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::registry::Registry;
+
+    #[test]
+    fn layer_inserts_telemetry_attributes_for_new_spans() {
+        let subscriber = Registry::default().with(DbtTelemetryCompatLayer);
+        with_default(subscriber, || {
+            let _span = tracing::info_span!("a_span").entered();
+            // Without the layer, dbt-fusion code that reads TelemetryAttributes from
+            // span extensions panics. Reaching this line means the layer ran without
+            // panicking and `on_new_span` executed for the span we just created.
+        });
+    }
+
+    #[test]
+    fn layer_implements_debug() {
+        // `#[derive(Debug)]` on the unit struct — exercise it so the impl gets compiled
+        // into the coverage build.
+        let s = format!("{DbtTelemetryCompatLayer:?}");
+        assert!(s.contains("DbtTelemetryCompatLayer"));
+    }
+}

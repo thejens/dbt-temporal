@@ -378,6 +378,7 @@ pub(super) fn json_to_minijinja(v: &serde_json::Value) -> minijinja::Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -527,5 +528,122 @@ mod tests {
         // Fields not stored should be absent.
         assert!(!result.contains_key("query_id"));
         Ok(())
+    }
+
+    // --- json_to_minijinja ---
+
+    #[test]
+    fn json_to_minijinja_null_maps_to_unit() {
+        let v = json_to_minijinja(&serde_json::Value::Null);
+        assert!(v.is_none() || v.is_undefined());
+    }
+
+    #[test]
+    fn json_to_minijinja_primitives() {
+        assert_eq!(json_to_minijinja(&serde_json::json!(true)).to_string(), "True");
+        assert_eq!(json_to_minijinja(&serde_json::json!(42)).to_string(), "42");
+        assert_eq!(json_to_minijinja(&serde_json::json!(-3)).to_string(), "-3");
+        assert_eq!(json_to_minijinja(&serde_json::json!(2.5)).to_string(), "2.5");
+        assert_eq!(json_to_minijinja(&serde_json::json!("hi")).as_str(), Some("hi"));
+    }
+
+    #[test]
+    fn json_to_minijinja_array_yields_list() {
+        let v = json_to_minijinja(&serde_json::json!([1, 2, "x"]));
+        let items: Vec<String> = v.try_iter().unwrap().map(|i| i.to_string()).collect();
+        assert_eq!(items, vec!["1", "2", "x"]);
+    }
+
+    #[test]
+    fn json_to_minijinja_object_supports_attribute_access() {
+        let v = json_to_minijinja(&serde_json::json!({"a": 1, "b": "two"}));
+        assert_eq!(v.get_attr("a").unwrap().to_string(), "1");
+        assert_eq!(v.get_attr("b").unwrap().as_str(), Some("two"));
+    }
+
+    #[test]
+    fn json_to_minijinja_large_unsigned_falls_back_to_f64() {
+        // u64::MAX doesn't fit in i64; we fall through to as_f64 which always
+        // succeeds for serde_json::Number (so the to_string() arm is dead but
+        // typesafe). Exercise the f64 branch — the value stringifies as a float.
+        let v = json_to_minijinja(&serde_json::json!(u64::MAX));
+        assert!(v.to_string().contains("e19") || v.to_string().contains("18446744"));
+    }
+
+    // --- patch_target_global ---
+
+    fn make_jinja_env_with_target(
+        initial: &serde_json::Value,
+    ) -> dbt_jinja_utils::jinja_environment::JinjaEnv {
+        let mut env = minijinja::Environment::new();
+        env.add_global("target", json_to_minijinja(initial));
+        dbt_jinja_utils::jinja_environment::JinjaEnv::new(env)
+    }
+
+    #[test]
+    fn patch_target_global_overrides_schema_and_database() {
+        let mut env = make_jinja_env_with_target(&serde_json::json!({
+            "schema": "old_schema",
+            "database": "old_db",
+            "name": "dev",
+        }));
+        patch_target_global(&mut env, "new_schema", "new_db", None);
+
+        let rendered = env
+            .render_str(
+                "{{ target.schema }}|{{ target.database }}|{{ target.name }}",
+                BTreeMap::<String, minijinja::Value>::new(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rendered, "new_schema|new_db|dev");
+    }
+
+    #[test]
+    fn patch_target_global_overrides_name_when_provided() {
+        let mut env = make_jinja_env_with_target(&serde_json::json!({
+            "schema": "s",
+            "database": "d",
+            "name": "old",
+        }));
+        patch_target_global(&mut env, "s", "d", Some("prod"));
+
+        let rendered = env
+            .render_str(
+                "{{ target.name }}|{{ target.target_name }}",
+                BTreeMap::<String, minijinja::Value>::new(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rendered, "prod|prod");
+    }
+
+    #[test]
+    fn patch_target_global_aliases_env_to_target() {
+        let mut env = make_jinja_env_with_target(&serde_json::json!({
+            "schema": "s",
+            "database": "d",
+        }));
+        patch_target_global(&mut env, "s2", "d2", None);
+
+        let rendered = env
+            .render_str(
+                "{{ env.schema }}|{{ env.database }}",
+                BTreeMap::<String, minijinja::Value>::new(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rendered, "s2|d2");
+    }
+
+    #[test]
+    fn patch_target_global_returns_silently_when_target_not_object() {
+        // `target` rendered as plain string → tojson produces a JSON string (not object);
+        // the patch should be a no-op rather than panic.
+        let mut env = minijinja::Environment::new();
+        env.add_global("target", minijinja::Value::from("not_an_object"));
+        let mut jenv = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
+        patch_target_global(&mut jenv, "s", "d", None);
+        // No assertion needed beyond "didn't panic".
     }
 }

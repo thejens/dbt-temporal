@@ -174,6 +174,27 @@ pub fn apply_pre_run_outcome(
     ControlFlow::Continue(())
 }
 
+/// Merge the result of `execute_hooks` for a post-run hook batch. Returns the
+/// new `success` flag for the workflow:
+///
+/// - On Ok: drains the outcome's collected non-fatal errors into the parent's
+///   accumulator and preserves the incoming `success_in` value.
+/// - On Err: a post-hook failure marks the workflow as failed (matches
+///   dbt-core: failed `on_success` hooks turn the run into a failure).
+pub fn apply_post_run_outcome(
+    outcome_result: Result<crate::types::HookExecutionOutcome, anyhow::Error>,
+    hook_errors: &mut Vec<HookError>,
+    success_in: bool,
+) -> bool {
+    match outcome_result {
+        Ok(outcome) => {
+            hook_errors.extend(outcome.errors);
+            success_in
+        }
+        Err(_) => false,
+    }
+}
+
 /// Convert search-attribute strings into the JSON-encoded payloads Temporal's
 /// `upsert_search_attributes` API expects. Pure: just serializes each value
 /// and wraps any failure into `WorkflowTermination::failed` with the
@@ -382,16 +403,11 @@ pub async fn run_post_hooks(
     }
 
     let payload = build_post_hook_payload(event, plan, input, output_snapshot);
-    match execute_hooks(ctx, post_hooks, &payload).await {
-        Ok(outcome) => {
-            hook_errors.extend(outcome.errors);
-            success_in
-        }
-        Err(e) => {
-            tracing::error!(event = %event, error = %e, "post-hook failed, marking workflow as failed");
-            false
-        }
+    let result = execute_hooks(ctx, post_hooks, &payload).await;
+    if let Err(ref e) = result {
+        tracing::error!(event = %event, error = %e, "post-hook failed, marking workflow as failed");
     }
+    apply_post_run_outcome(result, hook_errors, success_in)
 }
 
 #[cfg(test)]
@@ -666,6 +682,44 @@ mod tests {
     }
 
     // --- build_search_attribute_payloads ---
+
+    // --- apply_post_run_outcome ---
+
+    #[test]
+    fn apply_post_run_outcome_ok_collects_errors_and_preserves_success() {
+        let mut hook_errors = Vec::new();
+        let outcome = make_outcome(false, None, &[], 2);
+        let success = apply_post_run_outcome(Ok(outcome), &mut hook_errors, true);
+        assert!(success);
+        assert_eq!(hook_errors.len(), 2);
+    }
+
+    #[test]
+    fn apply_post_run_outcome_ok_preserves_failure_status() {
+        // The post-hook ran cleanly but the run already failed → success
+        // stays false.
+        let mut hook_errors = Vec::new();
+        let outcome = make_outcome(false, None, &[], 0);
+        let success = apply_post_run_outcome(Ok(outcome), &mut hook_errors, false);
+        assert!(!success);
+    }
+
+    #[test]
+    fn apply_post_run_outcome_err_marks_workflow_failed() {
+        // post-hook itself errored — even on a previously-successful run, the
+        // workflow is marked failed. (dbt-core: a failed on_success turns the
+        // run red.)
+        let mut hook_errors = Vec::new();
+        let success = apply_post_run_outcome(
+            Err(anyhow::anyhow!("post-hook blew up")),
+            &mut hook_errors,
+            true,
+        );
+        assert!(!success);
+        // Note: the err arm doesn't push to hook_errors — that loss is
+        // intentional, the caller logs the error before calling here.
+        assert!(hook_errors.is_empty());
+    }
 
     #[test]
     fn build_search_attribute_payloads_empty_input() {

@@ -1,6 +1,7 @@
 //! Basic BigQuery execution tests: happy path build and select filtering.
 
 use anyhow::{Context, Result};
+use dbt_temporal::types::NodeStatus;
 
 use super::infra::*;
 
@@ -74,7 +75,7 @@ async fn test_bigquery_dbt_build() -> Result<()> {
                 seed_results.len()
             );
             for r in &seed_results {
-                assert_eq!(r.status, "success", "seed {} should succeed", r.unique_id);
+                assert_eq!(r.status, NodeStatus::Success, "seed {} should succeed", r.unique_id);
             }
 
             // --- Models: 9 non-ephemeral models ---
@@ -89,7 +90,7 @@ async fn test_bigquery_dbt_build() -> Result<()> {
                 "should have 9 non-ephemeral model results (12 total minus 3 ephemeral)"
             );
             for r in &model_results {
-                assert_eq!(r.status, "success", "model {} should succeed", r.unique_id);
+                assert_eq!(r.status, NodeStatus::Success, "model {} should succeed", r.unique_id);
                 assert!(
                     r.compiled_code.is_some(),
                     "model {} should have compiled_code",
@@ -153,7 +154,7 @@ async fn test_bigquery_dbt_build() -> Result<()> {
             let active_stations = find_result(output, "active_stations")
                 .ok_or_else(|| anyhow::anyhow!("active_stations not in results"))?;
             assert_eq!(
-                active_stations.status, "success",
+                active_stations.status, NodeStatus::Success,
                 "active_stations (depends on seed via ephemeral) should succeed"
             );
 
@@ -165,7 +166,7 @@ async fn test_bigquery_dbt_build() -> Result<()> {
                 .collect();
             assert_eq!(snapshot_results.len(), 1, "should have 1 snapshot result");
             assert_eq!(
-                snapshot_results[0].status, "success",
+                snapshot_results[0].status, NodeStatus::Success,
                 "snapshot should succeed"
             );
 
@@ -182,7 +183,7 @@ async fn test_bigquery_dbt_build() -> Result<()> {
             );
             let test_failures: Vec<_> = test_results
                 .iter()
-                .filter(|r| r.status == "error")
+                .filter(|r| r.status == NodeStatus::Error)
                 .collect();
             assert!(
                 test_failures.is_empty(),
@@ -247,7 +248,7 @@ async fn test_bigquery_select() -> Result<()> {
                 "should be stg_stations, got {}",
                 output.node_results[0].unique_id
             );
-            assert_eq!(output.node_results[0].status, "success");
+            assert_eq!(output.node_results[0].status, NodeStatus::Success);
 
             // Verify compiled SQL has resolved var and source reference.
             let sql = output.node_results[0]

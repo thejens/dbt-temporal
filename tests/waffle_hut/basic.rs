@@ -58,7 +58,7 @@ async fn test_waffle_hut_dbt_run() -> Result<()> {
             assert_eq!(model_results.len(), 5, "should have 5 model results");
 
             for r in &model_results {
-                assert_eq!(r.status, "success", "model {} should succeed", r.unique_id);
+                assert_eq!(r.status, NodeStatus::Success, "model {} should succeed", r.unique_id);
             }
 
             // --- Output field assertions ---
@@ -193,7 +193,7 @@ async fn test_select_exclude() -> Result<()> {
             assert!(output.success);
             assert_eq!(output.node_results.len(), 1, "should run exactly 1 model");
             assert!(output.node_results[0].unique_id.contains("stg_customers"));
-            assert_eq!(output.node_results[0].status, "success");
+            assert_eq!(output.node_results[0].status, NodeStatus::Success);
 
             // --- select multiple staging models ---
             tracing::info!("Select test: select='stg_orders stg_payments'");
@@ -232,7 +232,7 @@ async fn test_select_exclude() -> Result<()> {
             assert!(output.success);
             assert_eq!(output.node_results.len(), 3, "should run 3 models");
             for r in &output.node_results {
-                assert_eq!(r.status, "success", "{} should succeed", r.unique_id);
+                assert_eq!(r.status, NodeStatus::Success, "{} should succeed", r.unique_id);
                 assert!(
                     !r.unique_id.contains("customers"),
                     "{} should not match 'customers'",

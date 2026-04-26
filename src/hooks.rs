@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
-    HookConfig, HookError, HookErrorMode, HookExecutionOutcome, HookPayload, HooksConfig,
-    ResolveConfigInput, ResolvedProjectConfig, RetryConfig,
+    HookConfig, HookError, HookErrorMode, HookEvent, HookExecutionOutcome, HookPayload,
+    HooksConfig, ResolveConfigInput, ResolvedProjectConfig, RetryConfig,
 };
 
 use crate::workflow::DbtRunWorkflow;
@@ -150,7 +150,7 @@ pub async fn execute_hooks(
                             );
                             outcome.errors.push(HookError {
                                 hook_workflow_type: hook.workflow_type.clone(),
-                                event: payload.event.clone(),
+                                event: payload.event.to_string(),
                                 error: error_msg,
                             });
                         }
@@ -171,7 +171,7 @@ pub async fn execute_hooks(
                     "hook completed successfully"
                 );
 
-                if payload.event == "pre_run"
+                if matches!(payload.event, HookEvent::PreRun)
                     && let Some(ref bytes) = completion_payload
                 {
                     // Collect extra_env injected by this hook (merged across all hooks).
@@ -212,7 +212,7 @@ pub async fn execute_hooks(
                         );
                         outcome.errors.push(HookError {
                             hook_workflow_type: hook.workflow_type.clone(),
-                            event: payload.event.clone(),
+                            event: payload.event.to_string(),
                             error: error_msg,
                         });
                     }
@@ -274,12 +274,9 @@ async fn run_child_workflow(
     let started = ctx
         .child_workflow(wf, input, opts)
         .await
-        .map_err(|e| anyhow::anyhow!("child workflow failed to start: {e:#}"))?;
+        .context("child workflow failed to start")?;
 
-    let result = started
-        .result()
-        .await
-        .map_err(|e| anyhow::anyhow!("child workflow failed: {e:#}"))?;
+    let result = started.result().await.context("child workflow failed")?;
 
     let bytes = result.payloads.into_iter().next().map(|p| p.data);
     Ok(bytes)

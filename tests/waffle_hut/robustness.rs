@@ -7,7 +7,7 @@ use temporalio_client::{
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 
-use dbt_temporal::types::DbtRunOutput;
+use dbt_temporal::types::{DbtRunOutput, NodeStatus};
 
 use super::infra::*;
 
@@ -145,7 +145,8 @@ async fn test_activities_independent_of_target() -> Result<()> {
             assert_eq!(model_results.len(), 5, "should have 5 model results");
             for r in &model_results {
                 assert_eq!(
-                    r.status, "success",
+                    r.status,
+                    NodeStatus::Success,
                     "model {} should succeed after reset without target/",
                     r.unique_id
                 );

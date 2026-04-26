@@ -130,7 +130,7 @@ fn truncate_node_status_for_memo(tree: &NodeStatusTree) -> NodeStatusTree {
 pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
     NodeExecutionResult {
         unique_id: unique_id.to_string(),
-        status: "skipped".to_string(),
+        status: NodeStatus::Skipped,
         execution_time: 0.0,
         message: Some(message.to_string()),
         adapter_response: BTreeMap::default(),
@@ -143,7 +143,7 @@ pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
 pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
     NodeExecutionResult {
         unique_id: unique_id.to_string(),
-        status: "cancelled".to_string(),
+        status: NodeStatus::Cancelled,
         execution_time: 0.0,
         message: Some("cancelled".to_string()),
         adapter_response: BTreeMap::default(),
@@ -153,16 +153,99 @@ pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
     }
 }
 
-pub fn error_result(unique_id: &str, message: String) -> NodeExecutionResult {
+pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
     NodeExecutionResult {
         unique_id: unique_id.to_string(),
-        status: "error".to_string(),
+        status: NodeStatus::Error,
         execution_time: 0.0,
-        message: Some(message),
+        message: Some(message.to_string()),
         adapter_response: BTreeMap::default(),
         compiled_code: None,
         timing: vec![],
         failures: None,
+    }
+}
+
+/// English pluralisation suffix: empty for 1, "s" otherwise.
+pub const fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Build the dbt-style run-log header: version line, resource-type tally,
+/// and concurrency line. Pure — no ctx side effects.
+pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
+    let mut log_lines = Vec::with_capacity(3);
+    log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
+
+    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for info in plan.nodes.values() {
+        *type_counts.entry(info.resource_type.as_str()).or_default() += 1;
+    }
+    let parts: Vec<String> = type_counts
+        .iter()
+        .map(|(t, n)| format!("{n} {t}{}", plural(*n)))
+        .collect();
+    log_lines.push(format!("Found {}", parts.join(", ")));
+
+    log_lines.push(format!(
+        "Concurrency: {} parallel level{}",
+        plan.levels.len(),
+        plural(plan.levels.len())
+    ));
+    log_lines
+}
+
+/// Build the dbt-style summary lines that close out a run.
+pub fn build_summary_lines(
+    total_nodes: usize,
+    elapsed_secs: f64,
+    pass: usize,
+    error: usize,
+    skip: usize,
+) -> [String; 2] {
+    [
+        format!(
+            "Finished running {total_nodes} node{} in {elapsed_secs:.2}s.",
+            plural(total_nodes)
+        ),
+        format!("Done. PASS={pass} ERROR={error} SKIP={skip} TOTAL={total_nodes}"),
+    ]
+}
+
+/// Seconds between two deterministic workflow timestamps, or 0.0 if either
+/// is missing (workflow_time() is None outside of an executing workflow).
+///
+/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
+/// stable across history replay; the workflow file's own docstring forbids
+/// wall-clock time for this reason.
+pub fn elapsed_secs(
+    start: Option<std::time::SystemTime>,
+    end: Option<std::time::SystemTime>,
+) -> f64 {
+    start
+        .zip(end)
+        .and_then(|(s, e)| e.duration_since(s).ok())
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// On level cancellation, fill in cancelled results for every node in the
+/// level that didn't get a chance to run.
+///
+/// Called from the cancellation branch of the per-future loop after the
+/// triggering node has already been recorded. Idempotent: skips ids in
+/// `processed_in_level`. Maintains the invariant that every planned node
+/// gets exactly one entry in `all_results`.
+pub fn mark_remaining_level_as_cancelled(
+    level_node_ids: &[String],
+    processed_in_level: &std::collections::BTreeSet<String>,
+    node_status: &mut NodeStatusTree,
+    all_results: &mut Vec<NodeExecutionResult>,
+) {
+    for id in level_node_ids {
+        if !processed_in_level.contains(id) {
+            set_node_status(node_status, id, NodeStatus::Cancelled);
+            all_results.push(cancelled_result(id));
+        }
     }
 }
 
@@ -327,7 +410,7 @@ mod tests {
     fn skipped_result_fields() {
         let r = skipped_result("model.waffle.a", "upstream failure");
         assert_eq!(r.unique_id, "model.waffle.a");
-        assert_eq!(r.status, "skipped");
+        assert_eq!(r.status, NodeStatus::Skipped);
         assert_eq!(r.execution_time, 0.0);
         assert_eq!(r.message.as_deref(), Some("upstream failure"));
     }
@@ -336,16 +419,71 @@ mod tests {
     fn cancelled_result_fields() {
         let r = cancelled_result("model.waffle.b");
         assert_eq!(r.unique_id, "model.waffle.b");
-        assert_eq!(r.status, "cancelled");
+        assert_eq!(r.status, NodeStatus::Cancelled);
         assert_eq!(r.message.as_deref(), Some("cancelled"));
     }
 
     #[test]
     fn error_result_fields() {
-        let r = error_result("model.waffle.c", "timeout".to_string());
+        let r = error_result("model.waffle.c", "timeout");
         assert_eq!(r.unique_id, "model.waffle.c");
-        assert_eq!(r.status, "error");
+        assert_eq!(r.status, NodeStatus::Error);
         assert_eq!(r.message.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn mark_remaining_fills_unprocessed_only_once() {
+        let level: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let mut processed = std::collections::BTreeSet::new();
+        processed.insert("a".to_string());
+        processed.insert("c".to_string());
+
+        let mut tree = NodeStatusTree {
+            nodes: level
+                .iter()
+                .map(|id| (id.clone(), NodeStatus::Pending))
+                .collect(),
+        };
+        let mut results: Vec<NodeExecutionResult> =
+            vec![error_result("a", "boom"), cancelled_result("c")];
+
+        mark_remaining_level_as_cancelled(&level, &processed, &mut tree, &mut results);
+
+        // Invariant: every level id has exactly one result entry.
+        assert_eq!(results.len(), level.len());
+        let mut ids: Vec<&str> = results.iter().map(|r| r.unique_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "b", "c", "d"]);
+
+        // Already-processed nodes keep their original status; unprocessed
+        // nodes are now cancelled.
+        assert_eq!(tree.nodes["a"], NodeStatus::Pending); // not changed by helper
+        assert_eq!(tree.nodes["b"], NodeStatus::Cancelled);
+        assert_eq!(tree.nodes["c"], NodeStatus::Pending);
+        assert_eq!(tree.nodes["d"], NodeStatus::Cancelled);
+    }
+
+    #[test]
+    fn mark_remaining_is_idempotent_when_all_processed() {
+        let level: Vec<String> = ["a", "b"].iter().map(|s| (*s).to_string()).collect();
+        let processed: std::collections::BTreeSet<String> = level.iter().cloned().collect();
+
+        let mut tree = NodeStatusTree {
+            nodes: level
+                .iter()
+                .map(|id| (id.clone(), NodeStatus::Success))
+                .collect(),
+        };
+        let mut results: Vec<NodeExecutionResult> = vec![];
+
+        mark_remaining_level_as_cancelled(&level, &processed, &mut tree, &mut results);
+
+        assert!(results.is_empty());
+        assert_eq!(tree.nodes["a"], NodeStatus::Success);
+        assert_eq!(tree.nodes["b"], NodeStatus::Success);
     }
 
     #[test]

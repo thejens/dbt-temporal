@@ -17,7 +17,7 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::info;
 
 use crate::error::DbtTemporalError;
-use crate::types::{NodeExecutionResult, ProjectHooksInput};
+use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -33,7 +33,7 @@ pub async fn run_project_hooks_outer(
     ctx: ActivityContext,
     input: ProjectHooksInput,
 ) -> Result<(), ActivityError> {
-    let phase = input.phase.clone();
+    let phase = input.phase;
     tokio::select! {
         result = run_project_hooks_inner(activities, input) => {
             result.map_err(|e| ActivityError::NonRetryable(e.into()))
@@ -147,18 +147,15 @@ async fn run_project_hooks_inner(
     context.insert("invocation_id".to_owned(), minijinja::Value::from(input.invocation_id.clone()));
 
     // For on_run_end: inject `results` matching dbt-core's shape.
-    if input.phase == "on_run_end" {
+    if matches!(input.phase, ProjectHookPhase::OnRunEnd) {
         let results_value = build_results_context(&input.node_results, &state.resolver_state.nodes);
         context.insert("results".to_owned(), results_value);
     }
 
     // ── Select hook list ─────────────────────────────────────────────────
-    let operations = match input.phase.as_str() {
-        "on_run_start" => &state.resolver_state.operations.on_run_start,
-        "on_run_end" => &state.resolver_state.operations.on_run_end,
-        other => {
-            anyhow::bail!("unknown hook phase '{other}'; expected 'on_run_start' or 'on_run_end'")
-        }
+    let operations = match input.phase {
+        ProjectHookPhase::OnRunStart => &state.resolver_state.operations.on_run_start,
+        ProjectHookPhase::OnRunEnd => &state.resolver_state.operations.on_run_end,
     };
 
     if operations.is_empty() {
@@ -225,7 +222,7 @@ fn build_results_context(
             let mut map = BTreeMap::<String, minijinja::Value>::new();
 
             map.insert("unique_id".to_owned(), minijinja::Value::from(r.unique_id.clone()));
-            map.insert("status".to_owned(), minijinja::Value::from(r.status.clone()));
+            map.insert("status".to_owned(), minijinja::Value::from(r.status.as_str()));
             map.insert("execution_time".to_owned(), minijinja::Value::from(r.execution_time));
             map.insert(
                 "message".to_owned(),
@@ -279,13 +276,18 @@ fn build_results_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::NodeStatus;
 
-    fn mk_result(unique_id: &str, status: &str, failures: Option<i64>) -> NodeExecutionResult {
+    fn mk_result(
+        unique_id: &str,
+        status: NodeStatus,
+        failures: Option<i64>,
+    ) -> NodeExecutionResult {
         NodeExecutionResult {
             unique_id: unique_id.to_string(),
-            status: status.to_string(),
+            status,
             execution_time: 1.5,
-            message: Some(format!("{status} message")),
+            message: Some(format!("{status:?} message")),
             adapter_response: BTreeMap::new(),
             compiled_code: None,
             timing: vec![],
@@ -297,8 +299,8 @@ mod tests {
     fn results_context_renders_via_jinja() -> anyhow::Result<()> {
         let nodes = dbt_schemas::schemas::Nodes::default();
         let results = vec![
-            mk_result("model.pkg.customers", "success", None),
-            mk_result("test.pkg.unique_customers", "error", Some(2)),
+            mk_result("model.pkg.customers", NodeStatus::Success, None),
+            mk_result("test.pkg.unique_customers", NodeStatus::Error, Some(2)),
         ];
 
         let value = build_results_context(&results, &nodes);
@@ -380,7 +382,7 @@ pass={{ ns.pass }} error={{ ns.error }}",
     #[test]
     fn results_with_no_message_renders_none() -> anyhow::Result<()> {
         let nodes = dbt_schemas::schemas::Nodes::default();
-        let mut r = mk_result("model.pkg.foo", "skipped", None);
+        let mut r = mk_result("model.pkg.foo", NodeStatus::Skipped, None);
         r.message = None;
         let value = build_results_context(&[r], &nodes);
 

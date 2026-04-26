@@ -66,6 +66,13 @@ pub async fn store_artifacts_inner(
 
 /// Build the `run_results.json` content from the store artifacts input.
 fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow::Error> {
+    // Sum durations in nanoseconds (i64) so a long run with many nodes
+    // doesn't lose low-bit precision the way an f64 fold would.
+    let total: std::time::Duration = input
+        .node_results
+        .iter()
+        .map(|r| std::time::Duration::from_secs_f64(r.execution_time.max(0.0)))
+        .sum();
     let run_results = serde_json::json!({
         "metadata": {
             "invocation_id": input.invocation_id,
@@ -73,7 +80,7 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
             "generated_at": chrono::Utc::now().to_rfc3339(),
         },
         "results": input.node_results,
-        "elapsed_time": input.node_results.iter().map(|r| r.execution_time).sum::<f64>(),
+        "elapsed_time": total.as_secs_f64(),
     });
     serde_json::to_string_pretty(&run_results).map_err(Into::into)
 }
@@ -81,13 +88,13 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::NodeExecutionResult;
+    use crate::types::{NodeExecutionResult, NodeStatus};
     use std::collections::BTreeMap;
 
-    fn sample_result(unique_id: &str, status: &str, time: f64) -> NodeExecutionResult {
+    fn sample_result(unique_id: &str, status: NodeStatus, time: f64) -> NodeExecutionResult {
         NodeExecutionResult {
             unique_id: unique_id.into(),
-            status: status.into(),
+            status,
             execution_time: time,
             message: None,
             adapter_response: BTreeMap::new(),
@@ -102,8 +109,8 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-123".into(),
             node_results: vec![
-                sample_result("model.a", "success", 1.5),
-                sample_result("model.b", "error", 0.3),
+                sample_result("model.a", NodeStatus::Success, 1.5),
+                sample_result("model.b", NodeStatus::Error, 0.3),
             ],
             manifest_json: None,
             manifest_ref: None,

@@ -9,7 +9,7 @@
 
 mod helpers;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
@@ -20,16 +20,21 @@ use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, Work
 use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
 use crate::types::{
-    CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookPayload, NodeExecutionInput,
-    NodeExecutionResult, NodeStatus, ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig,
-    StoreArtifactsInput, StoreArtifactsOutput,
+    CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookEvent, HookPayload,
+    NodeExecutionInput, NodeExecutionResult, NodeStatus, ProjectHookPhase, ProjectHooksInput,
+    ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
 };
 
 use self::helpers::{
-    build_effective_env, build_node_status_tree, build_retry_policy, cancelled_result,
-    error_result, node_label, set_node_status, short_activity_error, skipped_result,
-    upsert_memo_state, upsert_node_status,
+    build_effective_env, build_log_header, build_node_status_tree, build_retry_policy,
+    build_summary_lines, cancelled_result, elapsed_secs, error_result,
+    mark_remaining_level_as_cancelled, node_label, plural, set_node_status, short_activity_error,
+    skipped_result, upsert_memo_state, upsert_node_status,
 };
+
+/// Cap memo writes for deep DAGs — upsert on this cadence on quiet levels.
+/// Levels with failures or cancellation always upsert immediately.
+const MEMO_UPSERT_EVERY_N_LEVELS: usize = 10;
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
 #[workflow]
@@ -55,7 +60,9 @@ impl DbtRunWorkflow {
     // Orchestration function that is inherently sequential and builds a CLI-style run log via
     // push_str(&format!(...)); write!() would require unwrap/discard on the infallible Result.
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<DbtRunOutput> {
-        let start = std::time::Instant::now();
+        // Deterministic workflow time — the workflow's docstring forbids
+        // wall-clock sources because they break history replay.
+        let start = ctx.workflow_time();
         let input = ctx.state(|s| s.input.clone());
 
         // Store command metadata in memo (write-once).
@@ -101,9 +108,9 @@ impl DbtRunWorkflow {
         ctx.set_current_details(format!(
             "planned {} node{} across {} level{}",
             plan.nodes.len(),
-            if plan.nodes.len() == 1 { "" } else { "s" },
+            plural(plan.nodes.len()),
             plan.levels.len(),
-            if plan.levels.len() == 1 { "" } else { "s" },
+            plural(plan.levels.len()),
         ));
 
         // --- Resolve project config (hooks + retry) ---
@@ -137,7 +144,7 @@ impl DbtRunWorkflow {
         // --- Pre-run hooks ---
         if !hooks.pre_run.is_empty() {
             let payload = HookPayload {
-                event: "pre_run".to_string(),
+                event: HookEvent::PreRun,
                 invocation_id: plan.invocation_id.clone(),
                 input: input.clone(),
                 plan: Some(plan.clone()),
@@ -154,7 +161,7 @@ impl DbtRunWorkflow {
                             skipped: true,
                             skip_reason: outcome.skip_reason,
                             node_results: vec![],
-                            elapsed_time: start.elapsed().as_secs_f64(),
+                            elapsed_time: elapsed_secs(start, ctx.workflow_time()),
                             artifacts: None,
                             log_path: None,
                             hook_errors: all_hook_errors,
@@ -175,7 +182,7 @@ impl DbtRunWorkflow {
             ctx.start_activity(
                 DbtActivities::run_project_hooks,
                 ProjectHooksInput {
-                    phase: "on_run_start".to_string(),
+                    phase: ProjectHookPhase::OnRunStart,
                     project: plan.project.clone(),
                     invocation_id: plan.invocation_id.clone(),
                     env: effective_env.clone(),
@@ -200,26 +207,7 @@ impl DbtRunWorkflow {
 
         // --- Build CLI-style run log (dbt-like output, stored as array in memo) ---
         let total_nodes: usize = plan.levels.iter().map(Vec::len).sum();
-        let mut log_lines: Vec<String> = Vec::new();
-        log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
-
-        // Count nodes by resource type.
-        {
-            let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
-            for info in plan.nodes.values() {
-                *type_counts.entry(info.resource_type.as_str()).or_default() += 1;
-            }
-            let parts: Vec<String> = type_counts
-                .iter()
-                .map(|(t, n)| format!("{n} {}{}", t, if *n == 1 { "" } else { "s" }))
-                .collect();
-            log_lines.push(format!("Found {}", parts.join(", ")));
-        }
-        log_lines.push(format!(
-            "Concurrency: {} parallel level{}",
-            plan.levels.len(),
-            if plan.levels.len() == 1 { "" } else { "s" }
-        ));
+        let mut log_lines = build_log_header(&plan);
 
         let mut node_counter = 0usize;
 
@@ -362,13 +350,13 @@ impl DbtRunWorkflow {
                     Ok(result) => {
                         processed_in_level.insert(unique_id.clone());
 
-                        let status = match result.status.as_str() {
-                            "error" => {
+                        let status = match result.status {
+                            NodeStatus::Error => {
                                 had_failure = true;
                                 failed_nodes.insert(unique_id.clone());
                                 NodeStatus::Error
                             }
-                            "skipped" => NodeStatus::Skipped,
+                            NodeStatus::Skipped => NodeStatus::Skipped,
                             _ => NodeStatus::Success,
                         };
                         let tag = match status {
@@ -397,13 +385,12 @@ impl DbtRunWorkflow {
                             set_node_status(&mut node_status, &unique_id, NodeStatus::Cancelled);
                             all_results.push(cancelled_result(&unique_id));
 
-                            // Mark remaining unprocessed nodes in this level as cancelled.
-                            for id in &level_node_ids {
-                                if !processed_in_level.contains(id) {
-                                    set_node_status(&mut node_status, id, NodeStatus::Cancelled);
-                                    all_results.push(cancelled_result(id));
-                                }
-                            }
+                            mark_remaining_level_as_cancelled(
+                                &level_node_ids,
+                                &processed_in_level,
+                                &mut node_status,
+                                &mut all_results,
+                            );
                             break;
                         }
 
@@ -414,13 +401,22 @@ impl DbtRunWorkflow {
                         failed_nodes.insert(unique_id.clone());
                         set_node_status(&mut node_status, &unique_id, NodeStatus::Error);
                         all_results
-                            .push(error_result(&unique_id, format!("activity failed: {e:#}")));
+                            .push(error_result(&unique_id, &format!("activity failed: {e:#}")));
                     }
                 }
             }
 
-            // Memo: update after level completes (unless it's the last level — final upsert below).
-            if level_idx < plan.levels.len() - 1 {
+            // Memo upsert policy: every level on a deep DAG would mean dozens
+            // of writes per workflow and risks the ~32 KB memo size limit. We
+            // upsert (a) on any level with a failure, since callers need
+            // failure visibility quickly, and (b) periodically on quiet
+            // levels. The last level falls through to the final upsert below.
+            let level_had_failure = processed_in_level
+                .iter()
+                .any(|id| failed_nodes.contains(id));
+            let is_last = level_idx == plan.levels.len() - 1;
+            let periodic = (level_idx + 1) % MEMO_UPSERT_EVERY_N_LEVELS == 0;
+            if !is_last && (level_had_failure || periodic) {
                 upsert_memo_state(ctx, &node_status, &log_lines)?;
             }
         }
@@ -435,16 +431,20 @@ impl DbtRunWorkflow {
 
         // --- Run log summary ---
         {
-            let pass = all_results.iter().filter(|r| r.status == "success").count();
-            let error = all_results.iter().filter(|r| r.status == "error").count();
-            let skip = all_results.iter().filter(|r| r.status == "skipped").count();
-            let elapsed = start.elapsed().as_secs_f64();
-            log_lines.push(format!(
-                "Finished running {total_nodes} node{} in {elapsed:.2}s.",
-                if total_nodes == 1 { "" } else { "s" }
-            ));
-            log_lines
-                .push(format!("Done. PASS={pass} ERROR={error} SKIP={skip} TOTAL={total_nodes}"));
+            let pass = all_results
+                .iter()
+                .filter(|r| r.status == NodeStatus::Success)
+                .count();
+            let error = all_results
+                .iter()
+                .filter(|r| r.status == NodeStatus::Error)
+                .count();
+            let skip = all_results
+                .iter()
+                .filter(|r| r.status == NodeStatus::Skipped)
+                .count();
+            let elapsed = elapsed_secs(start, ctx.workflow_time());
+            log_lines.extend(build_summary_lines(total_nodes, elapsed, pass, error, skip));
         }
 
         // Final memo upsert with summary lines.
@@ -488,7 +488,7 @@ impl DbtRunWorkflow {
                 .start_activity(
                     DbtActivities::run_project_hooks,
                     ProjectHooksInput {
-                        phase: "on_run_end".to_string(),
+                        phase: ProjectHookPhase::OnRunEnd,
                         project: plan.project.clone(),
                         invocation_id: plan.invocation_id.clone(),
                         env: effective_env.clone(),
@@ -515,7 +515,7 @@ impl DbtRunWorkflow {
 
         // --- Build output (before post-hooks, since hooks receive it) ---
         let mut success = !had_failure;
-        let elapsed_time = start.elapsed().as_secs_f64();
+        let elapsed_time = elapsed_secs(start, ctx.workflow_time());
 
         let mut output = DbtRunOutput {
             invocation_id: plan.invocation_id.clone(),
@@ -535,11 +535,15 @@ impl DbtRunWorkflow {
         } else {
             &hooks.on_failure
         };
-        let event = if success { "on_success" } else { "on_failure" };
+        let event = if success {
+            HookEvent::OnSuccess
+        } else {
+            HookEvent::OnFailure
+        };
 
         if !post_hooks.is_empty() {
             let payload = HookPayload {
-                event: event.to_string(),
+                event,
                 invocation_id: plan.invocation_id.clone(),
                 input: input.clone(),
                 plan: Some(plan.clone()),
@@ -566,7 +570,7 @@ impl DbtRunWorkflow {
             let error_count = output
                 .node_results
                 .iter()
-                .filter(|r| r.status == "error")
+                .filter(|r| r.status == NodeStatus::Error)
                 .count();
             Err(temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
                 "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"

@@ -2,6 +2,7 @@
 //! model-level env_var(), and parallel schema isolation.
 
 use anyhow::{Context, Result};
+use dbt_temporal::types::NodeStatus;
 
 use super::infra::*;
 
@@ -56,7 +57,7 @@ async fn test_env_var_override() -> Result<()> {
                 .collect();
             assert_eq!(model_results.len(), 5, "should run all 5 models");
             for r in &model_results {
-                assert_eq!(r.status, "success", "model {} should succeed", r.unique_id);
+                assert_eq!(r.status, NodeStatus::Success, "model {} should succeed", r.unique_id);
             }
 
             // --- Run a second workflow without env overrides ---
@@ -159,8 +160,8 @@ from {{ source('waffle_hut', 'customers') }}
             assert!(run_b.output.success, "workflow B with MY_LABEL=value_beta should succeed");
             assert_eq!(run_a.output.node_results.len(), 1);
             assert_eq!(run_b.output.node_results.len(), 1);
-            assert_eq!(run_a.output.node_results[0].status, "success");
-            assert_eq!(run_b.output.node_results[0].status, "success");
+            assert_eq!(run_a.output.node_results[0].status, NodeStatus::Success);
+            assert_eq!(run_b.output.node_results[0].status, NodeStatus::Success);
 
             // --- Workflow without env override: model should also succeed (uses default) ---
             tracing::info!("Model env_var test: no override (uses default)");
@@ -267,10 +268,20 @@ async fn test_parallel_env_var_isolation() -> Result<()> {
             assert_eq!(models_b.len(), 5, "workflow B should run 5 models");
 
             for r in &models_a {
-                assert_eq!(r.status, "success", "workflow A: {} should succeed", r.unique_id);
+                assert_eq!(
+                    r.status,
+                    NodeStatus::Success,
+                    "workflow A: {} should succeed",
+                    r.unique_id
+                );
             }
             for r in &models_b {
-                assert_eq!(r.status, "success", "workflow B: {} should succeed", r.unique_id);
+                assert_eq!(
+                    r.status,
+                    NodeStatus::Success,
+                    "workflow B: {} should succeed",
+                    r.unique_id
+                );
             }
 
             // Run a third workflow without any env override — uses default schema.

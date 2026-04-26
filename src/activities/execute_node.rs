@@ -1,14 +1,18 @@
+mod schema_patcher;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::Context;
 use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
+use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
 
 use crate::error::DbtTemporalError;
 use crate::project_registry::ProjectRegistry;
-use crate::types::{NodeExecutionInput, NodeExecutionResult, TimingEntry};
+use crate::types::{NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -256,17 +260,15 @@ async fn execute_node_inner(
 
     // Create an ephemeral output dir for this activity so concurrent workflows
     // and cross-worker dispatch don't share target/.
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| anyhow::anyhow!("failed to create temp dir for activity: {e:#}"))?;
+    let temp_dir = tempfile::tempdir().context("creating temp dir for activity")?;
     let temp_out = temp_dir.path().to_path_buf();
 
     // Per-activity ephemeral CTE persistence dir. dbt-fusion's
     // `inject_and_persist_ephemeral_models` writes per-ephemeral cumulative CTE
     // chains here; sharing the dir across activities would race on those files.
     let ephemeral_dir = temp_dir.path().join("ephemeral");
-    std::fs::create_dir_all(&ephemeral_dir).map_err(|e| {
-        anyhow::anyhow!("creating ephemeral dir {}: {e:#}", ephemeral_dir.display())
-    })?;
+    std::fs::create_dir_all(&ephemeral_dir)
+        .with_context(|| format!("creating ephemeral dir {}", ephemeral_dir.display()))?;
 
     let node_path = common.path.to_string_lossy().to_string();
 
@@ -290,13 +292,16 @@ async fn execute_node_inner(
         std::fs::write(&dest, sql)?;
     }
 
+    // Reject malformed IDs loud; falling back to the worker-state invocation_id
+    // would silently mis-tag artifacts and run-results under a different run.
+    let invocation_id = input
+        .invocation_id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid invocation_id {:?}: {e}", input.invocation_id))?;
     let io_args = dbt_common::io_args::IoArgs {
         in_dir: state.io_args.in_dir.clone(),
         out_dir: temp_out,
-        invocation_id: input
-            .invocation_id
-            .parse()
-            .unwrap_or(state.io_args.invocation_id),
+        invocation_id,
         ..Default::default()
     };
 
@@ -359,17 +364,24 @@ async fn execute_node_inner(
             wf_schema.clone()
         } else if let Some(custom) = base.schema.strip_prefix(&default_prefix) {
             format!("{wf_schema}_{custom}")
+        } else if state.has_custom_schema_name_macro {
+            // Project overrides generate_schema_name — we can't reproduce its
+            // logic from outside, so any patched value risks writing into the
+            // wrong schema. Reject the workflow rather than silently using a
+            // stale schema; the user can rebuild the worker with the right
+            // env or move the override to profiles.yml.
+            return Err(DbtTemporalError::Configuration(format!(
+                "node {unique_id} can't be safely retargeted: project overrides \
+                 generate_schema_name and node schema {:?} does not follow the \
+                 default `<target_schema>_<custom>` pattern, so per-workflow env \
+                 overrides for schema cannot be honoured. Move the override into \
+                 profiles.yml, or remove the custom generate_schema_name macro.",
+                base.schema
+            ))
+            .into());
         } else {
-            // Schema doesn't follow default pattern — leave unchanged.
-            if state.has_custom_schema_name_macro {
-                warn!(
-                    node = %unique_id,
-                    startup_schema = %base.schema,
-                    workflow_schema = %wf_schema,
-                    "node schema doesn't match default generate_schema_name pattern — \
-                     `this.schema` may be stale (project overrides generate_schema_name)"
-                );
-            }
+            // Schema doesn't follow default pattern but project uses the
+            // default macro — keep base.schema unchanged.
             base.schema.clone()
         };
 
@@ -634,7 +646,7 @@ async fn execute_node_inner(
         info!(node = %unique_id, time_secs = execution_time, "node compiled (compile-only)");
         return Ok(NodeExecutionResult {
             unique_id: unique_id.clone(),
-            status: "success".to_string(),
+            status: NodeStatus::Success,
             execution_time,
             message: Some("compiled".to_string()),
             adapter_response: BTreeMap::new(),
@@ -784,7 +796,7 @@ async fn execute_node_inner(
 
     Ok(NodeExecutionResult {
         unique_id: unique_id.clone(),
-        status: "success".to_string(),
+        status: NodeStatus::Success,
         execution_time,
         message,
         adapter_response,
@@ -907,122 +919,4 @@ fn read_first_non_empty_sql(
         }
     }
     None
-}
-
-/// Detect `env_var()` usage inside `config(schema=...)` or `config(database=...)`.
-///
-/// This pattern is not supported with per-workflow env overrides: the config value is
-/// evaluated at resolver time (worker startup) and baked into node metadata. Per-workflow
-/// env changes won't affect it, leading to silent stale schema/database names.
-fn has_env_var_in_config_schema_or_database(sql: &str) -> bool {
-    // Match env_var() as the value for schema= or database= inside a config() call.
-    // The [^}]* prevents matching across Jinja block boundaries ({{ ... }}).
-    #[allow(clippy::items_after_statements, clippy::expect_used)]
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?si)\{\{[^}]*config\s*\([^}]*(schema|database)\s*=\s*env_var\s*\(")
-            .expect("env_var config detection regex")
-    });
-    if !sql.contains("env_var(") || !sql.contains("config(") {
-        return false;
-    }
-    RE.is_match(sql)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- has_env_var_in_config_schema_or_database ---
-
-    #[test]
-    fn detects_schema_env_var_inline() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{ config(schema=env_var('MY_SCHEMA')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn detects_database_env_var_inline() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{ config(database=env_var('MY_DB')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn detects_env_var_with_other_kwargs() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{ config(materialized='table', schema=env_var('MY_SCHEMA')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn detects_env_var_with_default() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{ config(schema=env_var('MY_SCHEMA', 'fallback')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn detects_multiline_config() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{\n  config(\n    materialized='table',\n    schema = env_var('MY_SCHEMA')\n  )\n}}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn detects_spaces_around_equals() {
-        assert!(has_env_var_in_config_schema_or_database(
-            "{{ config(schema = env_var('S')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_static_schema() {
-        assert!(!has_env_var_in_config_schema_or_database(
-            "{{ config(schema='staging') }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_env_var_in_sql_body() {
-        // env_var() in model SQL (not in config) is fine — it's re-rendered per-workflow.
-        assert!(!has_env_var_in_config_schema_or_database(
-            "{{ config(materialized='table') }}\nSELECT '{{ env_var(\"MY_VAR\") }}' as val"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_env_var_in_different_config_kwarg() {
-        // env_var() in config(materialized=...) is not a schema/database concern.
-        assert!(!has_env_var_in_config_schema_or_database(
-            "{{ config(materialized=env_var('MAT_TYPE', 'table')) }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_no_config() {
-        assert!(!has_env_var_in_config_schema_or_database(
-            "SELECT * FROM {{ ref('stg_customers') }} WHERE schema = env_var('X')"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_plain_sql() {
-        assert!(!has_env_var_in_config_schema_or_database("SELECT 1 FROM my_table"));
-    }
-
-    #[test]
-    fn no_false_positive_config_without_env_var() {
-        assert!(!has_env_var_in_config_schema_or_database(
-            "{{ config(materialized='view', schema='analytics') }}\nSELECT 1"
-        ));
-    }
-
-    #[test]
-    fn no_false_positive_env_var_outside_config_block() {
-        // env_var used in a separate Jinja block, schema in config — should NOT match.
-        assert!(!has_env_var_in_config_schema_or_database(
-            "{{ config(schema='staging') }}\n{% set x = env_var('FOO') %}\nSELECT 1"
-        ));
-    }
 }

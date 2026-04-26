@@ -101,14 +101,36 @@ pub struct NodeExecutionInput {
     pub command: String,
 }
 
+/// Phase of a `dbt_project.yml` lifecycle hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectHookPhase {
+    OnRunStart,
+    OnRunEnd,
+}
+
+impl ProjectHookPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OnRunStart => "on_run_start",
+            Self::OnRunEnd => "on_run_end",
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectHookPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input to the run_project_hooks activity.
 ///
 /// One activity invocation runs all hooks for a single phase
 /// (`on_run_start` or `on_run_end`) sequentially.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectHooksInput {
-    /// Hook phase: "on_run_start" or "on_run_end".
-    pub phase: String,
+    pub phase: ProjectHookPhase,
     pub project: String,
     pub invocation_id: String,
     /// Per-workflow environment variable overrides for `env_var()` rendering.
@@ -126,8 +148,7 @@ pub struct ProjectHooksInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeExecutionResult {
     pub unique_id: String,
-    /// "success", "error", "skipped"
-    pub status: String,
+    pub status: NodeStatus,
     /// Wall-clock seconds.
     pub execution_time: f64,
     pub message: Option<String>,
@@ -250,6 +271,25 @@ pub enum NodeStatus {
     Cancelled,
 }
 
+impl NodeStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Input to the resolve_config activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveConfigInput {
@@ -304,7 +344,7 @@ mod tests {
     fn node_execution_result_json_round_trip() -> anyhow::Result<()> {
         let result = NodeExecutionResult {
             unique_id: "model.waffle.stg_customers".into(),
-            status: "success".into(),
+            status: NodeStatus::Success,
             execution_time: 1.23,
             message: Some("OK".into()),
             adapter_response: BTreeMap::from([("rows_affected".into(), serde_json::json!(42))]),
@@ -319,7 +359,7 @@ mod tests {
         let json = serde_json::to_string(&result)?;
         let back: NodeExecutionResult = serde_json::from_str(&json)?;
         assert_eq!(back.unique_id, "model.waffle.stg_customers");
-        assert_eq!(back.status, "success");
+        assert_eq!(back.status, NodeStatus::Success);
         assert!((back.execution_time - 1.23).abs() < f64::EPSILON);
         assert_eq!(back.timing.len(), 1);
         Ok(())

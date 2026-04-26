@@ -2,6 +2,31 @@ use serde::{Deserialize, Serialize};
 
 use super::workflow::{DbtRunInput, DbtRunOutput, ExecutionPlan};
 
+/// Lifecycle event for a user-defined hook in `dbt_temporal.yml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookEvent {
+    PreRun,
+    OnSuccess,
+    OnFailure,
+}
+
+impl HookEvent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreRun => "pre_run",
+            Self::OnSuccess => "on_success",
+            Self::OnFailure => "on_failure",
+        }
+    }
+}
+
+impl std::fmt::Display for HookEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // --- Retry configuration ---
 
 /// Activity retry policy, configurable in `dbt_temporal.yml` under `retry:`.
@@ -106,8 +131,8 @@ pub struct HooksConfig {
 /// Payload passed as input to every hook workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookPayload {
-    /// Which event triggered this hook: "pre_run", "on_success", or "on_failure".
-    pub event: String,
+    /// Which event triggered this hook.
+    pub event: HookEvent,
     pub invocation_id: String,
     pub input: DbtRunInput,
     /// The execution plan (available for all hooks).

@@ -469,6 +469,23 @@ mod tests {
     }
 
     #[test]
+    fn inject_ephemeral_ctes_short_circuits_when_prefix_absent() -> anyhow::Result<()> {
+        // Early return path: SQL without DBT_CTE_PREFIX — neither dependency
+        // walk nor wrap step runs, returns the input verbatim. This is the
+        // common case for non-ephemeral nodes.
+        let dir = tempfile::tempdir()?;
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let env = jinja_env_with_templates(&[]);
+        let ctx = BTreeMap::<String, minijinja::Value>::new();
+
+        let plain = "select 1 as id";
+        let out =
+            inject_ephemeral_ctes(plain, "user_model", &nodes, &env, &ctx, dir.path(), dir.path())?;
+        assert_eq!(out, plain);
+        Ok(())
+    }
+
+    #[test]
     fn upstream_ephemeral_wrap_is_noop_without_cte_references() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut spans = MacroSpans::default();

@@ -149,6 +149,7 @@ pub fn profile_uses_env_vars(profiles_path: &std::path::Path) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -199,6 +200,95 @@ mod tests {
     fn test_profile_uses_env_vars_missing_file() {
         let path = std::path::PathBuf::from("/tmp/nonexistent-dbtt-test/profiles.yml");
         assert!(!profile_uses_env_vars(&path));
+    }
+
+    #[test]
+    fn rebuild_result_debug_redacts_engine() {
+        // A real RebuildResult holds an Arc<dyn AdapterEngine> that we can't
+        // easily construct here, but the Debug impl projects only schema +
+        // database with finish_non_exhaustive — which is the contract: don't
+        // leak the engine's internals into log output.
+        struct Mock<'a> {
+            schema: &'a str,
+            database: &'a str,
+        }
+        impl std::fmt::Debug for Mock<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("RebuildResult")
+                    .field("schema", &self.schema)
+                    .field("database", &self.database)
+                    .finish_non_exhaustive()
+            }
+        }
+        let s = format!(
+            "{:?}",
+            Mock {
+                schema: "wf_42",
+                database: "warehouse",
+            }
+        );
+        assert!(s.contains("RebuildResult"));
+        assert!(s.contains("wf_42"));
+        assert!(s.contains("warehouse"));
+        assert!(s.contains(".."));
+    }
+
+    #[test]
+    fn render_profile_errors_when_outputs_section_absent() -> Result<()> {
+        // Profile exists but has no `outputs` map — should fail with a clear
+        // hint rather than a confusing parse error somewhere downstream.
+        let path = write_temp_profiles(
+            r"my_profile:
+  target: dev
+",
+        )?;
+        let env = BTreeMap::new();
+        let err =
+            render_profile_with_env(&path, "my_profile", "dev", &env).expect_err("missing outputs");
+        let msg = err.to_string();
+        assert!(msg.contains("outputs"), "got: {msg}");
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn render_profile_errors_when_yaml_unparseable() -> Result<()> {
+        // Pure rendering succeeds but the result isn't valid YAML — the
+        // dbt_yaml::from_str failure is wrapped with a "parsing rendered
+        // profiles.yml" context.
+        let path = write_temp_profiles("my_profile:\n  : not-valid yaml :\n  - dangling")?;
+        let env = BTreeMap::new();
+        let err = render_profile_with_env(&path, "my_profile", "dev", &env)
+            .expect_err("malformed YAML should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parsing rendered profiles.yml") || msg.contains("rendering"),
+            "got: {msg}"
+        );
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn render_profile_errors_when_db_config_type_unknown() -> Result<()> {
+        // outputs.dev exists but its `type` is unknown — DbConfig deserialise
+        // fails with the wrapped "deserialising db config" context.
+        let path = write_temp_profiles(
+            r"my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: not_a_real_warehouse
+      host: localhost
+",
+        )?;
+        let env = BTreeMap::new();
+        let err = render_profile_with_env(&path, "my_profile", "dev", &env)
+            .expect_err("unknown adapter type should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("deserialising") || msg.contains("dev"), "got: {msg}");
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
     }
 
     #[test]

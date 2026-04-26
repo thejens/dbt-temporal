@@ -397,4 +397,96 @@ pass={{ ns.pass }} error={{ ns.error }}",
         assert_eq!(result, "no-msg");
         Ok(())
     }
+
+    #[test]
+    fn node_lookup_enriches_with_name_and_resource_type() -> anyhow::Result<()> {
+        // When the node IS in the resolver, build_results_context fills in
+        // name + package_name + resource_type (lower-cased, stripped of the
+        // proto prefix).
+        use std::sync::Arc;
+
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
+
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        let common = CommonAttributes {
+            unique_id: "model.shop.orders".to_string(),
+            name: "orders".to_string(),
+            package_name: "shop".to_string(),
+            ..CommonAttributes::default()
+        };
+        nodes.models.insert(
+            "model.shop.orders".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: common,
+                ..DbtModel::default()
+            }),
+        );
+
+        let result = mk_result("model.shop.orders", NodeStatus::Success, None);
+        let value = build_results_context(&[result], &nodes);
+
+        let env = minijinja::Environment::new();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("results".to_string(), value);
+
+        let name = env
+            .template_from_str("{{ results[0].node.name }}")?
+            .render(&ctx, &[])?;
+        assert_eq!(name, "orders");
+
+        let pkg = env
+            .template_from_str("{{ results[0].node.package_name }}")?
+            .render(&ctx, &[])?;
+        assert_eq!(pkg, "shop");
+
+        let rt = env
+            .template_from_str("{{ results[0].node.resource_type }}")?
+            .render(&ctx, &[])?;
+        assert_eq!(rt, "model");
+
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_response_carried_through_as_jinja_map() -> anyhow::Result<()> {
+        use std::collections::BTreeMap;
+
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let mut r = mk_result("model.pkg.x", NodeStatus::Success, None);
+        let mut resp = BTreeMap::new();
+        resp.insert("rows_affected".to_string(), serde_json::json!(42));
+        resp.insert("message".to_string(), serde_json::json!("CREATE TABLE"));
+        r.adapter_response = resp;
+
+        let value = build_results_context(&[r], &nodes);
+
+        let env = minijinja::Environment::new();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("results".to_string(), value);
+
+        let rendered = env
+            .template_from_str(
+                "{{ results[0].adapter_response.rows_affected }}|\
+                 {{ results[0].adapter_response.message }}",
+            )?
+            .render(&ctx, &[])?;
+        assert_eq!(rendered, "42|CREATE TABLE");
+        Ok(())
+    }
+
+    #[test]
+    fn results_with_failures_renders_count() -> anyhow::Result<()> {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let r = mk_result("test.pkg.t", NodeStatus::Error, Some(7));
+        let value = build_results_context(&[r], &nodes);
+
+        let env = minijinja::Environment::new();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("results".to_string(), value);
+        let s = env
+            .template_from_str("{{ results[0].failures }}")?
+            .render(&ctx, &[])?;
+        assert_eq!(s, "7");
+        Ok(())
+    }
 }

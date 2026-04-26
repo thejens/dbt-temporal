@@ -86,6 +86,7 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::{NodeExecutionResult, NodeStatus};
@@ -168,6 +169,167 @@ mod tests {
             .abs()
                 < f64::EPSILON
         );
+        Ok(())
+    }
+
+    // --- store_artifacts_inner: end-to-end against the local artifact store ---
+
+    use std::sync::Arc;
+
+    use crate::artifact_store::LocalArtifactStore;
+    use crate::config::{
+        RegisteredSearchAttributes, SearchAttributeConfig, WriteArtifacts, WriteRunLog,
+    };
+    use crate::project_registry::ProjectRegistry;
+
+    fn activities_with_local_store(
+        base_dir: std::path::PathBuf,
+        write_run_log: bool,
+    ) -> DbtActivities {
+        DbtActivities {
+            registry: Arc::new(ProjectRegistry::new(BTreeMap::new())),
+            artifact_store: Some(Arc::new(LocalArtifactStore::new(base_dir))),
+            search_attr_config: SearchAttributeConfig(BTreeMap::new()),
+            registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
+            write_run_log: WriteRunLog(write_run_log),
+            write_artifacts: WriteArtifacts(true),
+        }
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_writes_run_results_and_inline_manifest() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-1".into(),
+            node_results: vec![sample_result("model.a", NodeStatus::Success, 0.1)],
+            manifest_json: Some("{\"manifest\":\"yes\"}".to_string()),
+            manifest_ref: None,
+            run_log: None,
+        };
+
+        let out = store_artifacts_inner(&activities, input).await?;
+        assert!(out.run_results_path.contains("run_results.json"));
+        assert!(out.manifest_path.contains("manifest.json"));
+        assert!(out.log_path.is_none());
+
+        let on_disk = std::fs::read_to_string(&out.run_results_path)?;
+        assert!(on_disk.contains("model.a"));
+        let manifest = std::fs::read_to_string(&out.manifest_path)?;
+        assert!(manifest.contains("manifest"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_uses_existing_manifest_ref() -> anyhow::Result<()> {
+        // When the plan phase already stored a large manifest at a known path,
+        // the activity should pass that path through verbatim instead of
+        // re-storing it.
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-2".into(),
+            node_results: vec![],
+            manifest_json: None,
+            manifest_ref: Some("/already/stored/manifest.json".to_string()),
+            run_log: None,
+        };
+
+        let out = store_artifacts_inner(&activities, input).await?;
+        assert_eq!(out.manifest_path, "/already/stored/manifest.json");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_errors_when_neither_manifest_provided() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-3".into(),
+            node_results: vec![],
+            manifest_json: None,
+            manifest_ref: None,
+            run_log: None,
+        };
+
+        let err = store_artifacts_inner(&activities, input)
+            .await
+            .expect_err("absent manifest must error");
+        assert!(err.to_string().contains("manifest"), "got: {err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_writes_log_when_enabled() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), true);
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-log".into(),
+            node_results: vec![],
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: Some("line a\nline b".to_string()),
+        };
+
+        let out = store_artifacts_inner(&activities, input).await?;
+        let log_path = out
+            .log_path
+            .expect("log_path should be set when run_log is on");
+        assert!(log_path.ends_with("log.txt"));
+        let on_disk = std::fs::read_to_string(&log_path)?;
+        assert_eq!(on_disk, "line a\nline b");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_skips_log_when_run_log_disabled() -> anyhow::Result<()> {
+        // Run log was supplied but the writer is disabled — the file must not
+        // be written and log_path stays None.
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-skiplog".into(),
+            node_results: vec![],
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: Some("would-be-log".to_string()),
+        };
+
+        let out = store_artifacts_inner(&activities, input).await?;
+        assert!(out.log_path.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_artifacts_inner_errors_when_no_artifact_store_configured() -> anyhow::Result<()>
+    {
+        // The activity guards against being called on an unconfigured worker.
+        let activities = DbtActivities {
+            registry: Arc::new(ProjectRegistry::new(BTreeMap::new())),
+            artifact_store: None,
+            search_attr_config: SearchAttributeConfig(BTreeMap::new()),
+            registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
+            write_run_log: WriteRunLog(false),
+            write_artifacts: WriteArtifacts(true),
+        };
+
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-noop".into(),
+            node_results: vec![],
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: None,
+        };
+
+        let err = store_artifacts_inner(&activities, input)
+            .await
+            .expect_err("missing ArtifactStore must error");
+        assert!(err.to_string().contains("ArtifactStore not configured"));
         Ok(())
     }
 }

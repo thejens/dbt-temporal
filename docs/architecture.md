@@ -7,11 +7,13 @@ flowchart TD
     subgraph Workflow["dbt_run Workflow (deterministic)"]
         direction TB
         W1["1. plan_project activity"] --> W2["2. resolve_config activity"]
-        W2 --> W3["3. Run pre_run hooks"]
-        W3 --> W4["4. For each topological level:\n   fan-out execute_node"]
-        W4 --> W5["5. store_artifacts activity"]
-        W5 --> W6["6. Run on_success / on_failure hooks"]
-        W6 --> W7["7. Return DbtRunOutput"]
+        W2 --> W3["3. Run pre_run lifecycle hooks"]
+        W3 --> W4["4. run_project_hooks (on-run-start)"]
+        W4 --> W5["5. For each topological level:\n   fan-out execute_node"]
+        W5 --> W6["6. store_artifacts activity"]
+        W6 --> W7["7. run_project_hooks (on-run-end)"]
+        W7 --> W8["8. Run on_success / on_failure lifecycle hooks"]
+        W8 --> W9["9. Return DbtRunOutput"]
     end
 
     Workflow --> Activities
@@ -20,7 +22,8 @@ flowchart TD
         direction LR
         Plan["**plan_project**\nSelect nodes\nBuild DAG\nTopo levels\nManifest"]
         Config["**resolve_config**\nLoad dbt_temporal.yml\nHook + retry config"]
-        Exec["**execute_node**\nJinja render\n(execute=true via\nBridgeAdapter)"]
+        Hooks["**run_project_hooks**\nRender on-run-start /\non-run-end Jinja"]
+        Exec["**execute_node**\nJinja render\n(execute=true via\nBridgeAdapter)\nperiodic heartbeat"]
         Store["**store_artifacts**\nrun_results.json\nmanifest.json\nlog.txt"]
     end
 ```
@@ -35,9 +38,13 @@ flowchart TD
 
 3. **`resolve_config` activity**: Loads `dbt_temporal.yml` from the project directory (if present) and returns the resolved hook and retry configuration for this run.
 
-4. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter.
+4. **`run_project_hooks` activity (`on-run-start`)**: If `dbt_project.yml` declares `on-run-start`, render those Jinja templates against the full compile+run context (with `execute=true` and per-workflow env overrides applied). Failure aborts the run before any node executes.
 
-5. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
+5. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter. A periodic heartbeat ticker runs alongside the work so the Temporal UI's last-heartbeat stays current and dead workers are detected within `heartbeat_timeout`.
+
+6. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
+
+7. **`run_project_hooks` activity (`on-run-end`)**: Always fires (even after failure), with the standard `results` Jinja list populated from `node_results`. Errors are recorded in `DbtRunOutput.hook_errors` but do not flip the run's success status.
 
 Parallel execution is natural: all nodes in the same topological level are independent, so Temporal dispatches them as concurrent activities.
 
@@ -69,9 +76,12 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | [`mod.rs`](../src/workflow/mod.rs) | `dbt_run_workflow` |
 | [`helpers.rs`](../src/workflow/helpers.rs) | Node status tree, retry policy, log helpers |
 | **Activities** (`src/activities/`) | |
+| [`mod.rs`](../src/activities/mod.rs) | `DbtActivities` — `Arc<Self>` shared state, `#[activities]` registration |
 | [`plan.rs`](../src/activities/plan.rs) | `plan_project` — select nodes, build DAG levels, serialize manifest |
 | [`execute_node.rs`](../src/activities/execute_node.rs) | `execute_node` — compile + render a single node |
+| [`project_hooks.rs`](../src/activities/project_hooks.rs) | `run_project_hooks` — render `on-run-start` / `on-run-end` from `dbt_project.yml` |
 | [`store_artifacts.rs`](../src/activities/store_artifacts.rs) | `store_artifacts` — write run results + manifest |
+| [`heartbeat.rs`](../src/activities/heartbeat.rs) | Periodic `record_heartbeat` ticker for long-running activities |
 | [`node_helpers.rs`](../src/activities/node_helpers.rs) | Materialization template lookup + rendering helpers |
 | [`node_serialization.rs`](../src/activities/node_serialization.rs) | Serialization helpers for passing nodes across activity boundaries |
 | [`dag.rs`](../src/activities/dag.rs) | DAG construction and topological level computation |
@@ -89,5 +99,5 @@ Parallel execution is natural: all nodes in the same topological level are indep
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-core) | `0.1.0-alpha.1` | Workflow orchestration |
-| [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) | Pre-release | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-core) | `0.3.0` | Workflow orchestration |
+| [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) | Git rev `00969f9` (2026-04-25 `main`) | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

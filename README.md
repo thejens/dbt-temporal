@@ -5,9 +5,9 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 ![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
 
 > **Status**: Not production-ready. dbt-temporal depends on
-> [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), which is still in preview
-> (2.0.0-preview.174 as of April 2026), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.3.0`), which is
+> [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), pinned to a 2026-04-25
+> `main` revision (preview release), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-core) (`0.3.0`), which is
 > pre-1.0. Several [workarounds](docs/workarounds.md) are needed to make the
 > dbt-fusion engine work in a long-lived worker context. Consider this a proof of
 > concept — largely developed by [Claude Code](https://claude.ai/claude-code) with
@@ -22,7 +22,8 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 flowchart TD
     Start["temporal workflow start --type dbt_run"] --> Plan
     Plan["plan_project\nselect nodes, build DAG"] --> PreHooks
-    PreHooks["pre_run hooks\nskip sentinel · extra_env injection"] --> L1
+    PreHooks["pre_run hooks (lifecycle)\nskip sentinel · extra_env injection"] --> OnStart
+    OnStart["on-run-start (dbt_project.yml)"] --> L1
 
     subgraph DAG["Parallel DAG Execution"]
         L1["Level 1 — execute_node ×N"] --> L2["Level 2 — execute_node ×N"]
@@ -30,7 +31,8 @@ flowchart TD
     end
 
     LN --> Store["store_artifacts\nrun_results · manifest · log"]
-    Store --> PostHooks["on_success / on_failure hooks"]
+    Store --> OnEnd["on-run-end (dbt_project.yml)"]
+    OnEnd --> PostHooks["on_success / on_failure hooks (lifecycle)"]
 ```
 
 ## Features

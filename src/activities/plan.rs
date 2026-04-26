@@ -137,44 +137,13 @@ pub async fn plan_project_inner(
         (None, None)
     };
 
-    // Build search attributes: start with static config, then add dynamic values.
-    // Only attributes registered on the Temporal namespace are kept; unregistered
-    // ones are dropped with a warning to prevent workflow task failures.
-    let mut search_attributes = activities.search_attr_config.0.clone();
-    search_attributes
-        .entry("DbtProject".to_string())
-        .or_insert_with(|| state.project_name.clone());
-    search_attributes
-        .entry("DbtCommand".to_string())
-        .or_insert_with(|| input.command.clone());
-    if let Some(ref target) = input.target {
-        search_attributes
-            .entry("DbtTarget".to_string())
-            .or_insert_with(|| target.clone());
-    }
-
-    // Filter to only registered attributes.
-    let registered = &activities.registered_attrs.0;
-    if !registered.is_empty() {
-        let before = search_attributes.len();
-        search_attributes.retain(|k, _| {
-            if registered.contains(k) {
-                true
-            } else {
-                tracing::warn!(
-                    attribute = %k,
-                    "search attribute not registered on namespace — skipping \
-                     (register it with `temporal operator search-attribute create`)"
-                );
-                false
-            }
-        });
-        if before > 0 && search_attributes.is_empty() {
-            tracing::warn!(
-                "all search attributes were skipped — none are registered on the namespace"
-            );
-        }
-    }
+    let search_attributes = build_search_attributes(
+        &activities.search_attr_config.0,
+        &state.project_name,
+        &input.command,
+        input.target.as_deref(),
+        &activities.registered_attrs.0,
+    );
 
     let has_on_run_start = !state.resolver_state.operations.on_run_start.is_empty();
     let has_on_run_end = !state.resolver_state.operations.on_run_end.is_empty();
@@ -228,6 +197,58 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
         "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
         _ => false,
     }
+}
+
+/// Build the search-attribute map upserted on every workflow run.
+///
+/// Starts from the worker-startup static config, then layers the always-set
+/// dynamic attributes (`DbtProject`, `DbtCommand`, `DbtTarget`) — without
+/// overriding caller-provided values for the same keys. Finally filters to
+/// only attributes registered on the namespace; unregistered ones are dropped
+/// with a per-attribute warning so workflow task failures don't surprise the
+/// user.
+fn build_search_attributes(
+    static_config: &BTreeMap<String, String>,
+    project: &str,
+    command: &str,
+    target: Option<&str>,
+    registered: &std::collections::BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut search_attributes = static_config.clone();
+    search_attributes
+        .entry("DbtProject".to_string())
+        .or_insert_with(|| project.to_string());
+    search_attributes
+        .entry("DbtCommand".to_string())
+        .or_insert_with(|| command.to_string());
+    if let Some(target) = target {
+        search_attributes
+            .entry("DbtTarget".to_string())
+            .or_insert_with(|| target.to_string());
+    }
+
+    if !registered.is_empty() {
+        let before = search_attributes.len();
+        search_attributes.retain(|k, _| {
+            if registered.contains(k) {
+                true
+            } else {
+                tracing::warn!(
+                    attribute = %k,
+                    "search attribute not registered on namespace — skipping \
+                     (register it with `temporal operator search-attribute create`)"
+                );
+                false
+            }
+        });
+        if before > 0 && search_attributes.is_empty() {
+            tracing::warn!(
+                "all search attributes were skipped — none are registered on the namespace"
+            );
+        }
+    }
+
+    search_attributes
 }
 
 /// Extract NodeInfo from Nodes for a given unique_id.
@@ -337,6 +358,87 @@ mod tests {
     fn build_node_info_returns_none_for_unknown_id() {
         let nodes = dbt_schemas::schemas::Nodes::default();
         assert!(build_node_info(&nodes, "model.shop.nope").is_none());
+    }
+
+    // --- build_search_attributes ---
+
+    use std::collections::BTreeSet;
+
+    fn registered_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn build_search_attributes_layers_dynamic_over_static() {
+        let static_config = BTreeMap::new();
+        // Empty registered set means filtering is skipped (all kept).
+        let registered = BTreeSet::new();
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", Some("prod"), &registered);
+        assert_eq!(attrs.get("DbtProject").map(String::as_str), Some("shop"));
+        assert_eq!(attrs.get("DbtCommand").map(String::as_str), Some("build"));
+        assert_eq!(attrs.get("DbtTarget").map(String::as_str), Some("prod"));
+    }
+
+    #[test]
+    fn build_search_attributes_static_config_wins_over_dynamic() {
+        // If the worker config explicitly pinned DbtProject (or DbtCommand
+        // etc.), the dynamic value must not overwrite it. `entry().or_insert`
+        // gives the static config priority.
+        let mut static_config = BTreeMap::new();
+        static_config.insert("DbtProject".to_string(), "pinned-project".to_string());
+        let registered = BTreeSet::new();
+        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        assert_eq!(attrs.get("DbtProject").map(String::as_str), Some("pinned-project"));
+    }
+
+    #[test]
+    fn build_search_attributes_skips_dbttarget_when_input_target_absent() {
+        let static_config = BTreeMap::new();
+        let registered = BTreeSet::new();
+        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        assert!(!attrs.contains_key("DbtTarget"));
+    }
+
+    #[test]
+    fn build_search_attributes_filters_to_registered_when_set() {
+        let mut static_config = BTreeMap::new();
+        static_config.insert("env".to_string(), "test".to_string());
+        static_config.insert("team".to_string(), "data".to_string());
+
+        // Only DbtProject is registered → static + DbtCommand + DbtTarget all dropped.
+        let registered = registered_set(&["DbtProject"]);
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", Some("prod"), &registered);
+        assert_eq!(attrs.len(), 1);
+        assert!(attrs.contains_key("DbtProject"));
+        assert!(!attrs.contains_key("env"));
+        assert!(!attrs.contains_key("DbtCommand"));
+    }
+
+    #[test]
+    fn build_search_attributes_keeps_all_when_registered_set_empty() {
+        // Empty registered set is the "all attributes are valid" default —
+        // skip the filter entirely so users without a configured registry
+        // still get DbtProject/DbtCommand etc.
+        let mut static_config = BTreeMap::new();
+        static_config.insert("env".to_string(), "test".to_string());
+        let registered = BTreeSet::new();
+        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        assert_eq!(attrs.len(), 3); // env + DbtProject + DbtCommand
+        assert!(attrs.contains_key("env"));
+        assert!(attrs.contains_key("DbtProject"));
+        assert!(attrs.contains_key("DbtCommand"));
+    }
+
+    #[test]
+    fn build_search_attributes_returns_empty_when_nothing_registered() {
+        // Static config is non-empty but none of the keys are registered.
+        let mut static_config = BTreeMap::new();
+        static_config.insert("foo".to_string(), "bar".to_string());
+        let registered = registered_set(&["DbtTarget"]); // present but no match
+        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        assert!(attrs.is_empty());
     }
 
     #[test]

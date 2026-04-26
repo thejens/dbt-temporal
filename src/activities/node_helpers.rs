@@ -468,6 +468,191 @@ mod tests {
         Ok(())
     }
 
+    /// Build Nodes containing one ephemeral model whose raw SQL is `body` and
+    /// whose original_file_path will resolve relative to `in_dir`.
+    fn build_nodes_with_ephemeral(
+        in_dir: &Path,
+        name: &str,
+        body: &str,
+    ) -> std::io::Result<dbt_schemas::schemas::Nodes> {
+        use std::sync::Arc as A;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::common::DbtMaterialization;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel, NodeBaseAttributes};
+
+        let rel = format!("models/{name}.sql");
+        let abs = in_dir.join(&rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&abs, body)?;
+
+        let common = CommonAttributes {
+            unique_id: format!("model.shop.{name}"),
+            name: name.to_string(),
+            original_file_path: std::path::PathBuf::from(&rel),
+            ..CommonAttributes::default()
+        };
+        let base = NodeBaseAttributes {
+            materialized: DbtMaterialization::Ephemeral,
+            ..NodeBaseAttributes::default()
+        };
+        let model = DbtModel {
+            __common_attr__: common,
+            __base_attr__: base,
+            ..DbtModel::default()
+        };
+
+        let mut nodes = Nodes::default();
+        nodes
+            .models
+            .insert(format!("model.shop.{name}"), A::new(model));
+        Ok(nodes)
+    }
+
+    #[test]
+    fn inject_ephemeral_ctes_walks_dependency_and_emits_wrapper_markers() -> anyhow::Result<()> {
+        // End-to-end: a user model SQL that refs an ephemeral via the
+        // __dbt__cte__alpha prefix. inject_ephemeral_ctes must (a) compile +
+        // persist the ephemeral's raw SQL leaf-first, (b) wrap the user SQL
+        // with the EPHEMERAL-SELECT-WRAPPER markers.
+        let dir = tempfile::tempdir()?;
+        let in_dir = dir.path().join("project");
+        let ephemeral_dir = dir.path().join("ephemeral");
+        std::fs::create_dir_all(&ephemeral_dir)?;
+
+        let nodes = build_nodes_with_ephemeral(&in_dir, "alpha", "select 1 as k, 2 as v")?;
+        let env = jinja_env_with_templates(&[]);
+        let ctx = BTreeMap::<String, minijinja::Value>::new();
+
+        let user_sql = "select * from __dbt__cte__alpha";
+        let out = inject_ephemeral_ctes(
+            user_sql,
+            "user_model",
+            &nodes,
+            &env,
+            &ctx,
+            &in_dir,
+            &ephemeral_dir,
+        )?;
+
+        assert!(
+            out.contains("--EPHEMERAL-SELECT-WRAPPER-START"),
+            "expected wrapper start marker; got:\n{out}"
+        );
+        assert!(out.contains("--EPHEMERAL-SELECT-WRAPPER-END"), "got:\n{out}");
+        // alpha's compiled body should appear inline.
+        assert!(out.contains("select 1 as k, 2 as v"), "got:\n{out}");
+        Ok(())
+    }
+
+    #[test]
+    fn inject_ephemeral_ctes_errors_when_ephemeral_source_missing_on_disk() -> anyhow::Result<()> {
+        // Nodes registers an ephemeral model with an original_file_path that
+        // doesn't exist on disk → persist_ephemeral_chain fails to read it.
+        // The error must mention the model name + the file path so users can
+        // diagnose it.
+        use std::sync::Arc as A;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::common::DbtMaterialization;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel, NodeBaseAttributes};
+
+        let dir = tempfile::tempdir()?;
+        let in_dir = dir.path().to_path_buf();
+        let ephemeral_dir = dir.path().join("ephemeral");
+        std::fs::create_dir_all(&ephemeral_dir)?;
+
+        let common = CommonAttributes {
+            unique_id: "model.shop.missing".to_string(),
+            name: "missing".to_string(),
+            original_file_path: std::path::PathBuf::from("models/missing.sql"),
+            ..CommonAttributes::default()
+        };
+        let base = NodeBaseAttributes {
+            materialized: DbtMaterialization::Ephemeral,
+            ..NodeBaseAttributes::default()
+        };
+        let model = DbtModel {
+            __common_attr__: common,
+            __base_attr__: base,
+            ..DbtModel::default()
+        };
+        let mut nodes = Nodes::default();
+        nodes
+            .models
+            .insert("model.shop.missing".to_string(), A::new(model));
+
+        let env = jinja_env_with_templates(&[]);
+        let ctx = BTreeMap::<String, minijinja::Value>::new();
+
+        let err = inject_ephemeral_ctes(
+            "select * from __dbt__cte__missing",
+            "user_model",
+            &nodes,
+            &env,
+            &ctx,
+            &in_dir,
+            &ephemeral_dir,
+        )
+        .expect_err("missing ephemeral source must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "error should mention model name: {msg}");
+        Ok(())
+    }
+
+    #[test]
+    fn inject_ephemeral_ctes_persist_skips_non_ephemeral_models() -> anyhow::Result<()> {
+        // The find() filter inside persist_ephemeral_chain only matches nodes
+        // whose `materialized` is "ephemeral". A node with the same name but
+        // a non-ephemeral materialization is silently skipped, so no file is
+        // written for it. The wrapper step then fails when it can't find the
+        // persisted file — exercising the wrap-error branch.
+        use std::sync::Arc as A;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
+
+        let dir = tempfile::tempdir()?;
+        let in_dir = dir.path().join("project");
+        std::fs::create_dir_all(&in_dir)?;
+        let ephemeral_dir = dir.path().join("ephemeral");
+        std::fs::create_dir_all(&ephemeral_dir)?;
+
+        // Default DbtModel is materialized = Snapshot (not Ephemeral).
+        let common = CommonAttributes {
+            unique_id: "model.shop.alpha".to_string(),
+            name: "alpha".to_string(),
+            ..CommonAttributes::default()
+        };
+        let model = DbtModel {
+            __common_attr__: common,
+            ..DbtModel::default()
+        };
+        let mut nodes = Nodes::default();
+        nodes
+            .models
+            .insert("model.shop.alpha".to_string(), A::new(model));
+
+        let env = jinja_env_with_templates(&[]);
+        let ctx = BTreeMap::<String, minijinja::Value>::new();
+
+        let err = inject_ephemeral_ctes(
+            "select * from __dbt__cte__alpha",
+            "user_model",
+            &nodes,
+            &env,
+            &ctx,
+            &in_dir,
+            &ephemeral_dir,
+        )
+        .expect_err("non-ephemeral skip + missing wrap file = wrap error");
+        let msg = err.to_string();
+        assert!(msg.contains("user_model") || msg.contains("alpha"), "got: {msg}");
+        Ok(())
+    }
+
     #[test]
     fn inject_ephemeral_ctes_short_circuits_when_prefix_absent() -> anyhow::Result<()> {
         // Early return path: SQL without DBT_CTE_PREFIX — neither dependency

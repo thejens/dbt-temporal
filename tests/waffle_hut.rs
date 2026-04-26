@@ -20,6 +20,7 @@
 )]
 
 mod waffle_hut {
+    pub mod hook_echo;
     pub mod infra;
 
     mod artifacts;
@@ -28,6 +29,7 @@ mod waffle_hut {
     mod env_vars;
     mod failure;
     mod hooks;
+    mod lifecycle_hooks;
     mod multi_project;
     mod robustness;
 }

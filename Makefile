@@ -31,7 +31,7 @@ test-examples:
 # the test binaries through a path that the local sandbox SIGKILLs on this
 # machine (only --workspace mode); the former runs identical tests with
 # instrumentation and produces the same coverage data.
-COVERAGE_FLOOR ?= 95
+COVERAGE_FLOOR ?= 95.5
 COVERAGE_IGNORE := src/main\.rs
 
 coverage:

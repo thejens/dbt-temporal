@@ -152,3 +152,93 @@ async fn test_fail_fast() -> Result<()> {
 
     test_result
 }
+
+/// A test node whose query returns failing rows: exercises both severity
+/// branches in `execute_node`'s test-failure handler.
+///
+/// Adds two `accepted_values` tests on `stg_customers.first_name`:
+///   - `severity: warn` → handler emits a warning, node still reports success.
+///   - default (error) → handler returns DbtTemporalError::TestFailure, the
+///     workflow surfaces the test as an error result.
+#[tokio::test(flavor = "current_thread")]
+async fn test_test_failures_severity_dispatch() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = copy_fixture("waffle_hut")?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+
+    // Replace schema.yml with one whose `accepted_values` lists exclude every
+    // real value, so both tests fail.
+    std::fs::write(
+        fixture_dir.join("models/schema.yml"),
+        r"version: 2
+
+models:
+  - name: stg_customers
+    columns:
+      - name: first_name
+        tests:
+          - accepted_values:
+              name: warn_failing
+              values: ['__never__']
+              config:
+                severity: warn
+          - accepted_values:
+              name: error_failing
+              values: ['__also_never__']
+",
+    )
+    .context("writing schema.yml with failing tests")?;
+
+    let config = test_config(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            () = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let mut client = connect_client(&infra.temporal_addr).await?;
+            // The error-severity test will fail → workflow returns Err. We pull
+            // statuses from the memo via `run_dbt_workflow_expect_failure`.
+            let node_status = run_dbt_workflow_expect_failure(
+                &mut client,
+                &task_queue,
+                make_input("build", None, None, false),
+            )
+            .await?;
+
+            let warn_status = node_status
+                .nodes
+                .iter()
+                .find(|(k, _)| k.contains("warn_failing"));
+            let error_status = node_status
+                .nodes
+                .iter()
+                .find(|(k, _)| k.contains("error_failing"));
+            assert!(warn_status.is_some(), "warn-severity test missing from memo");
+            assert!(error_status.is_some(), "error-severity test missing from memo");
+            assert_eq!(*warn_status.unwrap().1, NodeStatus::Success, "severity=warn must succeed");
+            assert_eq!(*error_status.unwrap().1, NodeStatus::Error, "severity=error must error");
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+    result
+}

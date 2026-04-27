@@ -151,3 +151,47 @@ async fn test_project_hooks_fire_with_correct_context() -> Result<()> {
     worker_abort.notify_one();
     result
 }
+
+/// Project hooks executing under per-workflow env overrides: the hook activity
+/// rebuilds the adapter engine via `rebuild_adapter_engine_with_env` and patches
+/// the Jinja `target` global. Exercises the env-override branch of
+/// `activities/project_hooks::run_project_hooks_inner`.
+#[tokio::test(flavor = "current_thread")]
+async fn test_project_hooks_with_env_overrides() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = setup_hooks_fixture()?;
+    let config = test_config_env_var_profile(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker with env_var profile")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            _ = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let client = connect_client(&infra.temporal_addr).await?;
+            let env = pg_env(infra);
+            let run = run_dbt_workflow(&client, &task_queue, make_input_with_env("run", None, env))
+                .await?;
+            assert!(run.output.success, "run-with-env-overrides + project hooks should succeed");
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    result
+}

@@ -362,3 +362,68 @@ async fn test_dbt_test() -> Result<()> {
     worker_abort.notify_one();
     test_result
 }
+
+/// `config(schema=env_var(...))` is unsupported under per-workflow env overrides
+/// because the config value is evaluated once at resolution time. execute_node
+/// detects this pattern and errors early with a clear message — exercises the
+/// `has_env_var_in_config_schema_or_database` early-error branch.
+#[tokio::test(flavor = "current_thread")]
+async fn test_env_var_in_config_schema_rejected() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = copy_fixture("waffle_hut")?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+
+    std::fs::write(
+        fixture_dir.join("models/staging/bad_config.sql"),
+        "{{ config(schema=env_var('OVERRIDE_SCHEMA', 'fallback')) }}\nselect 1 as n",
+    )
+    .context("writing bad_config model")?;
+
+    let config = test_config_env_var_profile(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            () = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let mut client = connect_client(&infra.temporal_addr).await?;
+            // env overrides must be present for the early-error path to fire.
+            let env = pg_env(infra);
+            let node_status = run_dbt_workflow_expect_failure(
+                &mut client,
+                &task_queue,
+                make_input_with_env("run", None, env),
+            )
+            .await?;
+            // bad_config should error; other nodes can succeed or be skipped — only
+            // the diagnostic on the offending node matters.
+            let bad = node_status
+                .nodes
+                .iter()
+                .find(|(k, _)| k.contains("bad_config"))
+                .context("bad_config not in memo")?;
+            assert_eq!(*bad.1, NodeStatus::Error, "bad_config must error early");
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+    result
+}

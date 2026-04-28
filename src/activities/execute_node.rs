@@ -10,7 +10,10 @@ use anyhow::Context;
 use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
 use raw_sql::resolve_raw_sql;
-use schema_patch::{apply_patched_relation, compute_patched_relation};
+use schema_patch::{
+    apply_patched_relation, apply_schema_map_to_context, build_database_rewrite_map,
+    build_schema_rewrite_map, compute_patched_relation, patch_sql_with_schema_map,
+};
 use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
@@ -528,18 +531,41 @@ async fn execute_node_inner(
         minijinja::Value::from(common.package_name.clone()),
     );
 
-    // Patch `this`, `database`, `schema` when per-workflow env overrides
-    // changed the profile schema/database. `build_run_node_context` built
-    // `this` from `node.base()`, which reflects worker-startup values.
-    if let Some(patch) = compute_patched_relation(
-        state,
-        base,
-        env_schema.as_deref(),
-        env_database.as_deref(),
-        unique_id,
-    )? {
-        apply_patched_relation(state, base, &patch, &mut node_context);
-    }
+    // Patch `this`, `schema`, `database` when per-workflow env overrides are in play.
+    //
+    // Two strategies, chosen by whether the project overrides generate_schema_name:
+    //
+    // Custom macro path: re-execute `generate_schema_name` via the already-cloned
+    // Jinja env (env_var overridden, target patched). This matches vanilla dbt's
+    // per-run evaluation and handles any macro logic the user has defined. Also
+    // builds a rewrite map for SQL text patching below.
+    //
+    // Default macro path: reconstruct the schema using dbt's default
+    // `<target_schema>[_<custom>]` pattern from the profile-rebuilt target.schema.
+    let schema_rewrite_map = if state.has_custom_schema_name_macro && !input.env.is_empty() {
+        let schema_map = build_schema_rewrite_map(state, &jinja_env).map_err(|e| {
+            DbtTemporalError::Compilation(format!("building schema rewrite map: {e:#}"))
+        })?;
+        apply_schema_map_to_context(
+            state,
+            base,
+            &schema_map,
+            env_database.as_deref(),
+            &mut node_context,
+        );
+        Some(schema_map)
+    } else {
+        if let Some(patch) = compute_patched_relation(
+            state,
+            base,
+            env_schema.as_deref(),
+            env_database.as_deref(),
+            unique_id,
+        ) {
+            apply_patched_relation(state, base, &patch, &mut node_context);
+        }
+        None
+    };
 
     // Resolve raw SQL: build_run_node_context does NOT populate the top-level
     // "sql" context variable — that's the caller's responsibility. The
@@ -601,12 +627,25 @@ async fn execute_node_inner(
                 &state.io_args.in_dir,
                 &ephemeral_dir,
             )?;
-            // Patch ref() schemas in compiled SQL: ref() resolves to startup default schema,
-            // but per-workflow env overrides may change the schema. Replace quoted occurrences
-            // of the startup schema with the per-workflow schema so downstream refs find tables
-            // in the correct schema.
-            let compiled =
-                patch_compiled_schema(compiled, env_schema.as_deref(), &state.default_schema);
+            // Patch ref() schemas in compiled SQL so downstream refs resolve to the
+            // correct per-workflow schemas.
+            //
+            // Custom macro path: use the schema rewrite map (built above from
+            // generate_schema_name re-execution). Patches every distinct schema in
+            // the project, covering both the current model and all its dependencies.
+            // Handles double-quoted ("schema") and backtick-quoted (`schema`) identifiers
+            // so BigQuery and standard SQL adapters are both covered.
+            //
+            // Default macro path: replace the startup default_schema token with the
+            // per-workflow schema (the existing single-schema substitution).
+            let compiled = if let Some(ref schema_map) = schema_rewrite_map {
+                let db_map = build_database_rewrite_map(state, env_database.as_deref());
+                let mut combined = schema_map.clone();
+                combined.extend(db_map);
+                patch_sql_with_schema_map(compiled, &combined)
+            } else {
+                patch_compiled_schema(compiled, env_schema.as_deref(), &state.default_schema)
+            };
 
             // Set both `sql` and `compiled_code` in the context. View materializations
             // reference `sql`, while table/incremental materializations reference

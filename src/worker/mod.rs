@@ -437,12 +437,12 @@ pub async fn initialize_project(
             .macros
             .macros
             .contains_key(&format!("macro.{project_name}.generate_database_name"));
-    if has_custom_schema_name_macro && uses_env_vars {
-        tracing::warn!(
+    if has_custom_schema_name_macro {
+        info!(
             project = %project_name,
             "project overrides generate_schema_name or generate_database_name — \
-             per-workflow env overrides may not correctly patch `this.schema`/`this.database` \
-             context variables (the `target` global IS correct)"
+             per-workflow env overrides will re-execute the macro at activity time \
+             (env_var() reads and target.schema both reflect the workflow env)"
         );
     }
 

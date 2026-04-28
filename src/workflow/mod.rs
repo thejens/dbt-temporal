@@ -21,8 +21,8 @@ use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus};
 use self::helpers::{build_effective_env, build_summary_lines, elapsed_secs, upsert_memo_state};
 use self::levels::execute_levels;
 use self::phases::{
-    plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks,
-    run_pre_run_hooks, store_run_artifacts, write_command_memo,
+    build_list_output, plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start,
+    run_post_hooks, run_pre_run_hooks, store_run_artifacts, write_command_memo,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -52,6 +52,12 @@ impl DbtRunWorkflow {
 
         write_command_memo(ctx, &input)?;
         let plan = plan_and_announce(ctx, &input).await?;
+
+        // list: return the selected node set without executing any SQL.
+        if input.command == "list" {
+            return Ok(build_list_output(&plan, elapsed_secs(start, ctx.workflow_time())));
+        }
+
         let project_config = resolve_project_config(ctx, &input, &plan).await?;
         let hooks = project_config.hooks;
         let retry_config = project_config.retry;

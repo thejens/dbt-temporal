@@ -146,6 +146,13 @@ async fn run_project_hooks_inner(
     // Ensure invocation_id is in the context — hook macros commonly use {{ invocation_id }}.
     context.insert("invocation_id".to_owned(), minijinja::Value::from(input.invocation_id.clone()));
 
+    // Inject `model` as an empty-attribute placeholder. Project-level hooks run before
+    // any node executes (on-run-start) or after all finish (on-run-end), so `model` is
+    // not in scope. dbt-core injects `model` with empty attributes, making expressions
+    // like `{{ "schema=" + model.schema }}` render as "schema=" instead of erroring.
+    // Without this, `model.schema` is undefined and the `+` string operator fails.
+    context.insert("model".to_owned(), empty_model_context());
+
     // For on_run_end: inject `results` matching dbt-core's shape.
     if matches!(input.phase, ProjectHookPhase::OnRunEnd) {
         let results_value = build_results_context(&input.node_results, &state.resolver_state.nodes);
@@ -198,6 +205,26 @@ async fn run_project_hooks_inner(
     }
 
     Ok(())
+}
+
+/// Create a `model` placeholder for project-level hook rendering.
+///
+/// Returns an object where any attribute access returns an empty string, matching
+/// dbt-core's behaviour: when `model` is not in scope, macros that read `model.schema`,
+/// `model.name`, etc. get empty strings rather than undefined errors.
+fn empty_model_context() -> minijinja::Value {
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct EmptyModel;
+
+    impl minijinja::value::Object for EmptyModel {
+        fn get_value(self: &Arc<Self>, _key: &minijinja::Value) -> Option<minijinja::Value> {
+            Some(minijinja::Value::from(""))
+        }
+    }
+
+    minijinja::Value::from_object(EmptyModel)
 }
 
 /// Convert the workflow's `Vec<NodeExecutionResult>` into a Jinja value list
@@ -277,6 +304,37 @@ fn build_results_context(
 mod tests {
     use super::*;
     use crate::types::NodeStatus;
+
+    /// `empty_model_context` returns an object where any attribute access yields `""`.
+    /// This lets on-run-start/on-run-end macros use `model.schema`, `model.name`, etc.
+    /// without erroring — matching dbt-core's behaviour where `model` is an empty context
+    /// object rather than absent from the rendering context.
+    #[test]
+    fn empty_model_context_allows_model_attr_in_hook_templates() -> anyhow::Result<()> {
+        let env = minijinja::Environment::new();
+        let mut ctx: BTreeMap<String, minijinja::Value> = BTreeMap::new();
+        ctx.insert("model".to_owned(), empty_model_context());
+
+        // `model.schema` should return empty string, making `+` concatenation work.
+        let rendered = env
+            .template_from_str(r#"{{ "s=" + model.schema }}"#)?
+            .render(&ctx, &[])?;
+        assert_eq!(rendered, "s=", "model.schema should render as empty string");
+
+        // Any attribute access returns empty string.
+        let rendered = env
+            .template_from_str(r"{{ model.name }}")?
+            .render(&ctx, &[])?;
+        assert_eq!(rendered, "", "model.name should render as empty string");
+
+        // `model is defined` is true — the placeholder is a real value.
+        let rendered = env
+            .template_from_str(r"{% if model is defined %}yes{% else %}no{% endif %}")?
+            .render(&ctx, &[])?;
+        assert_eq!(rendered, "yes", "model should be defined");
+
+        Ok(())
+    }
 
     fn mk_result(
         unique_id: &str,

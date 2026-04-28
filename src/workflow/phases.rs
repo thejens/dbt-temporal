@@ -23,8 +23,8 @@ use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
 use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
-    HooksConfig, NodeExecutionResult, ProjectHookPhase, ProjectHooksInput, ResolveConfigInput,
-    ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
+    HooksConfig, NodeExecutionResult, NodeStatus, ProjectHookPhase, ProjectHooksInput,
+    ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
 };
 
 use super::DbtRunWorkflow;
@@ -410,6 +410,36 @@ pub async fn run_post_hooks(
     apply_post_run_outcome(result, hook_errors, success_in)
 }
 
+/// Build the workflow output for a `list` command: returns all planned nodes as
+/// success entries without executing any SQL or touching the warehouse.
+pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
+    let node_results = plan
+        .nodes
+        .values()
+        .map(|node| NodeExecutionResult {
+            unique_id: node.unique_id.clone(),
+            status: NodeStatus::Success,
+            execution_time: 0.0,
+            message: None,
+            adapter_response: BTreeMap::new(),
+            compiled_code: None,
+            timing: vec![],
+            failures: None,
+        })
+        .collect();
+    DbtRunOutput {
+        invocation_id: plan.invocation_id.clone(),
+        success: true,
+        skipped: false,
+        skip_reason: None,
+        node_results,
+        elapsed_time: elapsed,
+        artifacts: None,
+        log_path: None,
+        hook_errors: vec![],
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -445,6 +475,67 @@ mod tests {
             hooks: None,
             env: BTreeMap::new(),
         }
+    }
+
+    // --- build_list_output ---
+
+    #[test]
+    fn build_list_output_returns_all_nodes_as_success_without_execution() {
+        use crate::types::NodeInfo;
+
+        let plan = ExecutionPlan {
+            invocation_id: "inv-list".to_string(),
+            nodes: BTreeMap::from([
+                (
+                    "model.shop.customers".to_string(),
+                    NodeInfo {
+                        unique_id: "model.shop.customers".to_string(),
+                        name: "customers".to_string(),
+                        resource_type: "model".to_string(),
+                        materialization: Some("table".to_string()),
+                        package_name: "shop".to_string(),
+                        depends_on: vec![],
+                    },
+                ),
+                (
+                    "model.shop.orders".to_string(),
+                    NodeInfo {
+                        unique_id: "model.shop.orders".to_string(),
+                        name: "orders".to_string(),
+                        resource_type: "model".to_string(),
+                        materialization: Some("table".to_string()),
+                        package_name: "shop".to_string(),
+                        depends_on: vec!["model.shop.customers".to_string()],
+                    },
+                ),
+            ]),
+            ..empty_plan()
+        };
+
+        let out = build_list_output(&plan, 0.05);
+
+        assert!(out.success);
+        assert!(!out.skipped);
+        assert_eq!(out.invocation_id, "inv-list");
+        assert_eq!(out.node_results.len(), 2, "one result per planned node");
+        for r in &out.node_results {
+            assert_eq!(r.status, NodeStatus::Success);
+            assert!(
+                (r.execution_time - 0.0).abs() < f64::EPSILON,
+                "list doesn't execute — no execution time"
+            );
+            assert!(r.compiled_code.is_none());
+            assert!(r.message.is_none());
+        }
+        assert!(out.artifacts.is_none());
+        assert!(out.hook_errors.is_empty());
+    }
+
+    #[test]
+    fn build_list_output_empty_plan_returns_empty_results() {
+        let out = build_list_output(&empty_plan(), 0.0);
+        assert!(out.success);
+        assert!(out.node_results.is_empty());
     }
 
     // --- build_planned_details ---

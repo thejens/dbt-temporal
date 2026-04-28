@@ -195,6 +195,13 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
             matches!(rt, NodeType::Model | NodeType::Test | NodeType::Seed | NodeType::Snapshot)
         }
         "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
+        // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
+        "test" => matches!(rt, NodeType::Test),
+        // list selects the full graph (same as build) — the workflow returns node metadata
+        // without executing; no SQL is compiled or sent to the warehouse.
+        "list" => {
+            matches!(rt, NodeType::Model | NodeType::Test | NodeType::Seed | NodeType::Snapshot)
+        }
         _ => false,
     }
 }
@@ -312,6 +319,26 @@ mod tests {
     fn unknown_command_excludes_everything() {
         assert!(!command_includes_node_type("freshness", NodeType::Model));
         assert!(!command_includes_node_type("", NodeType::Model));
+    }
+
+    #[test]
+    fn test_command_includes_only_tests() {
+        assert!(command_includes_node_type("test", NodeType::Test));
+        assert!(!command_includes_node_type("test", NodeType::Model));
+        assert!(!command_includes_node_type("test", NodeType::Seed));
+        assert!(!command_includes_node_type("test", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn list_command_includes_full_graph_like_build() {
+        for rt in [
+            NodeType::Model,
+            NodeType::Test,
+            NodeType::Seed,
+            NodeType::Snapshot,
+        ] {
+            assert!(command_includes_node_type("list", rt), "list should include {rt:?}");
+        }
     }
 
     /// Regression: panda-cascade phantom-test macro defs must be detected so the

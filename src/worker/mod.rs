@@ -99,7 +99,20 @@ async fn build_project_registry(
         if projects.contains_key(&name) {
             anyhow::bail!("duplicate project name '{}' (from {})", name, project_dir.display());
         }
-        info!(project = %name, dir = %project_dir.display(), "loaded project");
+        let dir_name = project_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        info!(project = %name, dir = %project_dir.display(), directory = dir_name, "loaded project");
+        if !dir_name.is_empty() && name != dir_name {
+            tracing::warn!(
+                project_name = %name,
+                directory = %dir_name,
+                "dbt_project.yml name '{}' differs from directory '{}' — \
+                 workflows must use '{}' as the project key",
+                name, dir_name, name
+            );
+        }
         projects.insert(name, Arc::new(state));
     }
 

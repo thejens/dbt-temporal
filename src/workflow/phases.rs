@@ -17,6 +17,7 @@ use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
+use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowTermination};
 
 use crate::activities::DbtActivities;
@@ -197,7 +198,7 @@ pub fn apply_post_run_outcome(
 
 /// Convert search-attribute strings into the JSON-encoded payloads Temporal's
 /// `upsert_search_attributes` API expects. Pure: just serializes each value
-/// and wraps any failure into `WorkflowTermination::failed` with the
+/// and wraps any failure into `WorkflowTermination::failed_application` with the
 /// attribute key in the error message.
 pub fn build_search_attribute_payloads(
     attributes: &BTreeMap<String, String>,
@@ -209,8 +210,8 @@ pub fn build_search_attribute_payloads(
         .iter()
         .map(|(k, v)| {
             let payload = v.as_json_payload().map_err(|e| {
-                WorkflowTermination::failed(anyhow::anyhow!(
-                    "serializing search attribute '{k}' as JSON payload: {e:#}"
+                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
+                    anyhow::anyhow!("serializing search attribute '{k}' as JSON payload: {e:#}"),
                 ))
             })?;
             Ok((k.clone(), payload))
@@ -225,8 +226,9 @@ pub fn write_command_memo(
     let memo = CommandMemo::from(input);
     ctx.upsert_memo([(
         "command".to_string(),
-        memo.as_json_payload()
-            .map_err(WorkflowTermination::failed)?,
+        memo.as_json_payload().map_err(|e| {
+            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
+        })?,
     )]);
     Ok(())
 }
@@ -245,7 +247,9 @@ pub async fn plan_and_announce(
         )
         .await
         .map_err(|e| {
-            WorkflowTermination::failed(anyhow::anyhow!("plan_project activity failed: {e:#}"))
+            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
+                anyhow::anyhow!("plan_project activity failed: {e:#}"),
+            ))
         })?;
 
     if !plan.search_attributes.is_empty() {
@@ -270,7 +274,9 @@ pub async fn resolve_project_config(
     )
     .await
     .map_err(|e| {
-        WorkflowTermination::failed(anyhow::anyhow!("resolve_config activity failed: {e:#}"))
+        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+            "resolve_config activity failed: {e:#}"
+        )))
     })
 }
 
@@ -296,7 +302,9 @@ pub async fn run_pre_run_hooks(
             let elapsed = elapsed_secs(start, ctx.workflow_time());
             Ok(apply_pre_run_outcome(plan, outcome, effective_env, hook_errors, elapsed))
         }
-        Err(e) => Err(WorkflowTermination::failed(e)),
+        Err(e) => {
+            Err(WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e)))
+        }
     }
 }
 
@@ -318,7 +326,11 @@ pub async fn run_on_run_start(
             .build(),
     )
     .await
-    .map_err(|e| WorkflowTermination::failed(anyhow::anyhow!("on-run-start hook failed: {e:#}")))
+    .map_err(|e| {
+        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+            "on-run-start hook failed: {e:#}"
+        )))
+    })
 }
 
 pub async fn store_run_artifacts(
@@ -338,7 +350,9 @@ pub async fn store_run_artifacts(
         )
         .await
         .map_err(|e| {
-            WorkflowTermination::failed(anyhow::anyhow!("store_artifacts activity failed: {e:#}"))
+            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
+                anyhow::anyhow!("store_artifacts activity failed: {e:#}"),
+            ))
         })?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))

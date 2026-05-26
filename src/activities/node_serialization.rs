@@ -3,103 +3,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use dbt_schemas::schemas::telemetry::NodeType;
 
-/// Serialize a node to YmlValue for `build_run_node_context`.
-///
-/// Tries the concrete type from the appropriate Nodes collection.
-/// Injects `resource_type` so adapter functions (e.g. `get_view_options`) can
-/// deserialize back to `InternalDbtNodeWrapper` (a `#[serde(tag = "resource_type")]` enum).
-pub fn get_node_yml(
-    nodes: &dbt_schemas::schemas::Nodes,
-    unique_id: &str,
-    resource_type: NodeType,
-) -> Result<dbt_yaml::Value, anyhow::Error> {
-    use dbt_schemas::schemas::telemetry::NodeType;
-
-    let (mut val, rt_str) = match resource_type {
-        NodeType::Model => {
-            if let Some(model) = nodes.models.get(unique_id) {
-                (dbt_yaml::to_value(model.as_ref())?, "model")
-            } else {
-                return fallback_node_yml(nodes, unique_id, resource_type);
-            }
-        }
-        NodeType::Seed => {
-            if let Some(seed) = nodes.seeds.get(unique_id) {
-                (dbt_yaml::to_value(seed.as_ref())?, "seed")
-            } else {
-                return fallback_node_yml(nodes, unique_id, resource_type);
-            }
-        }
-        NodeType::Snapshot => {
-            if let Some(snapshot) = nodes.snapshots.get(unique_id) {
-                (dbt_yaml::to_value(snapshot.as_ref())?, "snapshot")
-            } else {
-                return fallback_node_yml(nodes, unique_id, resource_type);
-            }
-        }
-        NodeType::Test => {
-            if let Some(test) = nodes.tests.get(unique_id) {
-                (dbt_yaml::to_value(test.as_ref())?, "test")
-            } else {
-                return fallback_node_yml(nodes, unique_id, resource_type);
-            }
-        }
-        _ => return fallback_node_yml(nodes, unique_id, resource_type),
-    };
-
-    inject_resource_type(&mut val, rt_str);
-    Ok(val)
-}
-
-/// Inject `resource_type` into a YmlValue mapping (required by `InternalDbtNodeWrapper` deserialization).
-fn inject_resource_type(val: &mut dbt_yaml::Value, rt: &str) {
-    if let dbt_yaml::Value::Mapping(map, _) = val {
-        map.insert(
-            dbt_yaml::Value::string("resource_type".to_string()),
-            dbt_yaml::Value::string(rt.to_string()),
-        );
-    }
-}
-
-/// Fallback: build a minimal YmlValue from node traits.
-fn fallback_node_yml(
-    nodes: &dbt_schemas::schemas::Nodes,
-    unique_id: &str,
-    resource_type: NodeType,
-) -> Result<dbt_yaml::Value, anyhow::Error> {
-    let node = nodes
-        .get_node(unique_id)
-        .ok_or_else(|| anyhow::anyhow!("node {unique_id} not found for serialization"))?;
-    let common = node.common();
-    let base = node.base();
-    let mut map = dbt_yaml::Mapping::new();
-    map.insert(
-        dbt_yaml::Value::string("resource_type".to_string()),
-        dbt_yaml::Value::string(resource_type.as_str_name().to_lowercase()),
-    );
-    map.insert(
-        dbt_yaml::Value::string("unique_id".to_string()),
-        dbt_yaml::Value::string(common.unique_id.clone()),
-    );
-    map.insert(
-        dbt_yaml::Value::string("name".to_string()),
-        dbt_yaml::Value::string(common.name.clone()),
-    );
-    map.insert(
-        dbt_yaml::Value::string("database".to_string()),
-        dbt_yaml::Value::string(base.database.clone()),
-    );
-    map.insert(
-        dbt_yaml::Value::string("schema".to_string()),
-        dbt_yaml::Value::string(base.schema.clone()),
-    );
-    map.insert(
-        dbt_yaml::Value::string("alias".to_string()),
-        dbt_yaml::Value::string(base.alias.clone()),
-    );
-    Ok(dbt_yaml::Value::mapping(map))
-}
-
 /// Extract the node config as a serializable value for `deprecated_config`.
 ///
 /// Serializes directly to `dbt_yaml::Value` to avoid a JSON round-trip
@@ -227,16 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn get_node_yml_missing_node_returns_error() {
-        let nodes = dbt_schemas::schemas::Nodes::default();
-        let result = get_node_yml(&nodes, "model.waffle.nonexistent", NodeType::Model);
-        let Err(err) = result else {
-            panic!("expected error");
-        };
-        assert!(err.to_string().contains("not found"), "error should mention node not found");
-    }
-
-    #[test]
     fn get_sql_header_non_model_returns_none() {
         let nodes = dbt_schemas::schemas::Nodes::default();
         assert!(get_sql_header(&nodes, "seed.waffle.raw", NodeType::Seed).is_none());
@@ -247,59 +140,6 @@ mod tests {
     fn get_sql_header_missing_model_returns_none() {
         let nodes = dbt_schemas::schemas::Nodes::default();
         assert!(get_sql_header(&nodes, "model.waffle.nope", NodeType::Model).is_none());
-    }
-
-    fn assert_resource_type(yml: &dbt_yaml::Value, expected: &str) {
-        let dbt_yaml::Value::Mapping(map, _) = yml else {
-            panic!("expected mapping, got {yml:?}");
-        };
-        let got = map
-            .get(dbt_yaml::Value::string("resource_type".to_string()))
-            .expect("resource_type key");
-        let dbt_yaml::Value::String(s, _) = got else {
-            panic!("resource_type should be a string");
-        };
-        assert_eq!(s, expected);
-    }
-
-    #[test]
-    fn get_node_yml_injects_model_resource_type() {
-        let mut nodes = dbt_schemas::schemas::Nodes::default();
-        nodes
-            .models
-            .insert("model.waffle.stg".to_string(), Arc::new(DbtModel::default()));
-        let yml = get_node_yml(&nodes, "model.waffle.stg", NodeType::Model).unwrap();
-        assert_resource_type(&yml, "model");
-    }
-
-    #[test]
-    fn get_node_yml_injects_seed_resource_type() {
-        let mut nodes = dbt_schemas::schemas::Nodes::default();
-        nodes
-            .seeds
-            .insert("seed.waffle.raw".to_string(), Arc::new(DbtSeed::default()));
-        let yml = get_node_yml(&nodes, "seed.waffle.raw", NodeType::Seed).unwrap();
-        assert_resource_type(&yml, "seed");
-    }
-
-    #[test]
-    fn get_node_yml_injects_snapshot_resource_type() {
-        let mut nodes = dbt_schemas::schemas::Nodes::default();
-        nodes
-            .snapshots
-            .insert("snapshot.waffle.s".to_string(), Arc::new(DbtSnapshot::default()));
-        let yml = get_node_yml(&nodes, "snapshot.waffle.s", NodeType::Snapshot).unwrap();
-        assert_resource_type(&yml, "snapshot");
-    }
-
-    #[test]
-    fn get_node_yml_injects_test_resource_type() {
-        let mut nodes = dbt_schemas::schemas::Nodes::default();
-        nodes
-            .tests
-            .insert("test.waffle.t".to_string(), Arc::new(DbtTest::default()));
-        let yml = get_node_yml(&nodes, "test.waffle.t", NodeType::Test).unwrap();
-        assert_resource_type(&yml, "test");
     }
 
     #[test]
@@ -430,56 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn get_node_yml_falls_back_for_unhandled_resource_types() {
-        // Operation / Source aren't in any of the typed node maps, so the
-        // catch-all arm in get_node_yml routes through fallback_node_yml.
-        // With nothing in the registry, fallback_node_yml errors with a
-        // "node not found" message.
-        let nodes = dbt_schemas::schemas::Nodes::default();
-        let err = get_node_yml(&nodes, "operation.shop.x", NodeType::Operation).unwrap_err();
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn fallback_node_yml_builds_minimal_mapping_from_present_node() {
-        use dbt_schemas::schemas::nodes::CommonAttributes;
-        // Add an operation-style node — DbtSource is the simplest catchall
-        // variant, but the fallback path needs *some* node present in
-        // resolver_state.nodes so get_node() returns Some.
-        // We use a model registered under an unhandled NodeType to exercise
-        // the catch-all arm in get_node_yml that delegates to fallback.
-        let mut nodes = dbt_schemas::schemas::Nodes::default();
-        let common = CommonAttributes {
-            unique_id: "model.shop.fb".to_string(),
-            name: "fb".to_string(),
-            ..CommonAttributes::default()
-        };
-        nodes.models.insert(
-            "model.shop.fb".to_string(),
-            Arc::new(DbtModel {
-                __common_attr__: common,
-                ..DbtModel::default()
-            }),
-        );
-
-        // Pass NodeType::Operation (catch-all arm) for an id that lives in
-        // the models map — fallback_node_yml will find it via get_node()
-        // (which scans all node-type collections) and build a minimal map.
-        let val = get_node_yml(&nodes, "model.shop.fb", NodeType::Operation).unwrap();
-        let dbt_yaml::Value::Mapping(map, _) = val else {
-            panic!("expected mapping");
-        };
-        // Minimal map should have unique_id, name, resource_type, schema, database, alias.
-        let key = dbt_yaml::Value::string("unique_id".to_string());
-        assert!(map.get(key).is_some());
-        let key = dbt_yaml::Value::string("name".to_string());
-        let dbt_yaml::Value::String(name, _) = map.get(key).expect("name field") else {
-            panic!("expected name string");
-        };
-        assert_eq!(name, "fb");
-    }
-
-    #[test]
     fn build_agate_table_uses_custom_delimiter_from_seed_attrs() {
         use std::path::PathBuf;
 
@@ -506,27 +296,5 @@ mod tests {
         let result = build_agate_table(&nodes, "seed.shop.pipe", NodeType::Seed, &io_args).unwrap();
         let table = result.expect("Seed node should produce an AgateTable");
         assert_eq!(table.num_rows(), 2);
-    }
-
-    #[test]
-    fn inject_resource_type_into_existing_mapping() {
-        let mut map = dbt_yaml::Mapping::new();
-        map.insert(
-            dbt_yaml::Value::string("name".to_string()),
-            dbt_yaml::Value::string("foo".to_string()),
-        );
-        let mut val = dbt_yaml::Value::mapping(map);
-        inject_resource_type(&mut val, "model");
-        assert_resource_type(&val, "model");
-    }
-
-    #[test]
-    fn inject_resource_type_noop_on_non_mapping() {
-        // Sequences and scalars must not panic when receiving an injection attempt.
-        let mut seq = dbt_yaml::Value::sequence(Vec::new());
-        inject_resource_type(&mut seq, "model");
-        let dbt_yaml::Value::Sequence(_, _) = seq else {
-            panic!("expected unchanged sequence");
-        };
     }
 }

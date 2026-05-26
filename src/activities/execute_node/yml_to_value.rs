@@ -151,7 +151,9 @@ mod tests {
     #[test]
     fn nested_structure_round_trips() {
         let v = yml_value_to_minijinja(&parse("{values: [10, 20, null]}"));
-        let values = v.get_attr("values").unwrap();
+        // `values` is a reserved dict method in minijinja — use get_item (bracket access)
+        // rather than get_attr so the user key is returned instead of the built-in method.
+        let values = v.get_item(&minijinja::Value::from("values")).unwrap();
         let items: Vec<String> = values.try_iter().unwrap().map(|x| x.to_string()).collect();
         assert_eq!(items, vec!["10", "20", "None"]);
     }

@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::error::ApplicationFailure;
 use tracing::info;
 
 use crate::error::DbtTemporalError;
@@ -36,7 +37,7 @@ pub async fn run_project_hooks_outer(
     let phase = input.phase;
     tokio::select! {
         result = run_project_hooks_inner(activities, input) => {
-            result.map_err(|e| ActivityError::NonRetryable(e.into()))
+            result.map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
         }
         () = ctx.cancelled() => {
             info!(phase = %phase, "project hooks cancelled");
@@ -139,6 +140,7 @@ async fn run_project_hooks_inner(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
+        None, // defer_nodes: not using deferred state
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
     );

@@ -14,7 +14,8 @@ mod phases;
 use std::ops::ControlFlow;
 
 use temporalio_macros::{workflow, workflow_methods};
-use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult};
+use temporalio_sdk::error::ApplicationFailure;
+use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult, WorkflowTermination};
 
 use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus};
 
@@ -85,7 +86,7 @@ impl DbtRunWorkflow {
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
         if levels.was_cancelled {
-            return Err(temporalio_sdk::WorkflowTermination::Cancelled);
+            return Err(WorkflowTermination::Cancelled);
         }
 
         // Run-log summary lines.
@@ -156,8 +157,10 @@ impl DbtRunWorkflow {
                 .iter()
                 .filter(|r| r.status == NodeStatus::Error)
                 .count();
-            Err(temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"
+            Err(WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
+                anyhow::anyhow!(
+                    "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"
+                ),
             )))
         }
     }

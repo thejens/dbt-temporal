@@ -13,6 +13,7 @@ use raw_sql::resolve_raw_sql;
 use schema_patch::{apply_patched_relation, compute_patched_relation};
 use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::error::ApplicationFailure;
 use tracing::{info, warn};
 use yml_to_value::yml_value_to_minijinja_with_jinja;
 
@@ -26,9 +27,7 @@ use super::node_helpers::{
     extract_adapter_response, extract_test_failures, inject_ephemeral_ctes, patch_target_global,
     render_materialization,
 };
-use super::node_serialization::{
-    build_agate_table, get_node_config_yml, get_node_yml, get_sql_header,
-};
+use super::node_serialization::{build_agate_table, get_node_config_yml, get_sql_header};
 
 /// Execute node activity — outer wrapper that handles errors, cancellation,
 /// and periodic heartbeating.
@@ -106,13 +105,12 @@ fn classify_for_temporal(
     dbt_err: &DbtTemporalError,
     non_retryable_patterns: &[regex::Regex],
 ) -> ActivityError {
-    let source = anyhow::anyhow!("{dbt_err}").into();
+    let source = anyhow::anyhow!("{dbt_err}");
     match decide_retry(dbt_err, non_retryable_patterns) {
-        RetryDecision::Retry => ActivityError::Retryable {
-            source,
-            explicit_delay: None,
-        },
-        RetryDecision::NoRetry => ActivityError::NonRetryable(source),
+        RetryDecision::Retry => ActivityError::application(ApplicationFailure::new(source)),
+        RetryDecision::NoRetry => {
+            ActivityError::application(ApplicationFailure::non_retryable(source))
+        }
     }
 }
 
@@ -424,6 +422,7 @@ async fn execute_node_inner(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
+        None, // defer_nodes: not using deferred state
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
     );
@@ -443,9 +442,6 @@ async fn execute_node_inner(
         "store_raw_result".to_owned(),
         minijinja::Value::from_function(result_store.store_raw_result()),
     );
-
-    // Serialize the node to YmlValue for the model parameter.
-    let model_yml = get_node_yml(&state.resolver_state.nodes, unique_id, rt)?;
 
     // Serialize the node config for the deprecated_config parameter.
     let deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
@@ -492,15 +488,12 @@ async fn execute_node_inner(
 
     // Build the full run-phase node context.
     let mut node_context = dbt_jinja_utils::phases::run::build_run_node_context(
-        model_yml,
-        common,
-        base,
+        node,
         &deprecated_config,
         state.resolver_state.adapter_type,
         agate_table,
         &base_context,
         &io_args,
-        rt,
         sql_header,
         state.packages.clone(),
     );
@@ -1188,14 +1181,18 @@ mod tests {
     fn classify_for_temporal_marks_retryable_adapter_error() {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection timeout"));
         let activity_err = classify_for_temporal(&err, &empty_patterns());
-        assert!(matches!(activity_err, ActivityError::Retryable { .. }));
+        assert!(
+            matches!(activity_err, ActivityError::Application(ref af) if !af.is_non_retryable())
+        );
     }
 
     #[test]
     fn classify_for_temporal_marks_compilation_as_non_retryable() {
         let err = DbtTemporalError::Compilation("bad ref".into());
         let activity_err = classify_for_temporal(&err, &empty_patterns());
-        assert!(matches!(activity_err, ActivityError::NonRetryable(_)));
+        assert!(
+            matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
+        );
     }
 
     #[test]
@@ -1203,7 +1200,9 @@ mod tests {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("permission denied for table foo"));
         let patterns = compile_error_patterns(&["permission denied".to_string()]);
         let activity_err = classify_for_temporal(&err, &patterns);
-        assert!(matches!(activity_err, ActivityError::NonRetryable(_)));
+        assert!(
+            matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
+        );
     }
 
     // --- registry_non_retryable_patterns ---

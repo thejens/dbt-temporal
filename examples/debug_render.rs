@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
+        None, // defer_nodes: not using deferred state
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
     );
@@ -108,11 +109,6 @@ async fn main() -> anyhow::Result<()> {
     jinja_env.env.add_global("load_result", load_fn);
 
     // Build node context
-    let model_yml = dbt_temporal::activities::node_serialization::get_node_yml(
-        &state.resolver_state.nodes,
-        unique_id,
-        rt,
-    )?;
     let deprecated_config = dbt_temporal::activities::node_serialization::get_node_config_yml(
         &state.resolver_state.nodes,
         unique_id,
@@ -139,15 +135,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut node_context = dbt_jinja_utils::phases::run::build_run_node_context(
-        model_yml,
-        common,
-        base,
+        node,
         &deprecated_config,
         state.resolver_state.adapter_type,
         agate_table,
         &base_context,
         &io_args,
-        rt,
         sql_header,
         state.packages.clone(),
     );

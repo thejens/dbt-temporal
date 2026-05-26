@@ -32,8 +32,8 @@ pub fn build_adapter_engine(
     let stmt_splitter: Arc<dyn dbt_adapter::stmt_splitter::StmtSplitter> =
         Arc::new(NaiveStmtSplitter);
     let query_comment = QueryCommentConfig::from_query_comment(None, adapter_type, false, None);
-    let type_ops: Box<dyn dbt_adapter::sql_types::TypeOps> =
-        Box::new(SATypeOpsImpl::new(adapter_type));
+    let type_ops: Arc<dyn dbt_adapter::sql_types::TypeOps> =
+        Arc::new(SATypeOpsImpl::new(adapter_type));
     let relation_cache = Arc::new(RelationCache::default());
 
     let engine = XdbcEngine::new(

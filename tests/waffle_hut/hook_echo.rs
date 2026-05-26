@@ -44,9 +44,11 @@ impl HookEchoWorkflow {
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<serde_json::Value> {
         let input = ctx.state(|s| s.input.clone());
         if let Some(msg) = input.get("error").and_then(|v| v.as_str()) {
-            return Err(temporalio_sdk::WorkflowTermination::failed(anyhow::anyhow!(
-                "hook echo error: {msg}"
-            )));
+            return Err(temporalio_sdk::WorkflowTermination::failed_application(
+                temporalio_sdk::error::ApplicationFailure::non_retryable(anyhow::anyhow!(
+                    "hook echo error: {msg}"
+                )),
+            ));
         }
         Ok(input)
     }

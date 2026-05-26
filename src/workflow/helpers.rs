@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
 use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
+use temporalio_sdk::WorkflowTermination;
+use temporalio_sdk::error::ApplicationFailure;
 
 use crate::types::{
     DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
@@ -45,12 +47,13 @@ pub fn set_node_status(tree: &mut NodeStatusTree, unique_id: &str, status: NodeS
 pub fn upsert_node_status(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
     tree: &NodeStatusTree,
-) -> Result<(), temporalio_sdk::WorkflowTermination> {
+) -> Result<(), WorkflowTermination> {
     use temporalio_common::protos::coresdk::AsJsonPayloadExt;
     ctx.upsert_memo([(
         "node_status".to_string(),
-        tree.as_json_payload()
-            .map_err(temporalio_sdk::WorkflowTermination::failed)?,
+        tree.as_json_payload().map_err(|e| {
+            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
+        })?,
     )]);
     Ok(())
 }
@@ -73,7 +76,7 @@ pub fn upsert_memo_state(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
     tree: &NodeStatusTree,
     log_lines: &[String],
-) -> Result<(), temporalio_sdk::WorkflowTermination> {
+) -> Result<(), WorkflowTermination> {
     use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 
     let memo_log = truncate_log_for_memo(log_lines);
@@ -82,15 +85,15 @@ pub fn upsert_memo_state(
     ctx.upsert_memo([
         (
             "node_status".to_string(),
-            memo_tree
-                .as_json_payload()
-                .map_err(temporalio_sdk::WorkflowTermination::failed)?,
+            memo_tree.as_json_payload().map_err(|e| {
+                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
+            })?,
         ),
         (
             "log".to_string(),
-            memo_log
-                .as_json_payload()
-                .map_err(temporalio_sdk::WorkflowTermination::failed)?,
+            memo_log.as_json_payload().map_err(|e| {
+                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
+            })?,
         ),
     ]);
     Ok(())
@@ -815,41 +818,41 @@ mod tests {
 
     // --- short_activity_error ---
 
-    fn make_failed_error(message: &str) -> temporalio_sdk::ActivityExecutionError {
-        use temporalio_common::protos::temporal::api::failure::v1::Failure;
-        temporalio_sdk::ActivityExecutionError::Failed(Box::new(Failure {
-            message: message.to_string(),
-            ..Failure::default()
-        }))
+    fn make_serialization_error(message: &str) -> temporalio_sdk::ActivityExecutionError {
+        use temporalio_common::data_converters::PayloadConversionError;
+        temporalio_sdk::ActivityExecutionError::Serialization(
+            PayloadConversionError::EncodingError(Box::new(std::io::Error::other(
+                message.to_string(),
+            ))),
+        )
     }
 
     #[test]
     fn short_activity_error_passes_short_messages_through() {
-        let err = make_failed_error("relation does not exist");
+        let err = make_serialization_error("relation does not exist");
         let short = short_activity_error(&err);
-        // Display formats as "Activity failed: <message>" — must be unchanged for short.
-        assert_eq!(short, "Activity failed: relation does not exist");
+        // Display: "Payload conversion failed: Encoding error: <message>"
+        assert_eq!(short, "Payload conversion failed: Encoding error: relation does not exist");
     }
 
     #[test]
     fn short_activity_error_truncates_long_messages_to_200_plus_ellipsis() {
-        // Message of 250 chars → full Display is even longer; truncated form is
-        // exactly 200 chars + "..." suffix.
+        // Full display is "Payload conversion failed: Encoding error: " + message.
+        // Use a message long enough that the full string exceeds 200 chars.
         let long_msg: String = "A".repeat(250);
-        let err = make_failed_error(&long_msg);
+        let err = make_serialization_error(&long_msg);
         let short = short_activity_error(&err);
         assert!(short.ends_with("..."), "got: {short}");
-        // 200 chars before the `...` suffix.
         assert_eq!(short.len(), 203);
     }
 
     #[test]
     fn short_activity_error_does_not_truncate_at_exactly_200() {
-        // Construct a Failed with a message such that the full Display is exactly
-        // 200 chars — no truncation should be applied.
-        // Display is "Activity failed: <message>" (17 + len(message) chars).
-        let msg = "B".repeat(200 - "Activity failed: ".len());
-        let err = make_failed_error(&msg);
+        // "Payload conversion failed: Encoding error: " is 43 chars.
+        // Build message so full Display is exactly 200 chars — no truncation.
+        const PREFIX: &str = "Payload conversion failed: Encoding error: ";
+        let msg = "B".repeat(200 - PREFIX.len());
+        let err = make_serialization_error(&msg);
         let short = short_activity_error(&err);
         assert_eq!(short.len(), 200);
         assert!(!short.ends_with("..."));

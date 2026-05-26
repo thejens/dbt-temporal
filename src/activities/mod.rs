@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::error::ApplicationFailure;
 
 use crate::artifact_store::ArtifactStore;
 use crate::config::{
@@ -61,7 +62,7 @@ impl DbtActivities {
     ) -> Result<ExecutionPlan, ActivityError> {
         plan::plan_project_inner(&self, &ctx, input)
             .await
-            .map_err(|e| ActivityError::NonRetryable(e.into()))
+            .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
     }
 
     #[activity(name = "execute_node")]
@@ -81,7 +82,7 @@ impl DbtActivities {
     ) -> Result<StoreArtifactsOutput, ActivityError> {
         store_artifacts::store_artifacts_inner(&self, input)
             .await
-            .map_err(|e| ActivityError::NonRetryable(e.into()))
+            .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
     }
 
     #[activity(name = "resolve_config")]
@@ -92,7 +93,7 @@ impl DbtActivities {
         input: ResolveConfigInput,
     ) -> Result<ResolvedProjectConfig, ActivityError> {
         crate::hooks::resolve_config_impl(&self.registry, input)
-            .map_err(|e| ActivityError::NonRetryable(e.into()))
+            .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
     }
 
     #[activity(name = "run_project_hooks")]

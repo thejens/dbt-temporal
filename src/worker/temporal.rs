@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use temporalio_common::worker::{WorkerDeploymentOptions, WorkerTaskTypes};
+use temporalio_common::worker::{
+    WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
+};
 use temporalio_sdk::WorkerOptions;
 use temporalio_sdk_core::{FixedSizeSlotSupplier, TunerBuilder, Url, WorkerTuner};
 use tracing::info;
@@ -66,10 +68,21 @@ pub fn build_tls_options(
 ///
 /// Activity/workflow registrations are added by the caller on the `Worker` after creation.
 pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
-    let deployment = WorkerDeploymentOptions::from_build_id(format!(
-        "dbt-temporal-{}",
-        env!("CARGO_PKG_VERSION")
-    ));
+    let build_id = format!("dbt-temporal-{}", env!("CARGO_PKG_VERSION"));
+    // When a deployment name is configured, enable versioned task routing so Temporal
+    // can steer tasks to the correct worker version during rolling deploys.
+    let deployment = if let Some(ref name) = config.deployment_name {
+        WorkerDeploymentOptions {
+            version: WorkerDeploymentVersion {
+                deployment_name: name.clone(),
+                build_id,
+            },
+            use_worker_versioning: true,
+            default_versioning_behavior: None,
+        }
+    } else {
+        WorkerDeploymentOptions::from_build_id(build_id)
+    };
 
     let sticky_timeout = Duration::from_secs(config.sticky_queue_timeout_secs);
 
@@ -189,6 +202,7 @@ mod tests {
             max_task_queue_activities_per_second: None,
             graceful_shutdown_secs: None,
             max_cached_workflows: 1000,
+            deployment_name: None,
         }
     }
 
@@ -295,6 +309,14 @@ mod tests {
         config.temporal_tls_key = Some("/dbtt/does-not-exist/key.pem".into());
         let err = build_tls_options(&config).unwrap_err();
         assert!(err.to_string().contains("TEMPORAL_TLS_CERT"), "got: {err}");
+    }
+
+    #[test]
+    fn build_worker_options_with_deployment_name() {
+        let mut config = test_config();
+        config.deployment_name = Some("dbt-temporal-prod".into());
+        // Verify it doesn't panic — versioned deployment path is exercised.
+        let _opts = build_worker_options(&config);
     }
 
     #[test]

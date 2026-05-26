@@ -458,6 +458,9 @@ mod tests {
             fail_fast: false,
             hooks: None,
             env: BTreeMap::new(),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         }
     }
 

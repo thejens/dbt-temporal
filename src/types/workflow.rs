@@ -38,6 +38,18 @@ pub struct DbtRunInput {
     /// Each workflow gets its own isolated env — parallel workflows don't share state.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Path/URI of a previous manifest.json to defer to (--defer --state equivalent).
+    /// When set, unbuilt upstream refs resolve against the relations in this manifest
+    /// rather than failing. Typically the `manifest_path` from a prior run's artifacts.
+    #[serde(default)]
+    pub defer_manifest_ref: Option<String>,
+    /// Microbatch window start (RFC 3339). When set together with `event_time_end`,
+    /// ref() and source() calls in microbatch models are filtered to this time window.
+    #[serde(default)]
+    pub event_time_start: Option<String>,
+    /// Microbatch window end (RFC 3339, exclusive).
+    #[serde(default)]
+    pub event_time_end: Option<String>,
 }
 
 /// Output of the plan_project activity.
@@ -99,6 +111,15 @@ pub struct NodeExecutionInput {
     /// `compile` skips the materialization/execute phase and returns the compiled SQL only.
     #[serde(default = "default_command")]
     pub command: String,
+    /// Mirrors `DbtRunInput.defer_manifest_ref`.
+    #[serde(default)]
+    pub defer_manifest_ref: Option<String>,
+    /// Mirrors `DbtRunInput.event_time_start`.
+    #[serde(default)]
+    pub event_time_start: Option<String>,
+    /// Mirrors `DbtRunInput.event_time_end`.
+    #[serde(default)]
+    pub event_time_end: Option<String>,
 }
 
 /// Phase of a `dbt_project.yml` lifecycle hook.
@@ -234,6 +255,12 @@ pub struct CommandMemo {
     pub fail_fast: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_manifest_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time_end: Option<String>,
 }
 
 impl From<&DbtRunInput> for CommandMemo {
@@ -247,6 +274,9 @@ impl From<&DbtRunInput> for CommandMemo {
             full_refresh: input.full_refresh,
             fail_fast: input.fail_fast,
             vars: input.vars.clone(),
+            defer_manifest_ref: input.defer_manifest_ref.clone(),
+            event_time_start: input.event_time_start.clone(),
+            event_time_end: input.event_time_end.clone(),
         }
     }
 }
@@ -324,6 +354,9 @@ mod tests {
             fail_fast: false,
             hooks: None,
             env: BTreeMap::from([("PG_PORT".into(), "5433".into())]),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let json = serde_json::to_string(&input)?;
         let back: DbtRunInput = serde_json::from_str(&json)?;
@@ -390,6 +423,9 @@ mod tests {
             fail_fast: true,
             hooks: None,
             env: BTreeMap::new(),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let memo = CommandMemo::from(&input);
         assert_eq!(memo.command, "build");
@@ -413,6 +449,9 @@ mod tests {
             full_refresh: false,
             fail_fast: false,
             vars: BTreeMap::new(),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let json = serde_json::to_string(&memo)?;
         assert!(!json.contains("vars"));

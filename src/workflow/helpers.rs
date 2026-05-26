@@ -617,6 +617,9 @@ mod tests {
             fail_fast: false,
             hooks: None,
             env: BTreeMap::from([("API_TOKEN".into(), "secret-123".into())]),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let env = build_effective_env(&input);
         assert_eq!(env.get("API_TOKEN").map(String::as_str), Some("secret-123"));
@@ -638,6 +641,9 @@ mod tests {
             fail_fast: false,
             hooks: None,
             env: BTreeMap::new(),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let env = build_effective_env(&input);
         let underscore = env
@@ -666,6 +672,9 @@ mod tests {
             fail_fast: false,
             hooks: None,
             env: BTreeMap::from([("_".into(), "garbage caller value".into())]),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
         };
         let env = build_effective_env(&input);
         let underscore = env

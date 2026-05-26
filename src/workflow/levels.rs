@@ -195,6 +195,9 @@ async fn execute_one_level(
             env: state.effective_env.clone(),
             target: state.input.target.clone(),
             command: state.input.command.clone(),
+            defer_manifest_ref: state.input.defer_manifest_ref.clone(),
+            event_time_start: state.input.event_time_start.clone(),
+            event_time_end: state.input.event_time_end.clone(),
         };
 
         // Per-node labelling in Temporal UI: activity_id for event details,

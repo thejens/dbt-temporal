@@ -274,6 +274,7 @@ pub fn bigquery_test_config_with_project_dir(
         max_task_queue_activities_per_second: None,
         graceful_shutdown_secs: None,
         max_cached_workflows: 1000,
+        deployment_name: None,
     })
 }
 
@@ -322,6 +323,9 @@ pub fn make_input(
         fail_fast,
         hooks: None,
         env: std::collections::BTreeMap::default(),
+        defer_manifest_ref: None,
+        event_time_start: None,
+        event_time_end: None,
     }
 }
 

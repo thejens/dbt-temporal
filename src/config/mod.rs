@@ -66,6 +66,12 @@ pub struct DbtTemporalConfig {
     /// Number of workflows to keep cached on sticky queues (LRU eviction).
     /// Controlled by `WORKER_MAX_CACHED_WORKFLOWS` (default: 1000).
     pub max_cached_workflows: usize,
+    /// Temporal worker deployment name for versioned routing (optional).
+    ///
+    /// When set, the worker registers under `{deployment_name}/{version}` so
+    /// Temporal can route tasks to the correct worker version during rolling
+    /// deploys. Set to e.g. `dbt-temporal-prod`. Controlled by `TEMPORAL_DEPLOYMENT_NAME`.
+    pub deployment_name: Option<String>,
 }
 
 /// Controls how the worker limits concurrent task execution.
@@ -164,6 +170,7 @@ impl DbtTemporalConfig {
                 "WORKER_GRACEFUL_SHUTDOWN_SECS",
             )?,
             max_cached_workflows: tuning::parse_env_usize("WORKER_MAX_CACHED_WORKFLOWS", 1000)?,
+            deployment_name: std::env::var("TEMPORAL_DEPLOYMENT_NAME").ok(),
         })
     }
 }
@@ -202,6 +209,7 @@ mod tests {
         "WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND",
         "WORKER_GRACEFUL_SHUTDOWN_SECS",
         "WORKER_MAX_CACHED_WORKFLOWS",
+        "TEMPORAL_DEPLOYMENT_NAME",
     ];
 
     fn make_project_dir() -> tempfile::TempDir {
@@ -409,6 +417,36 @@ mod tests {
                 Ok(())
             },
         )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_reads_deployment_name() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![("TEMPORAL_DEPLOYMENT_NAME", Some("dbt-temporal-prod"))],
+            ),
+            || {
+                let cfg = DbtTemporalConfig::from_env()?;
+                assert_eq!(cfg.deployment_name.as_deref(), Some("dbt-temporal-prod"));
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_deployment_name_absent_is_none() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(&env_with_project(project_str, vec![]), || {
+            let cfg = DbtTemporalConfig::from_env()?;
+            assert!(cfg.deployment_name.is_none());
+            Ok(())
+        })
         .unwrap();
     }
 

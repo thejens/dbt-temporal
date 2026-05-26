@@ -109,6 +109,7 @@ mod tests {
             max_task_queue_activities_per_second: None,
             graceful_shutdown_secs: None,
             max_cached_workflows: 1000,
+            deployment_name: None,
         }
     }
 

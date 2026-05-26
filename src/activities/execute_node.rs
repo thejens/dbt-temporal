@@ -417,12 +417,37 @@ async fn execute_node_inner(
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
+    // Load deferred state when the caller provided a previous manifest URI.
+    // The deferred nodes let ref() resolve against production relations for
+    // nodes that haven't been built in the current run.
+    let defer_nodes = if let Some(ref manifest_ref) = input.defer_manifest_ref {
+        let store = activities
+            .artifact_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("defer_manifest_ref requires artifact storage to be configured (set ARTIFACT_STORE and WRITE_ARTIFACTS)"))?;
+        let bytes = store
+            .retrieve(manifest_ref)
+            .await
+            .with_context(|| format!("loading defer manifest from {manifest_ref}"))?;
+        let manifest: dbt_schemas::schemas::manifest::DbtManifest =
+            serde_json::from_slice(&bytes).context("parsing defer manifest JSON")?;
+        let quoting = dbt_schemas::schemas::common::DbtQuoting {
+            database: Some(false),
+            schema: Some(true),
+            identifier: Some(true),
+            snowflake_ignore_case: None,
+        };
+        Some(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting))
+    } else {
+        None
+    };
+
     // Build the base context for compile+run phase.
     let mut base_context = dbt_jinja_utils::phases::build_compile_and_run_base_context(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
-        None, // defer_nodes: not using deferred state
+        defer_nodes.as_ref(),
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
     );
@@ -513,6 +538,64 @@ async fn execute_node_inner(
         "store_raw_result".to_owned(),
         minijinja::Value::from_function(result_store.store_raw_result()),
     );
+
+    // Microbatch: replace ref() and source() with time-window-aware versions when
+    // event_time_start/end are provided. The materialisation template uses these to
+    // filter upstream models/sources to the batch window. Dependency validation is
+    // skipped (new_unvalidated) because the node was already validated at planning.
+    if let (Some(start_str), Some(end_str)) = (&input.event_time_start, &input.event_time_end) {
+        let event_time_start: chrono::DateTime<chrono::Utc> = start_str
+            .parse()
+            .with_context(|| format!("parsing event_time_start: {start_str}"))?;
+        let event_time_end: chrono::DateTime<chrono::Utc> = end_str
+            .parse()
+            .with_context(|| format!("parsing event_time_end: {end_str}"))?;
+
+        let event_time_mapping = Arc::new(
+            state
+                .resolver_state
+                .nodes
+                .models
+                .iter()
+                .filter_map(|(uid, model)| {
+                    model
+                        .deprecated_config
+                        .event_time
+                        .clone()
+                        .map(|col| (uid.clone(), col))
+                })
+                .collect::<BTreeMap<_, _>>(),
+        );
+
+        let microbatch_ctx = dbt_jinja_utils::phases::MicrobatchRefContext::new(
+            event_time_start,
+            event_time_end,
+            Arc::clone(&event_time_mapping),
+        );
+        let mb_ref = dbt_jinja_utils::phases::RefFunction::new_with_microbatch_context(
+            Arc::clone(&state.resolver_state.node_resolver),
+            common.package_name.clone(),
+            Arc::clone(&state.resolver_state.runtime_config),
+            dbt_jinja_utils::phases::compile::DependencyValidationConfig::new_unvalidated(),
+            microbatch_ctx.clone(),
+            unique_id.clone(),
+        );
+        let mb_source = dbt_jinja_utils::phases::SourceFunction::new_with_microbatch_context(
+            Arc::clone(&state.resolver_state.node_resolver),
+            common.package_name.clone(),
+            microbatch_ctx,
+        );
+        node_context.insert("ref".to_string(), minijinja::Value::from_object(mb_ref));
+        node_context.insert("source".to_string(), minijinja::Value::from_object(mb_source));
+        node_context.insert(
+            "__dbt_microbatch_event_time_start__".to_string(),
+            minijinja::Value::from(event_time_start.to_rfc3339()),
+        );
+        node_context.insert(
+            "__dbt_microbatch_event_time_end__".to_string(),
+            minijinja::Value::from(event_time_end.to_rfc3339()),
+        );
+    }
 
     // Inject TARGET_PACKAGE_NAME — required by ConfiguredVar (the var() function) to resolve
     // project-scoped variables. The compile phase sets this but build_run_node_context doesn't.

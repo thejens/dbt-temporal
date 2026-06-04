@@ -313,10 +313,15 @@ pub async fn initialize_project(
     let token = cts.token();
 
     // Load the project: reads dbt_project.yml, profiles.yml, packages, etc.
-    let dbt_state =
-        dbt_loader::load(&load_args, std::borrow::Cow::Borrowed(&invocation_args), None, &token)
-            .await
-            .context("dbt load")?;
+    let dbt_state = dbt_loader::load(
+        &load_args,
+        std::borrow::Cow::Borrowed(&invocation_args),
+        None,
+        &token,
+        Arc::new(dbt_loader::loader_hooks::NoOpLoaderHooks),
+    )
+    .await
+    .context("dbt load")?;
     let dbt_state = Arc::new(dbt_state);
 
     let project_name = dbt_state
@@ -345,6 +350,7 @@ pub async fn initialize_project(
         PatternedDanglingSources::default(),
         &token,
         listener_factory,
+        Arc::new(dbt_parser::resolver_hooks::NoOpResolverHooks),
     )
     .await
     .context("dbt resolve")?;

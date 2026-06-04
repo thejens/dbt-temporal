@@ -21,19 +21,19 @@ temporalio-client = "0.4.0"
 temporalio-common = "0.4.0"
 temporalio-macros = "0.4.0"
 
-# dbt-fusion (pinned to main, 2026-04-25)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "346087d39ca9eab6d169b39d2907b541fa13ecdb" }
+# dbt-fusion (pinned to main, 2026-06-04)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
 dbt-yaml = "0.9.5"
 
 # Standard

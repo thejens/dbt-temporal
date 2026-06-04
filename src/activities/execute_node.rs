@@ -662,6 +662,7 @@ async fn execute_node_inner(
                 &jinja_env,
                 &node_context,
                 &[],
+                &[],
                 &render_filename,
             )
             .map_err(|e| {

@@ -168,11 +168,17 @@ fn persist_ephemeral_chain(
                 raw_path.display()
             ))
         })?;
-        let compiled =
-            render_sql_with_listeners(&raw_sql, jinja_env, node_context, NO_LISTENERS, &raw_path)
-                .map_err(|e| {
-                DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e:#}"))
-            })?;
+        let compiled = render_sql_with_listeners(
+            &raw_sql,
+            jinja_env,
+            node_context,
+            NO_LISTENERS,
+            &[],
+            &raw_path,
+        )
+        .map_err(|e| {
+            DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e:#}"))
+        })?;
 
         // Recurse first so this ephemeral's deps land on disk before we persist it.
         persist_ephemeral_chain(

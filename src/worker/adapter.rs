@@ -15,8 +15,8 @@ pub fn build_adapter_engine(
     use dbt_adapter::cache::RelationCache;
     use dbt_adapter::engine::XdbcEngine;
     use dbt_adapter::engine::query_comment::QueryCommentConfig;
-    use dbt_adapter::sql_types::SATypeOpsImpl;
-    use dbt_adapter::stmt_splitter::NaiveStmtSplitter;
+    use dbt_adapter::sql_types::DefaultTypeOps;
+    use dbt_adapter::stmt_splitter::DefaultStmtSplitter;
 
     let adapter_type = db_config.adapter_type();
 
@@ -30,10 +30,10 @@ pub fn build_adapter_engine(
     let adapter_config = dbt_auth::AdapterConfig::new(mapping);
 
     let stmt_splitter: Arc<dyn dbt_adapter::stmt_splitter::StmtSplitter> =
-        Arc::new(NaiveStmtSplitter);
+        Arc::new(DefaultStmtSplitter);
     let query_comment = QueryCommentConfig::from_query_comment(None, adapter_type, false, None);
     let type_ops: Arc<dyn dbt_adapter::sql_types::TypeOps> =
-        Arc::new(SATypeOpsImpl::new(adapter_type));
+        Arc::new(DefaultTypeOps::new(adapter_type));
     let relation_cache = Arc::new(RelationCache::default());
 
     let engine = XdbcEngine::new(

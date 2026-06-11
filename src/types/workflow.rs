@@ -50,6 +50,13 @@ pub struct DbtRunInput {
     /// Microbatch window end (RFC 3339, exclusive).
     #[serde(default)]
     pub event_time_end: Option<String>,
+    /// Path/URI of a previous run's `run_results.json` (e.g. the
+    /// `run_results_path` from that run's artifacts). When set, the plan keeps
+    /// only nodes that did NOT succeed in that run (error/skipped/cancelled) —
+    /// the equivalent of `dbt retry` when started with the same
+    /// select/exclude as the original run.
+    #[serde(default)]
+    pub retry_from: Option<String>,
 }
 
 /// Output of the plan_project activity.
@@ -399,6 +406,7 @@ mod tests {
             defer_manifest_ref: None,
             event_time_start: None,
             event_time_end: None,
+            retry_from: None,
         };
         let json = serde_json::to_string(&input)?;
         let back: DbtRunInput = serde_json::from_str(&json)?;
@@ -468,6 +476,7 @@ mod tests {
             defer_manifest_ref: None,
             event_time_start: None,
             event_time_end: None,
+            retry_from: None,
         };
         let memo = CommandMemo::from(&input);
         assert_eq!(memo.command, "build");

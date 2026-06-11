@@ -491,6 +491,7 @@ pub fn make_input(
         defer_manifest_ref: None,
         event_time_start: None,
         event_time_end: None,
+        retry_from: None,
     }
 }
 
@@ -513,6 +514,7 @@ pub fn make_input_with_env(
         defer_manifest_ref: None,
         event_time_start: None,
         event_time_end: None,
+        retry_from: None,
     }
 }
 

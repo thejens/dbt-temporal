@@ -515,6 +515,7 @@ mod tests {
                 defer_manifest_ref: None,
                 event_time_start: None,
                 event_time_end: None,
+                retry_from: None,
             },
             plan: None,
             output: None,

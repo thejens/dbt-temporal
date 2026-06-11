@@ -249,3 +249,16 @@ Both `node_status` and `log` are truncated to stay within Temporal memo size lim
 ### Per-Node Activity Names
 
 Each dbt node uses the `summary` field on the Temporal activity to display a descriptive label in the UI Gantt chart (e.g. `model:stg_customers`, `test:not_null_orders_id`, `seed:raw_orders`). The `activity_id` is also set to the same label for identification in event details.
+
+### OpenTelemetry Export (dbt traces & logs)
+
+`DBT_EXPORT_TO_OTLP=1` replaces the default console-logging stack with dbt-fusion's own telemetry pipeline: structured dbt events (adapter `QueryExecuted`, connection-pool waits, …) export as OTEL traces and logs over OTLP/HTTP, alongside console output.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DBT_EXPORT_TO_OTLP` | off | Set to `1` to enable the dbt telemetry pipeline with OTLP export. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Standard OTEL collector endpoint — must accept OTLP over **HTTP** (port 4318). Per-signal overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`) also work. Without an endpoint the OTLP layer stays disabled. |
+| `DBT_LOG_LEVEL` | `info` | Console verbosity in OTLP mode (`error`/`warn`/`info`/`debug`/`trace`). The default stack uses `RUST_LOG` instead. |
+| `DBT_LOG_FORMAT` | `default` | Console format in OTLP mode: `text`, `json`, `default`, or `otel`. Use `json` for log collectors. |
+
+Trade-offs in OTLP mode: console output is rendered by dbt's log consumer (not `tracing_subscriber::fmt`), so `RUST_LOG` per-module directives don't apply. Worker metrics are configured separately via `TEMPORAL_METRICS_EXPORTER` (see Worker Tuning) — note Temporal metrics default to OTLP/**gRPC** (port 4317) while dbt traces use OTLP/**HTTP** (port 4318); a standard otel-collector listens on both.

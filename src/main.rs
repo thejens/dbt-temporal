@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod activities;
 mod artifact_store;
@@ -12,13 +11,14 @@ mod hooks;
 mod model_store;
 mod project_registry;
 mod telemetry_compat;
+mod tracing_setup;
 mod types;
 mod worker;
 mod worker_state;
 mod workflow;
 
 #[tokio::main]
-#[allow(clippy::large_futures, clippy::unwrap_used)]
+#[allow(clippy::large_futures)]
 async fn main() -> Result<()> {
     // `dbt-temporal healthcheck` — exit 0 if HEALTH_FILE is fresh, 1 otherwise.
     // Designed for use as a Kubernetes exec liveness probe (no shell needed).
@@ -32,24 +32,25 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Initialize tracing with a compatibility layer for dbt-fusion's telemetry.
-    // dbt-fusion expects TelemetryAttributes in span extensions; without this layer,
-    // adapter calls panic with "Missing span event attributes".
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
-                // The Rust SDK doesn't implement query handlers — it logs an error for
-                // every query (e.g. __stack_trace from the Temporal UI) and drops it.
-                // Suppress the module entirely; its other warnings (WFT failures, panics)
-                // are already surfaced in the Temporal UI.
-                .add_directive("temporalio_sdk::workflow_future=off".parse().unwrap()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .with(telemetry_compat::DbtTelemetryCompatLayer)
-        .init();
+    // Default stack, or dbt-fusion's telemetry pipeline with OTLP export when
+    // DBT_EXPORT_TO_OTLP=1 (see tracing_setup for the trade-offs).
+    let telemetry_handle = tracing_setup::init().context("initializing tracing")?;
 
     let config = config::DbtTemporalConfig::from_env().context("configuration error")?;
 
-    worker::run_worker(config).await
+    let result = worker::run_worker(config).await;
+
+    // Flush buffered OTLP batches before the process exits; telemetry loss on
+    // shutdown is silent otherwise. eprintln because the telemetry pipeline
+    // itself is what failed here — tracing output may no longer reach anything.
+    #[allow(clippy::print_stderr)]
+    if let Some(handle) = telemetry_handle
+        && let Err(errors) = handle.shutdown_once()
+    {
+        for e in errors {
+            eprintln!("telemetry shutdown error: {e}");
+        }
+    }
+
+    result
 }

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::Context as _;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::warn;
@@ -92,6 +93,39 @@ pub async fn plan_project_inner(
         anyhow::bail!("no nodes matched after applying selectors");
     }
 
+    // Retry-from-failure: narrow the selection to nodes that did not succeed
+    // in a previous run. Skipped nodes are included because they were blocked
+    // by failures, mirroring `dbt retry`.
+    let selected_ids = if let Some(ref retry_ref) = input.retry_from {
+        let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "retry_from requires artifact storage to be configured \
+                 (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+            )
+        })?;
+        let bytes = artifact_store
+            .retrieve(retry_ref)
+            .await
+            .with_context(|| format!("loading previous run_results from {retry_ref}"))?;
+        let retry_ids = parse_retry_node_ids(&bytes)?;
+        let filtered: Vec<String> = selected_ids
+            .into_iter()
+            .filter(|id| retry_ids.contains(id))
+            .collect();
+        anyhow::ensure!(
+            !filtered.is_empty(),
+            "retry_from: every selected node succeeded in the previous run — nothing to retry"
+        );
+        warn!(
+            retrying = filtered.len(),
+            from = %retry_ref,
+            "retry_from: narrowed plan to nodes that did not succeed previously"
+        );
+        filtered
+    } else {
+        selected_ids
+    };
+
     // Compute topological levels from the dependency graph.
     // Tests act as gates: non-test downstream nodes must wait for all tests on their
     // upstream model to pass before starting. If a test fails, downstreams are skipped.
@@ -160,6 +194,32 @@ pub async fn plan_project_inner(
         has_on_run_start,
         has_on_run_end,
     })
+}
+
+/// Node ids eligible for retry, parsed from a previous `run_results.json`:
+/// everything whose status is not `success`. Tolerates extra fields so it can
+/// read both our artifacts and dbt-core-shaped run results.
+fn parse_retry_node_ids(bytes: &[u8]) -> Result<std::collections::BTreeSet<String>, anyhow::Error> {
+    use crate::types::NodeStatus;
+
+    #[derive(serde::Deserialize)]
+    struct RunResults {
+        results: Vec<ResultEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResultEntry {
+        unique_id: String,
+        status: NodeStatus,
+    }
+
+    let parsed: RunResults =
+        serde_json::from_slice(bytes).map_err(|e| anyhow::anyhow!("parsing run_results: {e}"))?;
+    Ok(parsed
+        .results
+        .into_iter()
+        .filter(|r| r.status != NodeStatus::Success)
+        .map(|r| r.unique_id)
+        .collect())
 }
 
 /// True if `raw_code` is the body of a generic-test macro definition rather than
@@ -350,6 +410,34 @@ mod tests {
         // Empty / whitespace-only.
         assert!(!raw_code_is_generic_test_macro_def(""));
         assert!(!raw_code_is_generic_test_macro_def("   \n  "));
+    }
+
+    // --- parse_retry_node_ids ---
+
+    #[test]
+    fn parse_retry_node_ids_keeps_non_success_only() -> anyhow::Result<()> {
+        let json = serde_json::json!({
+            "metadata": {"invocation_id": "x"},
+            "results": [
+                {"unique_id": "model.p.ok", "status": "success", "execution_time": 1.0},
+                {"unique_id": "model.p.bad", "status": "error", "execution_time": 0.5},
+                {"unique_id": "model.p.blocked", "status": "skipped", "execution_time": 0.0},
+                {"unique_id": "model.p.killed", "status": "cancelled", "execution_time": 0.0},
+            ],
+        });
+        let ids = parse_retry_node_ids(serde_json::to_vec(&json)?.as_slice())?;
+        assert_eq!(ids.len(), 3);
+        assert!(!ids.contains("model.p.ok"));
+        assert!(ids.contains("model.p.bad"));
+        assert!(ids.contains("model.p.blocked"));
+        assert!(ids.contains("model.p.killed"));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_retry_node_ids_rejects_garbage() {
+        assert!(parse_retry_node_ids(b"not json").is_err());
+        assert!(parse_retry_node_ids(b"{}").is_err());
     }
 
     // --- build_node_info ---

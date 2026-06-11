@@ -242,3 +242,106 @@ models:
     std::fs::remove_dir_all(&fixture_dir).ok();
     result
 }
+
+/// Retry-from-failure: a second run with `retry_from` pointing at the failed
+/// run's `run_results.json` plans only the nodes that did not succeed.
+///
+/// Run 1 (fail_fast=false): stg_customers=error, customers=skipped, the other
+/// three models succeed. Run 2 with `retry_from` must re-plan exactly the
+/// error+skipped pair and leave the succeeded models untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn test_retry_from_failure() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+
+    let fixture_dir = copy_fixture("waffle_hut")?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+    let broken_sql = "select * from {{ ref('totally_nonexistent_model') }}";
+    std::fs::write(fixture_dir.join("models/staging/stg_customers.sql"), broken_sql)
+        .context("writing broken model")?;
+
+    let artifact_dir = tempfile::tempdir()?;
+    let mut config = test_config(infra, &fixture_dir)?;
+    config.write_artifacts = true;
+    config.artifact_store = artifact_dir.path().to_string_lossy().into_owned();
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            result = worker.run() => result,
+            _ = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let mut client = connect_client(&infra.temporal_addr).await?;
+
+            // Run 1: partial failure with artifacts written.
+            let node_status = run_dbt_workflow_expect_failure(
+                &mut client,
+                &task_queue,
+                make_input("run", None, None, false),
+            )
+            .await?;
+            assert_eq!(node_status.nodes.len(), 5, "run 1 plans all 5 models");
+
+            // Locate run 1's run_results.json (exactly one run so far).
+            let run_results: Vec<_> = std::fs::read_dir(artifact_dir.path())?
+                .filter_map(std::result::Result::ok)
+                .map(|e| e.path().join("run_results.json"))
+                .filter(|p| p.exists())
+                .collect();
+            assert_eq!(run_results.len(), 1, "run 1 should have written run_results.json");
+            let run_results_path = run_results[0].to_string_lossy().into_owned();
+
+            // Run 2: retry only what didn't succeed.
+            let mut input = make_input("run", None, None, false);
+            input.retry_from = Some(run_results_path);
+            let node_status =
+                run_dbt_workflow_expect_failure(&mut client, &task_queue, input).await?;
+
+            tracing::info!("retry run node statuses:");
+            for (id, status) in &node_status.nodes {
+                tracing::info!("  {id} -> {status:?}");
+            }
+
+            assert_eq!(node_status.nodes.len(), 2, "retry plans only the error + skipped nodes");
+            assert_eq!(
+                node_status
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| id.ends_with(".stg_customers"))
+                    .map(|(_, s)| *s),
+                Some(NodeStatus::Error),
+                "broken model fails again on retry"
+            );
+            assert_eq!(
+                node_status
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| id.ends_with(".customers"))
+                    .map(|(_, s)| *s),
+                Some(NodeStatus::Skipped),
+                "downstream of the broken model is skipped again"
+            );
+
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+    result
+}

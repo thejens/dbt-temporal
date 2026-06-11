@@ -21,19 +21,19 @@ temporalio-client = "0.4.0"
 temporalio-common = "0.4.0"
 temporalio-macros = "0.4.0"
 
-# dbt-fusion (pinned to main, 2026-06-04)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-fusion", rev = "9977b6cbb1b761065536300037560d8e3c037011" }
+# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-06-11)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-xdbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "2928c13ace5c3596669c264ebda5582b0a745376" }
 dbt-yaml = "0.9.5"
 
 # Standard
@@ -57,7 +57,7 @@ tempfile = "3"
 prost-types = { version = "0.7", package = "prost-wkt-types" }
 
 # Artifact stores (feature-gated)
-object_store = { version = "0.11", optional = true }
+object_store = { version = "0.12", optional = true }
 regex = "1.12.3"
 
 dbt-antlr4 = "1"
@@ -69,8 +69,8 @@ aws = ["object_store/aws"]
 bigquery-tests = []
 
 [dev-dependencies]
-testcontainers = { version = "0.26", features = ["watchdog"] }
-testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
+testcontainers = { version = "0.27", features = ["watchdog"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"

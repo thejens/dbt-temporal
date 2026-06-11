@@ -78,7 +78,7 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 
 All fields are optional. `command` defaults to `build`. `project` is auto-resolved when only one project is loaded.
 
-Additional inputs: `defer_manifest_ref` (defer unbuilt refs to a previous manifest, `--defer --state` equivalent), `event_time_start`/`event_time_end` (microbatch window), and `retry_from` — point it at a previous run's `run_results.json` artifact to re-run only the nodes that did not succeed (the `dbt retry` equivalent; start it with the same `select`/`exclude` as the original run).
+Additional inputs: `defer_manifest_ref` (defer unbuilt refs to a previous manifest, `--defer --state` equivalent), `event_time_start`/`event_time_end` (microbatch window), `retry_from` — point it at a previous run's `run_results.json` artifact to re-run only the nodes that did not succeed (the `dbt retry` equivalent; start it with the same `select`/`exclude` as the original run) — and `state_manifest_ref`, which enables `state:modified` / `state:new` select methods against a previous `manifest.json` artifact (the `--state` equivalent; slim CI pattern: `"select": "state:modified+", "state_manifest_ref": "<prod manifest>"`, often combined with `defer_manifest_ref` pointing at the same manifest).
 
 While a run executes, query live progress and toggle fail-fast without restarting:
 

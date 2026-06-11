@@ -438,3 +438,110 @@ async fn test_env_var_in_config_schema_rejected() -> Result<()> {
     std::fs::remove_dir_all(&fixture_dir).ok();
     result
 }
+
+/// state:modified selection against a previous run's manifest.
+///
+/// Run 1 (worker A) writes artifacts including manifest.json. The fixture is
+/// then edited and a fresh worker (B) loads it; run 2 selects
+/// `state:modified` with `state_manifest_ref` pointing at run 1's manifest
+/// and must plan exactly the edited model.
+#[tokio::test(flavor = "current_thread")]
+async fn test_state_modified_selector() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = copy_fixture("waffle_hut")?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+
+    let artifact_dir = tempfile::tempdir()?;
+    let mut config = test_config(infra, &fixture_dir)?;
+    config.write_artifacts = true;
+    config.artifact_store = artifact_dir.path().to_string_lossy().into_owned();
+    let task_queue = config.temporal_task_queue.clone();
+
+    // --- Run 1: baseline, full project, manifests written ---
+    let manifest_path = {
+        let mut worker = dbt_temporal::worker::build_worker(&config)
+            .await
+            .context("building worker A")?;
+        let local = tokio::task::LocalSet::new();
+        let abort = std::sync::Arc::new(tokio::sync::Notify::new());
+        let abort_rx = std::sync::Arc::clone(&abort);
+        let _task = local.spawn_local(async move {
+            tokio::select! {
+                result = worker.run() => result,
+                _ = abort_rx.notified() => Ok(()),
+            }
+        });
+        let manifest_path: Result<String> = local
+            .run_until(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let client = connect_client(&infra.temporal_addr).await?;
+                let run =
+                    run_dbt_workflow(&client, &task_queue, make_input("run", None, None, false))
+                        .await?;
+                assert!(run.output.success, "baseline run should succeed");
+                let artifacts = run
+                    .output
+                    .artifacts
+                    .ok_or_else(|| anyhow::anyhow!("baseline run should write artifacts"))?;
+                Ok(artifacts.manifest_path)
+            })
+            .await;
+        abort.notify_one();
+        manifest_path?
+    };
+
+    // --- Edit one model, then run 2 on a fresh worker ---
+    let edited = fixture_dir.join("models/staging/stg_payments.sql");
+    let original = std::fs::read_to_string(&edited)?;
+    std::fs::write(&edited, format!("{original}\n-- edited for state:modified test\n"))?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+
+    let mut config = test_config(infra, &fixture_dir)?;
+    config.write_artifacts = true;
+    config.artifact_store = artifact_dir.path().to_string_lossy().into_owned();
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker B")?;
+    let local = tokio::task::LocalSet::new();
+    let abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let abort_rx = std::sync::Arc::clone(&abort);
+    let _task = local.spawn_local(async move {
+        tokio::select! {
+            result = worker.run() => result,
+            _ = abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let client = connect_client(&infra.temporal_addr).await?;
+
+            let mut input = make_input("run", Some("state:modified"), None, false);
+            input.state_manifest_ref = Some(manifest_path.clone());
+            let run = run_dbt_workflow(&client, &task_queue, input).await?;
+
+            assert!(run.output.success, "state:modified run should succeed");
+            let ids: Vec<&str> = run
+                .output
+                .node_results
+                .iter()
+                .map(|r| r.unique_id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                vec!["model.waffle_hut.stg_payments"],
+                "only the edited model is selected"
+            );
+            Ok(())
+        })
+        .await;
+
+    abort.notify_one();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+    result
+}

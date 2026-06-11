@@ -9,12 +9,89 @@ use dbt_schemas::schemas::nodes::InternalDbtNodeAttributes;
 
 use super::dag::build_dependency_map;
 
+/// State-comparison sets backing `state:` selector methods.
+///
+/// Built by comparing the current project against a previous manifest.json
+/// (`DbtRunInput.state_manifest_ref`).
+#[derive(Debug, Default, Clone)]
+pub struct StateSelector {
+    /// Nodes absent from the previous manifest.
+    pub new: BTreeSet<String>,
+    /// New nodes plus nodes whose raw_code / checksum changed.
+    pub modified: BTreeSet<String>,
+}
+
+impl StateSelector {
+    /// Compare current nodes against a previous dbt manifest.
+    ///
+    /// A node is modified when it is new, or when its verbatim `raw_code`
+    /// differs, or (when raw code is unavailable on either side) its file
+    /// checksum differs. Nodes where neither comparison is possible count as
+    /// modified — rebuilding too much is safer than silently skipping a
+    /// changed node.
+    pub fn from_previous_manifest(nodes: &Nodes, previous_manifest: &serde_json::Value) -> Self {
+        let empty = serde_json::Map::new();
+        let prev_nodes = previous_manifest
+            .get("nodes")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or(&empty);
+
+        let mut state = Self::default();
+        for (unique_id, node) in nodes.iter() {
+            let Some(prev) = prev_nodes.get(unique_id) else {
+                state.new.insert(unique_id.clone());
+                state.modified.insert(unique_id.clone());
+                continue;
+            };
+            if node_is_modified(node, prev) {
+                state.modified.insert(unique_id.clone());
+            }
+        }
+        state
+    }
+}
+
+/// Compare one current node against its previous-manifest entry.
+fn node_is_modified(node: &dyn InternalDbtNodeAttributes, prev: &serde_json::Value) -> bool {
+    use dbt_schemas::schemas::common::DbtChecksum;
+
+    if let (Some(cur_raw), Some(prev_raw)) = (
+        node.common().raw_code.as_deref(),
+        prev.get("raw_code").and_then(serde_json::Value::as_str),
+    ) {
+        return cur_raw != prev_raw;
+    }
+
+    let cur_checksum = match &node.common().checksum {
+        DbtChecksum::String(s) => s.clone(),
+        DbtChecksum::Object(o) => o.checksum.clone(),
+    };
+    let prev_checksum = match prev.get("checksum") {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Object(o)) => o
+            .get("checksum")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from),
+        _ => None,
+    };
+    match prev_checksum {
+        // Empty checksums (e.g. generic tests use FileHash.empty()) carry no
+        // signal — treat as modified rather than silently matching.
+        Some(prev_cs) if !prev_cs.is_empty() && !cur_checksum.is_empty() => cur_checksum != prev_cs,
+        _ => true,
+    }
+}
+
 /// Apply --select and --exclude filters to a list of node IDs.
+///
+/// `state` backs `state:modified` / `state:new` methods; selectors using them
+/// match nothing when it is `None` (the planner validates this upfront).
 pub fn apply_selectors(
     mut selected_ids: Vec<String>,
     nodes: &Nodes,
     select: Option<&str>,
     exclude: Option<&str>,
+    state: Option<&StateSelector>,
 ) -> Result<Vec<String>, anyhow::Error> {
     if select.is_none() && exclude.is_none() {
         return Ok(selected_ids);
@@ -29,7 +106,7 @@ pub fn apply_selectors(
         let tokens: Vec<String> = sel.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
             let expr = parse_model_specifiers(&tokens).context("invalid --select")?;
-            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
+            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
             selected_ids.retain(|uid| matched.contains(uid.as_str()));
         }
     }
@@ -38,7 +115,7 @@ pub fn apply_selectors(
         let tokens: Vec<String> = excl.split_whitespace().map(String::from).collect();
         if !tokens.is_empty() {
             let expr = parse_model_specifiers(&tokens).context("invalid --exclude")?;
-            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, &expr);
+            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
             selected_ids.retain(|uid| !matched.contains(uid.as_str()));
         }
     }
@@ -65,14 +142,17 @@ fn resolve_expression(
     nodes: &Nodes,
     deps: &BTreeMap<String, BTreeSet<String>>,
     reverse_deps: &BTreeMap<String, BTreeSet<String>>,
+    state: Option<&StateSelector>,
     expr: &SelectExpression,
 ) -> BTreeSet<String> {
     match expr {
-        SelectExpression::Atom(criteria) => resolve_criteria(nodes, deps, reverse_deps, criteria),
+        SelectExpression::Atom(criteria) => {
+            resolve_criteria(nodes, deps, reverse_deps, state, criteria)
+        }
         SelectExpression::And(exprs) => {
             let mut result: Option<BTreeSet<String>> = None;
             for e in exprs {
-                let matched = resolve_expression(nodes, deps, reverse_deps, e);
+                let matched = resolve_expression(nodes, deps, reverse_deps, state, e);
                 result = Some(match result {
                     Some(acc) => acc.intersection(&matched).cloned().collect(),
                     None => matched,
@@ -83,13 +163,13 @@ fn resolve_expression(
         SelectExpression::Or(exprs) => {
             let mut result = BTreeSet::new();
             for e in exprs {
-                result.extend(resolve_expression(nodes, deps, reverse_deps, e));
+                result.extend(resolve_expression(nodes, deps, reverse_deps, state, e));
             }
             result
         }
         SelectExpression::Exclude(inner) => {
             // For exclude, we collect what matches so the caller can subtract.
-            resolve_expression(nodes, deps, reverse_deps, inner)
+            resolve_expression(nodes, deps, reverse_deps, state, inner)
         }
     }
 }
@@ -99,18 +179,19 @@ fn resolve_criteria(
     nodes: &Nodes,
     deps: &BTreeMap<String, BTreeSet<String>>,
     reverse_deps: &BTreeMap<String, BTreeSet<String>>,
+    state: Option<&StateSelector>,
     criteria: &SelectionCriteria,
 ) -> BTreeSet<String> {
     // First find nodes matching the base criterion.
     let mut matched: BTreeSet<String> = nodes
         .iter()
-        .filter(|(_, node)| matches_base_criteria(*node, criteria))
+        .filter(|(id, node)| matches_base_criteria(id, *node, state, criteria))
         .map(|(id, _)| id.clone())
         .collect();
 
     // Apply nested exclude.
     if let Some(excl) = &criteria.exclude {
-        let excluded = resolve_expression(nodes, deps, reverse_deps, excl);
+        let excluded = resolve_expression(nodes, deps, reverse_deps, state, excl);
         matched.retain(|id| !excluded.contains(id));
     }
 
@@ -176,10 +257,24 @@ fn walk_graph(
 
 /// Check if a node matches the base criterion (without graph operators).
 fn matches_base_criteria(
+    unique_id: &str,
     node: &dyn InternalDbtNodeAttributes,
+    state: Option<&StateSelector>,
     criteria: &SelectionCriteria,
 ) -> bool {
     match criteria.method {
+        MethodName::State => {
+            let Some(state) = state else { return false };
+            match criteria.value.as_str() {
+                "new" => state.new.contains(unique_id),
+                // `modified.<subselector>` (body/configs/…) all coarsen to the
+                // full modified set — over-selecting is safe for CI builds.
+                v if v == "modified" || v.starts_with("modified.") => {
+                    state.modified.contains(unique_id)
+                }
+                _ => false,
+            }
+        }
         MethodName::Tag => node.common().tags.contains(&criteria.value),
         MethodName::Fqn => {
             let name = &node.common().name;
@@ -369,14 +464,14 @@ mod tests {
     #[test]
     fn apply_selectors_no_filters_returns_input() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids.clone(), &nodes, None, None).unwrap();
+        let out = apply_selectors(ids.clone(), &nodes, None, None, None).unwrap();
         assert_eq!(out, ids);
     }
 
     #[test]
     fn apply_selectors_filters_by_tag() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), None, None).unwrap();
         assert_eq!(
             out,
             vec![
@@ -392,14 +487,14 @@ mod tests {
         // so a search like "customers" matches anything whose fqn contains it
         // (including "stg_customers"). Use a name that's only one node's exact match.
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("stg_orders"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("stg_orders"), None, None).unwrap();
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
     }
 
     #[test]
     fn apply_selectors_filters_by_path_prefix() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("path:models/staging"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("path:models/staging"), None, None).unwrap();
         assert_eq!(
             out,
             vec![
@@ -412,21 +507,22 @@ mod tests {
     #[test]
     fn apply_selectors_filters_by_package() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("package:shop"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("package:shop"), None, None).unwrap();
         assert_eq!(out.len(), 3);
     }
 
     #[test]
     fn apply_selectors_excludes_subset() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, None, Some("tag:nightly")).unwrap();
+        let out = apply_selectors(ids, &nodes, None, Some("tag:nightly"), None).unwrap();
         assert_eq!(out, vec!["model.shop.customers".to_string()]);
     }
 
     #[test]
     fn apply_selectors_select_and_exclude_combined() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), Some("tag:hourly")).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("tag:nightly"), Some("tag:hourly"), None).unwrap();
         assert_eq!(out, vec!["model.shop.stg_customers".to_string()]);
     }
 
@@ -434,7 +530,7 @@ mod tests {
     fn apply_selectors_intersection_via_comma() {
         let (ids, nodes) = build_three_model_project();
         // Comma is intersection: nodes that are nightly AND hourly.
-        let out = apply_selectors(ids, &nodes, Some("tag:nightly,tag:hourly"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("tag:nightly,tag:hourly"), None, None).unwrap();
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
     }
 
@@ -442,7 +538,7 @@ mod tests {
     fn apply_selectors_union_via_space() {
         let (ids, nodes) = build_three_model_project();
         // Whitespace-separated tokens are union (each parsed independently).
-        let out = apply_selectors(ids, &nodes, Some("tag:hourly tag:nightly"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("tag:hourly tag:nightly"), None, None).unwrap();
         assert_eq!(out.len(), 3);
     }
 
@@ -451,7 +547,7 @@ mod tests {
         // Some malformed selectors are accepted by the parser but match nothing;
         // the contract for apply_selectors here is "either error or return empty".
         let (ids, nodes) = build_three_model_project();
-        let result = apply_selectors(ids, &nodes, Some("config:not_a_field=foo"), None);
+        let result = apply_selectors(ids, &nodes, Some("config:not_a_field=foo"), None, None);
         if let Ok(out) = result {
             assert!(out.is_empty());
         }
@@ -523,7 +619,7 @@ mod tests {
     fn apply_selectors_parents_walks_upstream() {
         let (ids, nodes) = build_dag_project();
         // `+ar_summary` selects ar_summary plus all transitive parents.
-        let out = apply_selectors(ids, &nodes, Some("+ar_summary"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("+ar_summary"), None, None).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.ar_summary"));
         assert!(set.contains("model.shop.orders"));
@@ -535,7 +631,7 @@ mod tests {
     fn apply_selectors_parents_depth_limited() {
         let (ids, nodes) = build_dag_project();
         // `1+ar_summary` selects ar_summary plus direct parents only.
-        let out = apply_selectors(ids, &nodes, Some("1+ar_summary"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("1+ar_summary"), None, None).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.ar_summary"));
         assert!(set.contains("model.shop.orders"));
@@ -548,7 +644,7 @@ mod tests {
     fn apply_selectors_children_walks_downstream() {
         let (ids, nodes) = build_dag_project();
         // `stg_orders+` selects stg_orders plus everything downstream.
-        let out = apply_selectors(ids, &nodes, Some("stg_orders+"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("stg_orders+"), None, None).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.stg_orders"));
         assert!(set.contains("model.shop.orders"));
@@ -561,7 +657,7 @@ mod tests {
     fn apply_selectors_children_depth_limited() {
         let (ids, nodes) = build_dag_project();
         // `stg_orders+1` selects stg_orders + direct children only.
-        let out = apply_selectors(ids, &nodes, Some("stg_orders+1"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("stg_orders+1"), None, None).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.stg_orders"));
         assert!(set.contains("model.shop.orders"));
@@ -575,7 +671,7 @@ mod tests {
         // `@orders` per the implementation: orders + direct parents + direct
         // children (one hop in each direction). Multi-hop transitive expansion
         // is intentionally not done here.
-        let out = apply_selectors(ids, &nodes, Some("@orders"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("@orders"), None, None).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.orders"));
         assert!(set.contains("model.shop.stg_orders"), "direct parent");
@@ -619,7 +715,112 @@ mod tests {
             "test.shop.t".to_string(),
             "seed.shop.s".to_string(),
         ];
-        let out = apply_selectors(ids, &nodes, Some("resource_type:test"), None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("resource_type:test"), None, None).unwrap();
         assert_eq!(out, vec!["test.shop.t".to_string()]);
+    }
+
+    // --- state: selectors ---
+
+    fn model_with_code(unique_id: &str, name: &str, raw_code: &str) -> Arc<DbtModel> {
+        let mut m = make_model(unique_id, name, "shop", "models/x.sql", &[], &[]);
+        Arc::get_mut(&mut m).unwrap().__common_attr__.raw_code = Some(raw_code.to_string());
+        m
+    }
+
+    fn state_nodes() -> Nodes {
+        let mut nodes = Nodes::default();
+        nodes.models.insert(
+            "model.shop.unchanged".to_string(),
+            model_with_code("model.shop.unchanged", "unchanged", "select 1"),
+        );
+        nodes.models.insert(
+            "model.shop.edited".to_string(),
+            model_with_code("model.shop.edited", "edited", "select 2 -- edited"),
+        );
+        nodes.models.insert(
+            "model.shop.brand_new".to_string(),
+            model_with_code("model.shop.brand_new", "brand_new", "select 3"),
+        );
+        nodes
+    }
+
+    fn previous_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "nodes": {
+                "model.shop.unchanged": {"raw_code": "select 1"},
+                "model.shop.edited": {"raw_code": "select 2"},
+                "model.shop.removed": {"raw_code": "select 0"},
+            }
+        })
+    }
+
+    #[test]
+    fn state_selector_classifies_new_and_modified() {
+        let nodes = state_nodes();
+        let state = StateSelector::from_previous_manifest(&nodes, &previous_manifest());
+
+        assert!(state.new.contains("model.shop.brand_new"));
+        assert!(!state.new.contains("model.shop.edited"));
+
+        assert!(state.modified.contains("model.shop.brand_new"));
+        assert!(state.modified.contains("model.shop.edited"));
+        assert!(!state.modified.contains("model.shop.unchanged"));
+    }
+
+    #[test]
+    fn state_modified_selector_filters_to_changed_nodes() {
+        let nodes = state_nodes();
+        let state = StateSelector::from_previous_manifest(&nodes, &previous_manifest());
+        let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+
+        let out = apply_selectors(ids.clone(), &nodes, Some("state:modified"), None, Some(&state))
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&"model.shop.brand_new".to_string()));
+        assert!(out.contains(&"model.shop.edited".to_string()));
+
+        let out =
+            apply_selectors(ids.clone(), &nodes, Some("state:new"), None, Some(&state)).unwrap();
+        assert_eq!(out, vec!["model.shop.brand_new".to_string()]);
+
+        // modified.<sub> coarsens to the full modified set.
+        let out =
+            apply_selectors(ids, &nodes, Some("state:modified.body"), None, Some(&state)).unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn state_selector_without_sets_matches_nothing() {
+        let nodes = state_nodes();
+        let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+        let out = apply_selectors(ids, &nodes, Some("state:modified"), None, None).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn state_selector_falls_back_to_checksum_when_raw_code_missing() {
+        use dbt_schemas::schemas::common::{DbtChecksum, DbtChecksumObject};
+
+        let mut nodes = Nodes::default();
+        let mut m = make_model("model.shop.csum", "csum", "shop", "models/c.sql", &[], &[]);
+        {
+            let m = Arc::get_mut(&mut m).unwrap();
+            m.__common_attr__.raw_code = None;
+            m.__common_attr__.checksum = DbtChecksum::Object(DbtChecksumObject {
+                name: "sha256".to_string(),
+                checksum: "abc123".to_string(),
+            });
+        }
+        nodes.models.insert("model.shop.csum".to_string(), m);
+
+        let same = serde_json::json!({"nodes": {"model.shop.csum":
+            {"checksum": {"name": "sha256", "checksum": "abc123"}}}});
+        let state = StateSelector::from_previous_manifest(&nodes, &same);
+        assert!(!state.modified.contains("model.shop.csum"));
+
+        let changed = serde_json::json!({"nodes": {"model.shop.csum":
+            {"checksum": {"name": "sha256", "checksum": "zzz999"}}}});
+        let state = StateSelector::from_previous_manifest(&nodes, &changed);
+        assert!(state.modified.contains("model.shop.csum"));
     }
 }

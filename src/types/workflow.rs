@@ -57,6 +57,12 @@ pub struct DbtRunInput {
     /// select/exclude as the original run.
     #[serde(default)]
     pub retry_from: Option<String>,
+    /// Path/URI of a previous manifest.json used by `state:` selectors
+    /// (`--state` equivalent). Required when `select`/`exclude` use
+    /// `state:modified` or `state:new`. Often the same artifact as
+    /// `defer_manifest_ref`.
+    #[serde(default)]
+    pub state_manifest_ref: Option<String>,
 }
 
 /// Output of the plan_project activity.
@@ -407,6 +413,7 @@ mod tests {
             event_time_start: None,
             event_time_end: None,
             retry_from: None,
+            state_manifest_ref: None,
         };
         let json = serde_json::to_string(&input)?;
         let back: DbtRunInput = serde_json::from_str(&json)?;
@@ -477,6 +484,7 @@ mod tests {
             event_time_start: None,
             event_time_end: None,
             retry_from: None,
+            state_manifest_ref: None,
         };
         let memo = CommandMemo::from(&input);
         assert_eq!(memo.command, "build");

@@ -81,12 +81,43 @@ pub async fn plan_project_inner(
         anyhow::bail!("no nodes found for command '{}'", input.command);
     }
 
+    // state: selectors compare against a previous manifest, loaded up front so
+    // a missing state_manifest_ref fails with a clear error instead of
+    // silently matching nothing.
+    let state_selector = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref()) {
+        let manifest_ref = input.state_manifest_ref.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "select/exclude use state: methods — set state_manifest_ref to a previous \
+                 manifest.json artifact"
+            )
+        })?;
+        let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "state_manifest_ref requires artifact storage to be configured \
+                 (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+            )
+        })?;
+        let bytes = artifact_store
+            .retrieve(manifest_ref)
+            .await
+            .with_context(|| format!("loading state manifest from {manifest_ref}"))?;
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bytes).context("parsing state manifest JSON")?;
+        Some(super::selectors::StateSelector::from_previous_manifest(
+            &state.resolver_state.nodes,
+            &manifest,
+        ))
+    } else {
+        None
+    };
+
     // Apply --select/--exclude filters.
     let selected_ids = apply_selectors(
         selected_ids,
         &state.resolver_state.nodes,
         input.select.as_deref(),
         input.exclude.as_deref(),
+        state_selector.as_ref(),
     )?;
 
     if selected_ids.is_empty() {
@@ -194,6 +225,12 @@ pub async fn plan_project_inner(
         has_on_run_start,
         has_on_run_end,
     })
+}
+
+/// Whether any select/exclude token uses a `state:` method.
+fn selectors_use_state(select: Option<&str>, exclude: Option<&str>) -> bool {
+    let uses = |s: Option<&str>| s.is_some_and(|s| s.contains("state:"));
+    uses(select) || uses(exclude)
 }
 
 /// Node ids eligible for retry, parsed from a previous `run_results.json`:

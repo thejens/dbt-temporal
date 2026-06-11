@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         agate_table,
         &base_context,
         &io_args,
+        dbt_telemetry::ExecutionPhase::Run,
         sql_header,
         state.packages.clone(),
     );

@@ -44,7 +44,6 @@ pub fn build_adapter_engine(
         query_comment,
         type_ops,
         stmt_splitter,
-        None, // query_cache
         relation_cache,
         std::collections::BTreeMap::new(), // behavior_flag_overrides
         None,                              // threads

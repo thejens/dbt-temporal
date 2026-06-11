@@ -262,3 +262,5 @@ Each dbt node uses the `summary` field on the Temporal activity to display a des
 | `DBT_LOG_FORMAT` | `default` | Console format in OTLP mode: `text`, `json`, `default`, or `otel`. Use `json` for log collectors. |
 
 Trade-offs in OTLP mode: console output is rendered by dbt's log consumer (not `tracing_subscriber::fmt`), so `RUST_LOG` per-module directives don't apply. Worker metrics are configured separately via `TEMPORAL_METRICS_EXPORTER` (see Worker Tuning) — note Temporal metrics default to OTLP/**gRPC** (port 4317) while dbt traces use OTLP/**HTTP** (port 4318); a standard otel-collector listens on both.
+
+**Per-run traces.** Every `execute_node` activity emits the same `Invocation` → `NodeEvaluated` span pair the dbt CLI emits, with the node outcome (success/error/skipped/cancelled) recorded on the span. The OTLP `trace_id` is the run's `invocation_id` (UUID bytes), so all activities of one workflow run form a single trace even across workers — look up a run in your tracing backend by its invocation id from the Temporal UI memo.

@@ -40,11 +40,20 @@ pub async fn execute_node_outer(
 ) -> Result<NodeExecutionResult, ActivityError> {
     let unique_id = input.unique_id.clone();
     let project = input.project.clone();
+    // dbt-native telemetry: Invocation root + NodeEvaluated span. The spans
+    // must outlive the select! so the outcome can be recorded on them.
+    let spans = super::node_telemetry::node_execution_spans(&activities.registry, &input);
     tokio::select! {
-        result = execute_node_inner(activities, input) => {
+        result = tracing::Instrument::instrument(
+            execute_node_inner(activities, input), spans.node.clone()
+        ) => {
             match result {
-                Ok(result) => Ok(result),
+                Ok(result) => {
+                    super::node_telemetry::record_outcome(&spans, result.status);
+                    Ok(result)
+                }
                 Err(e) => {
+                    super::node_telemetry::record_outcome(&spans, NodeStatus::Error);
                     tracing::error!(node = %unique_id, error = %e, "activity failed");
                     let dbt_err = downcast_or_wrap_as_adapter(e);
                     let patterns = registry_non_retryable_patterns(&activities.registry, &project);
@@ -53,6 +62,7 @@ pub async fn execute_node_outer(
             }
         }
         () = ctx.cancelled() => {
+            super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);
             info!(node = %unique_id, "activity cancelled");
             Err(ActivityError::cancelled())
         }

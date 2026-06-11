@@ -7,6 +7,7 @@ pub mod hooks;
 pub mod model_store;
 pub mod project_registry;
 pub mod telemetry_compat;
+pub mod tracing_setup;
 pub mod types;
 pub mod worker;
 pub mod worker_state;

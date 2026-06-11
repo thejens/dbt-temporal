@@ -109,6 +109,7 @@ mod tests {
             graceful_shutdown_secs: None,
             max_cached_workflows: 1000,
             deployment_name: None,
+            poller_autoscaling: None,
         }
     }
 

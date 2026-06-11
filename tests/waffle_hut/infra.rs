@@ -291,6 +291,7 @@ pub fn test_config(infra: &SharedInfra, fixture_dir: &Path) -> Result<DbtTempora
         graceful_shutdown_secs: None,
         max_cached_workflows: 1000,
         deployment_name: None,
+        poller_autoscaling: None,
     })
 }
 
@@ -355,6 +356,7 @@ pub fn test_config_env_var_profile(
         graceful_shutdown_secs: None,
         max_cached_workflows: 1000,
         deployment_name: None,
+        poller_autoscaling: None,
     })
 }
 
@@ -425,6 +427,7 @@ pub fn test_config_multi_project(
         graceful_shutdown_secs: None,
         max_cached_workflows: 1000,
         deployment_name: None,
+        poller_autoscaling: None,
     })
 }
 
@@ -674,6 +677,7 @@ pub fn test_config_with_schema(
         graceful_shutdown_secs: None,
         max_cached_workflows: 1000,
         deployment_name: None,
+        poller_autoscaling: None,
     };
 
     Ok((config, schema))

@@ -195,6 +195,10 @@ The resource-based tuner is cgroup-aware: in containers with CPU/memory limits, 
 | `WORKER_MAX_CACHED_WORKFLOWS` | `1000` | Number of workflows kept cached on sticky queues (LRU eviction). Higher values reduce replay overhead for concurrent workflows. |
 | `WORKER_STICKY_QUEUE_TIMEOUT_SECS` | `10` | How long a workflow task can sit on the sticky queue before falling back to the normal (non-sticky) task queue. Lower values reduce latency on fallback at the cost of more replays. |
 | `WORKER_NONSTICKY_TO_STICKY_POLL_RATIO` | `0.2` | Ratio of non-sticky to sticky queue pollers (0.0–1.0). Higher values make the worker poll the normal queue more aggressively, reducing fallback latency when sticky delivery fails. |
+| `WORKER_POLLER_AUTOSCALING` | off | Set to `1` to scale the number of open task-queue poll calls from server backlog feedback instead of the SDK's fixed default (5). Wide DAG levels schedule many activities at once; more pollers pick them up faster. |
+| `WORKER_POLLER_MIN` | `1` | Minimum open poll calls (autoscaling mode only). |
+| `WORKER_POLLER_MAX` | `100` | Maximum open poll calls (autoscaling mode only). |
+| `WORKER_POLLER_INITIAL` | `5` | Poll calls opened before scaling feedback kicks in (autoscaling mode only). |
 
 **Rate limiting & shutdown** — applies to both modes:
 

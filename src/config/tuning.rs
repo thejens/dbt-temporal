@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::WorkerTuningConfig;
+use super::{PollerAutoscalingConfig, WorkerTuningConfig};
 
 /// Parse `TEMPORAL_SEARCH_ATTRIBUTES` env var as a JSON object of string key-value pairs.
 /// Example: `TEMPORAL_SEARCH_ATTRIBUTES={"env":"prod","team":"data-eng"}`
@@ -55,6 +55,41 @@ pub fn parse_worker_tuning() -> Result<WorkerTuningConfig> {
             "unknown WORKER_TUNER mode '{other}' (expected 'fixed' or 'resource-based')"
         )),
     }
+}
+
+/// Parse poller autoscaling configuration from environment variables.
+///
+/// Enabled via `WORKER_POLLER_AUTOSCALING` (truthy: `1`/`true`). Bounds:
+///   - `WORKER_POLLER_MIN` (default: 1)
+///   - `WORKER_POLLER_MAX` (default: 100)
+///   - `WORKER_POLLER_INITIAL` (default: 5)
+///
+/// Bounds are validated here rather than at worker start so a bad value fails
+/// fast at boot with the env var name in the error.
+pub fn parse_poller_autoscaling() -> Result<Option<PollerAutoscalingConfig>> {
+    let enabled = std::env::var("WORKER_POLLER_AUTOSCALING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let minimum = parse_env_usize("WORKER_POLLER_MIN", 1)?;
+    let maximum = parse_env_usize("WORKER_POLLER_MAX", 100)?;
+    let initial = parse_env_usize("WORKER_POLLER_INITIAL", 5)?;
+    anyhow::ensure!(minimum >= 1, "WORKER_POLLER_MIN must be >= 1");
+    anyhow::ensure!(
+        maximum >= minimum,
+        "WORKER_POLLER_MAX ({maximum}) must be >= WORKER_POLLER_MIN ({minimum})"
+    );
+    anyhow::ensure!(
+        (minimum..=maximum).contains(&initial),
+        "WORKER_POLLER_INITIAL ({initial}) must be between WORKER_POLLER_MIN and WORKER_POLLER_MAX"
+    );
+    Ok(Some(PollerAutoscalingConfig {
+        minimum,
+        maximum,
+        initial,
+    }))
 }
 
 pub fn parse_env_usize(name: &str, default: usize) -> Result<usize> {
@@ -409,5 +444,73 @@ mod tests {
             assert!(err.to_string().contains("bogus"));
             Ok(())
         })
+    }
+
+    const POLLER_VARS: &[&str] = &[
+        "WORKER_POLLER_AUTOSCALING",
+        "WORKER_POLLER_MIN",
+        "WORKER_POLLER_MAX",
+        "WORKER_POLLER_INITIAL",
+    ];
+
+    fn poller_env<'a>(overrides: &[(&'a str, Option<&'a str>)]) -> Vec<(&'a str, Option<&'a str>)> {
+        let mut vars: Vec<(&str, Option<&str>)> = POLLER_VARS.iter().map(|k| (*k, None)).collect();
+        vars.extend_from_slice(overrides);
+        vars
+    }
+
+    #[test]
+    fn parse_poller_autoscaling_disabled_by_default() -> Result<()> {
+        with_env(&poller_env(&[]), || {
+            assert!(parse_poller_autoscaling()?.is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_poller_autoscaling_enabled_with_defaults() -> Result<()> {
+        with_env(&poller_env(&[("WORKER_POLLER_AUTOSCALING", Some("1"))]), || {
+            let pa = parse_poller_autoscaling()?.ok_or_else(|| anyhow!("expected Some"))?;
+            assert_eq!(pa.minimum, 1);
+            assert_eq!(pa.maximum, 100);
+            assert_eq!(pa.initial, 5);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_poller_autoscaling_rejects_initial_out_of_bounds() -> Result<()> {
+        with_env(
+            &poller_env(&[
+                ("WORKER_POLLER_AUTOSCALING", Some("true")),
+                ("WORKER_POLLER_MIN", Some("2")),
+                ("WORKER_POLLER_MAX", Some("4")),
+                ("WORKER_POLLER_INITIAL", Some("9")),
+            ]),
+            || {
+                let Err(err) = parse_poller_autoscaling() else {
+                    anyhow::bail!("expected error for out-of-bounds initial");
+                };
+                assert!(err.to_string().contains("WORKER_POLLER_INITIAL"), "got: {err}");
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn parse_poller_autoscaling_rejects_zero_minimum() -> Result<()> {
+        with_env(
+            &poller_env(&[
+                ("WORKER_POLLER_AUTOSCALING", Some("1")),
+                ("WORKER_POLLER_MIN", Some("0")),
+            ]),
+            || {
+                let Err(err) = parse_poller_autoscaling() else {
+                    anyhow::bail!("expected error for zero minimum");
+                };
+                assert!(err.to_string().contains("WORKER_POLLER_MIN"), "got: {err}");
+                Ok(())
+            },
+        )
     }
 }

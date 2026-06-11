@@ -6,6 +6,7 @@ pub mod execute_node;
 pub mod heartbeat;
 pub mod node_helpers;
 pub mod node_serialization;
+pub mod node_telemetry;
 pub mod plan;
 pub mod project_hooks;
 pub mod selectors;

@@ -6,7 +6,7 @@ use temporalio_common::worker::{
     WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
 };
 use temporalio_sdk::WorkerOptions;
-use temporalio_sdk_core::{FixedSizeSlotSupplier, TunerBuilder, Url, WorkerTuner};
+use temporalio_sdk_core::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, Url, WorkerTuner};
 use tracing::info;
 
 use crate::config::{DbtTemporalConfig, WorkerTuningConfig};
@@ -107,6 +107,24 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     if let Some(secs) = config.graceful_shutdown_secs {
         opts.graceful_shutdown_period = Some(Duration::from_secs(secs));
     }
+    if let Some(ref pa) = config.poller_autoscaling {
+        // dbt levels are bursty: a wide level schedules many activities at once,
+        // then the queue goes quiet. Autoscaling opens more poll calls under
+        // backlog so task pickup isn't throttled by poll round-trips.
+        let behavior = PollerBehavior::Autoscaling {
+            minimum: pa.minimum,
+            maximum: pa.maximum,
+            initial: pa.initial,
+        };
+        opts.workflow_task_poller_behavior = behavior;
+        opts.activity_task_poller_behavior = behavior;
+        info!(
+            minimum = pa.minimum,
+            maximum = pa.maximum,
+            initial = pa.initial,
+            "poller autoscaling enabled for workflow and activity task pollers"
+        );
+    }
 
     opts
 }
@@ -203,6 +221,7 @@ mod tests {
             graceful_shutdown_secs: None,
             max_cached_workflows: 1000,
             deployment_name: None,
+            poller_autoscaling: None,
         }
     }
 
@@ -317,6 +336,31 @@ mod tests {
         config.deployment_name = Some("dbt-temporal-prod".into());
         // Verify it doesn't panic — versioned deployment path is exercised.
         let _opts = build_worker_options(&config);
+    }
+
+    #[test]
+    fn build_worker_options_applies_poller_autoscaling() {
+        let mut config = test_config();
+        config.poller_autoscaling = Some(crate::config::PollerAutoscalingConfig {
+            minimum: 2,
+            maximum: 64,
+            initial: 8,
+        });
+        let opts = build_worker_options(&config);
+        let expected = PollerBehavior::Autoscaling {
+            minimum: 2,
+            maximum: 64,
+            initial: 8,
+        };
+        assert_eq!(opts.workflow_task_poller_behavior, expected);
+        assert_eq!(opts.activity_task_poller_behavior, expected);
+    }
+
+    #[test]
+    fn build_worker_options_keeps_default_poller_behavior() {
+        let opts = build_worker_options(&test_config());
+        assert!(!opts.workflow_task_poller_behavior.is_autoscaling());
+        assert!(!opts.activity_task_poller_behavior.is_autoscaling());
     }
 
     #[test]

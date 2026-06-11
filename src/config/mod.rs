@@ -72,6 +72,24 @@ pub struct DbtTemporalConfig {
     /// Temporal can route tasks to the correct worker version during rolling
     /// deploys. Set to e.g. `dbt-temporal-prod`. Controlled by `TEMPORAL_DEPLOYMENT_NAME`.
     pub deployment_name: Option<String>,
+    /// Poller autoscaling: scale the number of open task-queue poll calls from
+    /// server backlog feedback instead of the SDK's fixed default (5). Wide DAG
+    /// levels schedule many activities at once; more pollers pick them up faster.
+    /// `None` keeps the SDK default. Controlled by `WORKER_POLLER_AUTOSCALING`
+    /// (+ `WORKER_POLLER_MIN`/`WORKER_POLLER_MAX`/`WORKER_POLLER_INITIAL`).
+    pub poller_autoscaling: Option<PollerAutoscalingConfig>,
+}
+
+/// Bounds for task-queue poller autoscaling (applies to both workflow and
+/// activity task pollers).
+#[derive(Debug, Clone)]
+pub struct PollerAutoscalingConfig {
+    /// Poll calls always kept open (≥ 1).
+    pub minimum: usize,
+    /// Upper bound on concurrently open poll calls.
+    pub maximum: usize,
+    /// Poll calls opened before scaling feedback kicks in.
+    pub initial: usize,
 }
 
 /// Controls how the worker limits concurrent task execution.
@@ -171,6 +189,7 @@ impl DbtTemporalConfig {
             )?,
             max_cached_workflows: tuning::parse_env_usize("WORKER_MAX_CACHED_WORKFLOWS", 1000)?,
             deployment_name: std::env::var("TEMPORAL_DEPLOYMENT_NAME").ok(),
+            poller_autoscaling: tuning::parse_poller_autoscaling()?,
         })
     }
 }
@@ -210,6 +229,10 @@ mod tests {
         "WORKER_GRACEFUL_SHUTDOWN_SECS",
         "WORKER_MAX_CACHED_WORKFLOWS",
         "TEMPORAL_DEPLOYMENT_NAME",
+        "WORKER_POLLER_AUTOSCALING",
+        "WORKER_POLLER_MIN",
+        "WORKER_POLLER_MAX",
+        "WORKER_POLLER_INITIAL",
     ];
 
     fn make_project_dir() -> tempfile::TempDir {
@@ -414,6 +437,65 @@ mod tests {
                 assert_eq!(cfg.max_task_queue_activities_per_second, Some(250.0));
                 assert_eq!(cfg.graceful_shutdown_secs, Some(15));
                 assert_eq!(cfg.max_cached_workflows, 42);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_poller_autoscaling_disabled_by_default() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(&env_with_project(project_str, vec![]), || {
+            let cfg = DbtTemporalConfig::from_env()?;
+            assert!(cfg.poller_autoscaling.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_reads_poller_autoscaling() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![
+                    ("WORKER_POLLER_AUTOSCALING", Some("1")),
+                    ("WORKER_POLLER_MIN", Some("2")),
+                    ("WORKER_POLLER_MAX", Some("50")),
+                    ("WORKER_POLLER_INITIAL", Some("8")),
+                ],
+            ),
+            || {
+                let cfg = DbtTemporalConfig::from_env()?;
+                let pa = cfg.poller_autoscaling.expect("autoscaling enabled");
+                assert_eq!(pa.minimum, 2);
+                assert_eq!(pa.maximum, 50);
+                assert_eq!(pa.initial, 8);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_rejects_inverted_poller_bounds() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![
+                    ("WORKER_POLLER_AUTOSCALING", Some("true")),
+                    ("WORKER_POLLER_MIN", Some("10")),
+                    ("WORKER_POLLER_MAX", Some("5")),
+                ],
+            ),
+            || {
+                assert!(DbtTemporalConfig::from_env().is_err());
                 Ok(())
             },
         )

@@ -533,6 +533,30 @@ pub struct WorkflowRun {
     pub run_id: String,
 }
 
+/// Query the live `run_status` of a workflow. Works on completed workflows
+/// too — the worker replays history to serve the query.
+pub async fn query_run_status(
+    client: &Client,
+    workflow_id: &str,
+) -> Result<dbt_temporal::types::RunStatusSnapshot> {
+    use temporalio_client::{UntypedQuery, WorkflowQueryOptions};
+
+    let handle = client.get_workflow_handle::<UntypedWorkflow>(workflow_id);
+    let raw = handle
+        .query(
+            UntypedQuery::new("run_status"),
+            RawValue::new(vec![]),
+            WorkflowQueryOptions::default(),
+        )
+        .await
+        .context("querying run_status")?;
+    let payload = raw
+        .payloads
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("run_status query should return a payload"))?;
+    serde_json::from_slice(&payload.data).context("deserializing RunStatusSnapshot")
+}
+
 pub async fn run_dbt_workflow(
     client: &Client,
     task_queue: &str,

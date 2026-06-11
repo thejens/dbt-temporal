@@ -136,7 +136,14 @@ async fn execute_one_level(
         return Ok(());
     }
 
-    if state.input.fail_fast && *state.had_failure {
+    // Effective fail-fast: workflow input unless overridden mid-run by the
+    // set_fail_fast update handler. Read at the level boundary so a toggle
+    // applies from the next level onward (deterministic on replay — updates
+    // re-apply in history order).
+    let fail_fast = ctx
+        .state(|s| s.fail_fast_override)
+        .unwrap_or(state.input.fail_fast);
+    if fail_fast && *state.had_failure {
         // Skip remaining levels — mark all nodes as skipped.
         for unique_id in level {
             *state.node_counter += 1;
@@ -312,6 +319,13 @@ async fn execute_one_level(
     ) {
         upsert_memo_state(ctx, state.node_status, state.log_lines)?;
     }
+
+    // Refresh the run_status query snapshot — unlike the memo this is free
+    // (no history events), so it updates on every level.
+    ctx.state_mut(|s| {
+        s.status.completed_levels = level_idx + 1;
+        s.status.tally(state.node_status);
+    });
 
     Ok(())
 }

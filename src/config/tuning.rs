@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{PollerAutoscalingConfig, WorkerTuningConfig};
+use super::{PollerAutoscalingConfig, TemporalMetricsConfig, WorkerTuningConfig};
 
 /// Parse `TEMPORAL_SEARCH_ATTRIBUTES` env var as a JSON object of string key-value pairs.
 /// Example: `TEMPORAL_SEARCH_ATTRIBUTES={"env":"prod","team":"data-eng"}`
@@ -90,6 +90,72 @@ pub fn parse_poller_autoscaling() -> Result<Option<PollerAutoscalingConfig>> {
         maximum,
         initial,
     }))
+}
+
+/// Parse worker metrics export configuration from environment variables.
+///
+/// Mode selection via `TEMPORAL_METRICS_EXPORTER`:
+///   - `"none"` (default): no metrics export
+///   - `"prometheus"`: scrape endpoint at `TEMPORAL_METRICS_PROMETHEUS_ADDR`
+///     (default `0.0.0.0:9464`)
+///   - `"otlp"` (alias `"otel"`): push to `TEMPORAL_METRICS_OTLP_URL` (falls
+///     back to `OTEL_EXPORTER_OTLP_ENDPOINT`), protocol
+///     `TEMPORAL_METRICS_OTLP_PROTOCOL` (`grpc` default, or `http`), headers
+///     `TEMPORAL_METRICS_OTLP_HEADERS` (`key=value,key2=value2`)
+pub fn parse_temporal_metrics() -> Result<TemporalMetricsConfig> {
+    let mode = std::env::var("TEMPORAL_METRICS_EXPORTER").unwrap_or_default();
+    match mode.to_lowercase().as_str() {
+        "" | "none" => Ok(TemporalMetricsConfig::None),
+        "prometheus" => {
+            let raw = std::env::var("TEMPORAL_METRICS_PROMETHEUS_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:9464".to_string());
+            let socket_addr = raw
+                .parse()
+                .with_context(|| format!("invalid TEMPORAL_METRICS_PROMETHEUS_ADDR '{raw}'"))?;
+            Ok(TemporalMetricsConfig::Prometheus { socket_addr })
+        }
+        "otlp" | "otel" => {
+            let url = std::env::var("TEMPORAL_METRICS_OTLP_URL")
+                .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+                .map_err(|_| {
+                    anyhow!(
+                        "TEMPORAL_METRICS_EXPORTER=otlp requires TEMPORAL_METRICS_OTLP_URL \
+                         or OTEL_EXPORTER_OTLP_ENDPOINT"
+                    )
+                })?;
+            let use_http = match std::env::var("TEMPORAL_METRICS_OTLP_PROTOCOL") {
+                Ok(p) if p.eq_ignore_ascii_case("http") => true,
+                Ok(p) if p.eq_ignore_ascii_case("grpc") => false,
+                Ok(p) => anyhow::bail!(
+                    "unknown TEMPORAL_METRICS_OTLP_PROTOCOL '{p}' (expected 'grpc' or 'http')"
+                ),
+                Err(_) => false,
+            };
+            let headers = parse_header_pairs(
+                &std::env::var("TEMPORAL_METRICS_OTLP_HEADERS").unwrap_or_default(),
+            )?;
+            Ok(TemporalMetricsConfig::Otlp {
+                url,
+                use_http,
+                headers,
+            })
+        }
+        other => Err(anyhow!(
+            "unknown TEMPORAL_METRICS_EXPORTER '{other}' (expected 'none', 'prometheus', or 'otlp')"
+        )),
+    }
+}
+
+/// Parse comma-separated `key=value` pairs (e.g. OTLP auth headers).
+fn parse_header_pairs(raw: &str) -> Result<BTreeMap<String, String>> {
+    let mut headers = BTreeMap::new();
+    for pair in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("invalid header pair '{pair}' (expected key=value)"))?;
+        headers.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    Ok(headers)
 }
 
 pub fn parse_env_usize(name: &str, default: usize) -> Result<usize> {
@@ -495,6 +561,86 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    const METRICS_VARS: &[&str] = &[
+        "TEMPORAL_METRICS_EXPORTER",
+        "TEMPORAL_METRICS_PROMETHEUS_ADDR",
+        "TEMPORAL_METRICS_OTLP_URL",
+        "TEMPORAL_METRICS_OTLP_PROTOCOL",
+        "TEMPORAL_METRICS_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ];
+
+    fn metrics_env<'a>(
+        overrides: &[(&'a str, Option<&'a str>)],
+    ) -> Vec<(&'a str, Option<&'a str>)> {
+        let mut vars: Vec<(&str, Option<&str>)> = METRICS_VARS.iter().map(|k| (*k, None)).collect();
+        vars.extend_from_slice(overrides);
+        vars
+    }
+
+    #[test]
+    fn parse_temporal_metrics_defaults_to_none() -> Result<()> {
+        with_env(&metrics_env(&[]), || {
+            assert_eq!(parse_temporal_metrics()?, TemporalMetricsConfig::None);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_temporal_metrics_rejects_unknown_exporter() -> Result<()> {
+        with_env(&metrics_env(&[("TEMPORAL_METRICS_EXPORTER", Some("statsd"))]), || {
+            let Err(err) = parse_temporal_metrics() else {
+                anyhow::bail!("expected error for unknown exporter");
+            };
+            assert!(err.to_string().contains("statsd"), "got: {err}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn parse_temporal_metrics_rejects_bad_prometheus_addr() -> Result<()> {
+        with_env(
+            &metrics_env(&[
+                ("TEMPORAL_METRICS_EXPORTER", Some("prometheus")),
+                ("TEMPORAL_METRICS_PROMETHEUS_ADDR", Some("not-an-addr")),
+            ]),
+            || {
+                assert!(parse_temporal_metrics().is_err());
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn parse_temporal_metrics_otlp_http_protocol() -> Result<()> {
+        with_env(
+            &metrics_env(&[
+                ("TEMPORAL_METRICS_EXPORTER", Some("otel")),
+                ("TEMPORAL_METRICS_OTLP_URL", Some("http://collector:4318/v1/metrics")),
+                ("TEMPORAL_METRICS_OTLP_PROTOCOL", Some("http")),
+            ]),
+            || {
+                let TemporalMetricsConfig::Otlp {
+                    url,
+                    use_http,
+                    headers,
+                } = parse_temporal_metrics()?
+                else {
+                    anyhow::bail!("expected Otlp config");
+                };
+                assert_eq!(url, "http://collector:4318/v1/metrics");
+                assert!(use_http);
+                assert!(headers.is_empty());
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn parse_header_pairs_rejects_missing_equals() {
+        assert!(parse_header_pairs("just-a-key").is_err());
     }
 
     #[test]

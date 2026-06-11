@@ -18,7 +18,8 @@ path = "src/lib.rs"
 temporalio-sdk = "0.4.0"
 temporalio-sdk-core = "0.4.0"
 temporalio-client = "0.4.0"
-temporalio-common = "0.4.0"
+# otel + prometheus enable the worker-metrics exporters in the telemetry module.
+temporalio-common = { version = "0.4.0", features = ["otel", "prometheus"] }
 temporalio-macros = "0.4.0"
 
 # dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-06-11)

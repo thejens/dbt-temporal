@@ -19,7 +19,7 @@ use temporalio_sdk_core::ephemeral_server::TemporalDevServerConfig;
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use dbt_temporal::config::DbtTemporalConfig;
+use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig};
 use dbt_temporal::telemetry_compat::DbtTelemetryCompatLayer;
 use dbt_temporal::types::{DbtRunInput, DbtRunOutput, NodeStatus, NodeStatusTree};
 
@@ -276,6 +276,7 @@ pub fn bigquery_test_config_with_project_dir(
         max_cached_workflows: 1000,
         deployment_name: None,
         poller_autoscaling: None,
+        temporal_metrics: TemporalMetricsConfig::None,
     })
 }
 

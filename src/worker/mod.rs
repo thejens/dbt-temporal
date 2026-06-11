@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
-use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_sdk::Worker;
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 use tracing::info;
@@ -117,8 +116,8 @@ pub async fn connect_and_register(
     registry: Arc<ProjectRegistry>,
     artifact_store: Option<Arc<dyn crate::artifact_store::ArtifactStore>>,
 ) -> Result<Worker> {
-    // Set up Temporal runtime
-    let telemetry_options = TelemetryOptions::builder().build();
+    // Set up Temporal runtime (with metrics export when configured).
+    let telemetry_options = temporal::build_telemetry_options(config)?;
     // RuntimeOptionsBuilder::build returns Result<_, String>; String doesn't
     // impl std::error::Error, so .context() can't wrap it.
     let runtime_options = RuntimeOptions::builder()

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_common::worker::{
     WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
 };
@@ -9,7 +10,64 @@ use temporalio_sdk::WorkerOptions;
 use temporalio_sdk_core::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, Url, WorkerTuner};
 use tracing::info;
 
-use crate::config::{DbtTemporalConfig, WorkerTuningConfig};
+use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
+
+/// Build `TelemetryOptions` for the Temporal runtime, starting a metrics
+/// exporter when configured.
+///
+/// The Prometheus scrape server is spawned onto the current Tokio runtime and
+/// lives for the rest of the process — workers run until shutdown, so there is
+/// nothing to reclaim earlier (dropping the returned abort handle does not stop
+/// the task).
+pub fn build_telemetry_options(config: &DbtTemporalConfig) -> Result<TelemetryOptions> {
+    use temporalio_common::telemetry::metrics::CoreMeter;
+
+    let builder = TelemetryOptions::builder();
+    match &config.temporal_metrics {
+        TemporalMetricsConfig::None => Ok(builder.build()),
+        TemporalMetricsConfig::Prometheus { socket_addr } => {
+            let server = temporalio_common::telemetry::start_prometheus_metric_exporter(
+                temporalio_common::telemetry::PrometheusExporterOptions::builder()
+                    .socket_addr(*socket_addr)
+                    .build(),
+            )
+            .context("starting Prometheus metrics exporter")?;
+            info!(addr = %server.bound_addr, "worker metrics: Prometheus scrape endpoint started");
+            Ok(builder.metrics(server.meter as Arc<dyn CoreMeter>).build())
+        }
+        TemporalMetricsConfig::Otlp {
+            url,
+            use_http,
+            headers,
+        } => {
+            let parsed: Url = url
+                .parse()
+                .with_context(|| format!("invalid OTLP metrics URL '{url}'"))?;
+            let protocol = if *use_http {
+                temporalio_common::telemetry::OtlpProtocol::Http
+            } else {
+                temporalio_common::telemetry::OtlpProtocol::Grpc
+            };
+            let meter = temporalio_common::telemetry::build_otlp_metric_exporter(
+                temporalio_common::telemetry::OtelCollectorOptions::builder()
+                    .url(parsed)
+                    .headers(
+                        headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                    )
+                    .protocol(protocol)
+                    .build(),
+            )
+            .context("building OTLP metrics exporter")?;
+            info!(url = %url, http = use_http, "worker metrics: OTLP exporter configured");
+            Ok(builder
+                .metrics(Arc::new(meter) as Arc<dyn CoreMeter>)
+                .build())
+        }
+    }
+}
 
 /// Parse a Temporal address, auto-prefixing `http://` for scheme-less inputs.
 ///
@@ -222,6 +280,7 @@ mod tests {
             max_cached_workflows: 1000,
             deployment_name: None,
             poller_autoscaling: None,
+            temporal_metrics: TemporalMetricsConfig::None,
         }
     }
 
@@ -230,6 +289,50 @@ mod tests {
         let config = test_config();
         // Just verify it doesn't panic — WorkerOptions doesn't expose fields for inspection.
         let _opts = build_worker_options(&config);
+    }
+
+    #[test]
+    fn build_telemetry_options_none_has_no_metrics() -> Result<()> {
+        let opts = build_telemetry_options(&test_config())?;
+        assert!(opts.metrics.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_telemetry_options_prometheus_binds_and_sets_meter() -> Result<()> {
+        let mut config = test_config();
+        // Port 0 → OS-assigned port, so parallel test runs don't collide.
+        config.temporal_metrics = TemporalMetricsConfig::Prometheus {
+            socket_addr: "127.0.0.1:0".parse()?,
+        };
+        let opts = build_telemetry_options(&config)?;
+        assert!(opts.metrics.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn build_telemetry_options_otlp_rejects_invalid_url() {
+        let mut config = test_config();
+        config.temporal_metrics = TemporalMetricsConfig::Otlp {
+            url: "not a url".into(),
+            use_http: false,
+            headers: std::collections::BTreeMap::new(),
+        };
+        assert!(build_telemetry_options(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn build_telemetry_options_otlp_grpc_sets_meter() -> Result<()> {
+        let mut config = test_config();
+        // Building the exporter doesn't connect — the collector doesn't need to exist.
+        config.temporal_metrics = TemporalMetricsConfig::Otlp {
+            url: "http://127.0.0.1:4317".into(),
+            use_http: false,
+            headers: std::collections::BTreeMap::from([("x-key".to_string(), "v".to_string())]),
+        };
+        let opts = build_telemetry_options(&config)?;
+        assert!(opts.metrics.is_some());
+        Ok(())
     }
 
     #[test]

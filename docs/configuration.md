@@ -208,6 +208,16 @@ The resource-based tuner is cgroup-aware: in containers with CPU/memory limits, 
 | `WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND` | unlimited | Server-side rate limit on activities/second for the entire task queue (across all workers). |
 | `WORKER_GRACEFUL_SHUTDOWN_SECS` | none | Grace period (in seconds) before canceling in-flight activities on shutdown. Without this, the worker waits for all activities to complete. |
 
+**Worker metrics** — Temporal SDK metrics (task slot usage, schedule-to-start latency, poll counts, sticky cache hit rate, …). These are the numbers to watch when tuning the options above:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEMPORAL_METRICS_EXPORTER` | `none` | `prometheus` serves a scrape endpoint from the worker; `otlp` pushes to an OpenTelemetry collector. |
+| `TEMPORAL_METRICS_PROMETHEUS_ADDR` | `0.0.0.0:9464` | Bind address for the Prometheus scrape endpoint. |
+| `TEMPORAL_METRICS_OTLP_URL` | `$OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint (required for `otlp` if the standard OTEL var is unset). |
+| `TEMPORAL_METRICS_OTLP_PROTOCOL` | `grpc` | `grpc` (collector port 4317) or `http` (port 4318). |
+| `TEMPORAL_METRICS_OTLP_HEADERS` | none | Comma-separated `key=value` pairs sent with each export (e.g. auth). |
+
 ```bash
 # Fixed: limit to 50 concurrent activities
 WORKER_MAX_CONCURRENT_ACTIVITIES=50 cargo run

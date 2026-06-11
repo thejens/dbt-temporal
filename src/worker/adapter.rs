@@ -78,7 +78,7 @@ pub fn build_artifact_store(config: &DbtTemporalConfig) -> Result<Arc<dyn Artifa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DbtTemporalConfig, WorkerTuningConfig};
+    use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
 
     fn test_config() -> DbtTemporalConfig {
         DbtTemporalConfig {
@@ -110,6 +110,7 @@ mod tests {
             max_cached_workflows: 1000,
             deployment_name: None,
             poller_autoscaling: None,
+            temporal_metrics: TemporalMetricsConfig::None,
         }
     }
 

@@ -14,7 +14,7 @@ use temporalio_sdk_core::ephemeral_server::TemporalDevServerConfig;
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use dbt_temporal::config::DbtTemporalConfig;
+use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig};
 use dbt_temporal::telemetry_compat::DbtTelemetryCompatLayer;
 use dbt_temporal::types::{DbtRunInput, DbtRunOutput};
 
@@ -292,6 +292,7 @@ pub fn test_config(infra: &SharedInfra, fixture_dir: &Path) -> Result<DbtTempora
         max_cached_workflows: 1000,
         deployment_name: None,
         poller_autoscaling: None,
+        temporal_metrics: TemporalMetricsConfig::None,
     })
 }
 
@@ -357,6 +358,7 @@ pub fn test_config_env_var_profile(
         max_cached_workflows: 1000,
         deployment_name: None,
         poller_autoscaling: None,
+        temporal_metrics: TemporalMetricsConfig::None,
     })
 }
 
@@ -428,6 +430,7 @@ pub fn test_config_multi_project(
         max_cached_workflows: 1000,
         deployment_name: None,
         poller_autoscaling: None,
+        temporal_metrics: TemporalMetricsConfig::None,
     })
 }
 
@@ -678,6 +681,7 @@ pub fn test_config_with_schema(
         max_cached_workflows: 1000,
         deployment_name: None,
         poller_autoscaling: None,
+        temporal_metrics: TemporalMetricsConfig::None,
     };
 
     Ok((config, schema))

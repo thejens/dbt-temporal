@@ -15,9 +15,11 @@ use std::ops::ControlFlow;
 
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::error::ApplicationFailure;
-use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult, WorkflowTermination};
+use temporalio_sdk::{
+    SyncWorkflowContext, WorkflowContext, WorkflowContextView, WorkflowResult, WorkflowTermination,
+};
 
-use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus};
+use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus, RunStatusSnapshot};
 
 use self::helpers::{build_effective_env, build_summary_lines, elapsed_secs, upsert_memo_state};
 use self::levels::execute_levels;
@@ -30,14 +32,50 @@ use self::phases::{
 #[workflow]
 pub struct DbtRunWorkflow {
     input: DbtRunInput,
+    /// Live progress for the `run_status` query; updated at phase transitions
+    /// and level boundaries.
+    status: RunStatusSnapshot,
+    /// Mid-run fail-fast override set by the `set_fail_fast` update; the level
+    /// loop consults it at each level boundary.
+    fail_fast_override: Option<bool>,
 }
 
 #[workflow_methods]
 impl DbtRunWorkflow {
     #[init]
-    #[allow(clippy::missing_const_for_fn)] // #[init] macro requires non-const.
     fn new(_ctx: &WorkflowContextView, input: DbtRunInput) -> Self {
-        Self { input }
+        let status = RunStatusSnapshot {
+            phase: "initializing".to_string(),
+            fail_fast: input.fail_fast,
+            ..RunStatusSnapshot::default()
+        };
+        Self {
+            input,
+            status,
+            fail_fast_override: None,
+        }
+    }
+
+    /// Live run progress — cheaper for callers than `describe` + memo
+    /// decoding, and not subject to memo truncation limits.
+    ///
+    /// `temporal workflow query -w <id> --type run_status`
+    #[query]
+    pub fn run_status(&self, _ctx: &WorkflowContextView) -> RunStatusSnapshot {
+        self.status.clone()
+    }
+
+    /// Toggle fail-fast mid-run. Takes effect at the next level boundary:
+    /// enabling it after a failure stops scheduling further levels; disabling
+    /// it lets a run configured with fail_fast continue past failures.
+    ///
+    /// `temporal workflow update execute -w <id> --name set_fail_fast -i true`
+    #[update]
+    #[allow(clippy::missing_const_for_fn)] // Handler is registered by the macro; const adds nothing.
+    pub fn set_fail_fast(&mut self, _ctx: &mut SyncWorkflowContext<Self>, enabled: bool) -> bool {
+        self.fail_fast_override = Some(enabled);
+        self.status.fail_fast = enabled;
+        enabled
     }
 
     #[run(name = "dbt_run")]
@@ -52,7 +90,13 @@ impl DbtRunWorkflow {
         let input = ctx.state(|s| s.input.clone());
 
         write_command_memo(ctx, &input)?;
+        ctx.state_mut(|s| s.status.phase = "planning".to_string());
         let plan = plan_and_announce(ctx, &input).await?;
+        ctx.state_mut(|s| {
+            s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
+            s.status.total_levels = plan.levels.len();
+            s.status.phase = "pre_run_hooks".to_string();
+        });
         let project_config = resolve_project_config(ctx, &input, &plan).await?;
         let hooks = project_config.hooks;
         let retry_config = project_config.retry;
@@ -80,7 +124,12 @@ impl DbtRunWorkflow {
 
         run_on_run_start(ctx, &input, &plan, &effective_env).await?;
 
+        ctx.state_mut(|s| s.status.phase = "executing".to_string());
         let mut levels = execute_levels(ctx, &input, &plan, &retry_config, &effective_env).await?;
+        ctx.state_mut(|s| {
+            s.status.phase = "finalizing".to_string();
+            s.status.tally(&levels.node_status);
+        });
 
         // Final memo upsert with all nodes in terminal state.
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
@@ -89,30 +138,7 @@ impl DbtRunWorkflow {
             return Err(WorkflowTermination::Cancelled);
         }
 
-        // Run-log summary lines.
-        let pass = levels
-            .all_results
-            .iter()
-            .filter(|r| r.status == NodeStatus::Success)
-            .count();
-        let error = levels
-            .all_results
-            .iter()
-            .filter(|r| r.status == NodeStatus::Error)
-            .count();
-        let skip = levels
-            .all_results
-            .iter()
-            .filter(|r| r.status == NodeStatus::Skipped)
-            .count();
-        let elapsed = elapsed_secs(start, ctx.workflow_time());
-        levels.log_lines.extend(build_summary_lines(
-            levels.total_nodes,
-            elapsed,
-            pass,
-            error,
-            skip,
-        ));
+        append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()));
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
         let (artifacts, log_path) =
@@ -164,6 +190,17 @@ impl DbtRunWorkflow {
             )))
         }
     }
+}
+
+/// Append the CLI-style run summary (pass/error/skip tallies) to the run log.
+fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) {
+    let count_status = |s: NodeStatus| levels.all_results.iter().filter(|r| r.status == s).count();
+    let pass = count_status(NodeStatus::Success);
+    let error = count_status(NodeStatus::Error);
+    let skip = count_status(NodeStatus::Skipped);
+    levels
+        .log_lines
+        .extend(build_summary_lines(levels.total_nodes, elapsed, pass, error, skip));
 }
 
 #[cfg(test)]

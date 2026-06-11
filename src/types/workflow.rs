@@ -290,6 +290,48 @@ pub struct NodeStatusTree {
     pub nodes: BTreeMap<String, NodeStatus>,
 }
 
+/// Live run progress served by the `run_status` query.
+///
+/// Unlike the memo (truncated, written on a level cadence), this reflects
+/// workflow state at the last level boundary and costs no history events to
+/// read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunStatusSnapshot {
+    /// Coarse phase: `initializing`, `planning`, `pre_run_hooks`, `executing`,
+    /// `finalizing`. Terminal state comes from the workflow result itself.
+    pub phase: String,
+    pub total_nodes: usize,
+    pub total_levels: usize,
+    /// Index of the most recently completed level (1-based; 0 = none yet).
+    pub completed_levels: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub running: usize,
+    /// Effective fail-fast: workflow input, or the live `set_fail_fast`
+    /// update override.
+    pub fail_fast: bool,
+}
+
+impl RunStatusSnapshot {
+    /// Update the per-status counters from the node status tree.
+    pub fn tally(&mut self, statuses: &NodeStatusTree) {
+        self.succeeded = 0;
+        self.failed = 0;
+        self.skipped = 0;
+        self.running = 0;
+        for status in statuses.nodes.values() {
+            match status {
+                NodeStatus::Success => self.succeeded += 1,
+                NodeStatus::Error => self.failed += 1,
+                NodeStatus::Skipped | NodeStatus::Cancelled => self.skipped += 1,
+                NodeStatus::Running => self.running += 1,
+                NodeStatus::Pending => {}
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
@@ -514,5 +556,34 @@ mod tests {
         let input: DbtRunInput = serde_json::from_str(json)?;
         assert_eq!(input.command, "build");
         Ok(())
+    }
+
+    #[test]
+    fn run_status_snapshot_tally_counts_by_status() {
+        let mut tree = NodeStatusTree {
+            nodes: BTreeMap::new(),
+        };
+        for (uid, status) in [
+            ("model.p.a", NodeStatus::Success),
+            ("model.p.b", NodeStatus::Success),
+            ("model.p.c", NodeStatus::Error),
+            ("model.p.d", NodeStatus::Skipped),
+            ("model.p.e", NodeStatus::Cancelled),
+            ("model.p.f", NodeStatus::Running),
+            ("model.p.g", NodeStatus::Pending),
+        ] {
+            tree.nodes.insert(uid.to_string(), status);
+        }
+
+        let mut snapshot = RunStatusSnapshot::default();
+        snapshot.tally(&tree);
+        assert_eq!(snapshot.succeeded, 2);
+        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.skipped, 2, "skipped includes cancelled nodes");
+        assert_eq!(snapshot.running, 1);
+
+        // Re-tallying replaces, not accumulates.
+        snapshot.tally(&tree);
+        assert_eq!(snapshot.succeeded, 2);
     }
 }

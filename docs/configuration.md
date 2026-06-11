@@ -246,6 +246,20 @@ The workflow stores live metadata in [Temporal memos](https://docs.temporal.io/w
 
 Both `node_status` and `log` are truncated to stay within Temporal memo size limits (2000 node entries, 200 log lines). The full run log is written to the artifact store at workflow completion.
 
+### Live Run Control (query & update handlers)
+
+The workflow exposes handlers for live inspection and control — cheaper than `describe` + memo decoding and not subject to memo truncation:
+
+```bash
+# Live progress: phase, per-status node counts, level progress, effective fail_fast
+temporal workflow query -w <workflow-id> --type run_status
+
+# Toggle fail-fast mid-run (applies from the next DAG level)
+temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
+```
+
+`run_status` returns `{phase, total_nodes, total_levels, completed_levels, succeeded, failed, skipped, running, fail_fast}`. The snapshot refreshes at every level boundary. `set_fail_fast` overrides the workflow input's `fail_fast` for the remainder of the run and returns the applied value.
+
 ### Per-Node Activity Names
 
 Each dbt node uses the `summary` field on the Temporal activity to display a descriptive label in the UI Gantt chart (e.g. `model:stg_customers`, `test:not_null_orders_id`, `seed:raw_orders`). The `activity_id` is also set to the same label for identification in event details.

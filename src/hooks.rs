@@ -101,18 +101,35 @@ fn build_hook_workflow_id(
 
 /// Build the per-hook child-workflow options. Fire-and-forget hooks must use
 /// `Abandon` so the child survives the parent; awaited hooks use the default.
-fn build_hook_options(hook: &HookConfig, workflow_id: String) -> ChildWorkflowOptions {
+fn build_hook_options(
+    hook: &HookConfig,
+    workflow_id: String,
+    event: HookEvent,
+    index: usize,
+) -> ChildWorkflowOptions {
     let timeout = hook.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
     let parent_close_policy = if hook.fire_and_forget {
         ParentClosePolicy::Abandon
     } else {
         ParentClosePolicy::Unspecified
     };
+    // Human-readable card for the child workflow in the Temporal UI — without
+    // it, hook executions show up as bare workflow IDs.
+    let fnf = if hook.fire_and_forget {
+        ", fire-and-forget"
+    } else {
+        ""
+    };
+    let static_summary = format!(
+        "{event} hook #{index}: {} (queue: {}{fnf})",
+        hook.workflow_type, hook.task_queue
+    );
     ChildWorkflowOptions {
         workflow_id,
         task_queue: Some(hook.task_queue.clone()),
         parent_close_policy,
         execution_timeout: Some(Duration::from_secs(timeout)),
+        static_summary: Some(static_summary),
         ..Default::default()
     }
 }
@@ -219,7 +236,7 @@ pub async fn execute_hooks(
 
         let input_payload = build_hook_input_payload(hook, payload)?;
 
-        let opts = build_hook_options(hook, workflow_id);
+        let opts = build_hook_options(hook, workflow_id, payload.event, i);
         let wf = UntypedWorkflow::new(&hook.workflow_type);
         let raw_input = RawValue::new(input_payload);
 
@@ -429,7 +446,7 @@ mod tests {
     #[test]
     fn build_hook_options_sets_workflow_id_and_task_queue() {
         let hook = make_hook("notify", Some(30), false);
-        let opts = build_hook_options(&hook, "id-123".to_string());
+        let opts = build_hook_options(&hook, "id-123".to_string(), HookEvent::PreRun, 0);
         assert_eq!(opts.workflow_id, "id-123");
         assert_eq!(opts.task_queue.as_deref(), Some("q"));
         assert_eq!(opts.execution_timeout, Some(Duration::from_secs(30)));
@@ -438,16 +455,44 @@ mod tests {
     #[test]
     fn build_hook_options_uses_default_timeout_when_unset() {
         let hook = make_hook("notify", None, false);
-        let opts = build_hook_options(&hook, "id".to_string());
+        let opts = build_hook_options(&hook, "id".to_string(), HookEvent::PreRun, 0);
         assert_eq!(opts.execution_timeout, Some(Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS)));
     }
 
     #[test]
     fn build_hook_options_abandons_only_for_fire_and_forget() {
-        let normal = build_hook_options(&make_hook("h", None, false), "id".to_string());
-        let fire = build_hook_options(&make_hook("h", None, true), "id".to_string());
+        let normal = build_hook_options(
+            &make_hook("h", None, false),
+            "id".to_string(),
+            HookEvent::PreRun,
+            0,
+        );
+        let fire =
+            build_hook_options(&make_hook("h", None, true), "id".to_string(), HookEvent::PreRun, 0);
         assert_eq!(normal.parent_close_policy, ParentClosePolicy::Unspecified);
         assert_eq!(fire.parent_close_policy, ParentClosePolicy::Abandon);
+    }
+
+    #[test]
+    fn build_hook_options_sets_static_summary() {
+        let opts = build_hook_options(
+            &make_hook("notify-slack", None, false),
+            "id".to_string(),
+            HookEvent::OnFailure,
+            2,
+        );
+        let summary = opts.static_summary.expect("summary set");
+        assert!(summary.contains("notify-slack"), "got: {summary}");
+        assert!(summary.contains("#2"), "got: {summary}");
+
+        let fnf = build_hook_options(
+            &make_hook("notify-slack", None, true),
+            "id".to_string(),
+            HookEvent::OnSuccess,
+            0,
+        );
+        let summary = fnf.static_summary.expect("summary set");
+        assert!(summary.contains("fire-and-forget"), "got: {summary}");
     }
 
     // --- process_pre_run_completion ---

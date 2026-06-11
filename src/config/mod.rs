@@ -78,6 +78,30 @@ pub struct DbtTemporalConfig {
     /// `None` keeps the SDK default. Controlled by `WORKER_POLLER_AUTOSCALING`
     /// (+ `WORKER_POLLER_MIN`/`WORKER_POLLER_MAX`/`WORKER_POLLER_INITIAL`).
     pub poller_autoscaling: Option<PollerAutoscalingConfig>,
+    /// Worker metrics export (slot usage, schedule-to-start latency, poll counts,
+    /// sticky cache hit rate, …). Controlled by `TEMPORAL_METRICS_EXPORTER`.
+    pub temporal_metrics: TemporalMetricsConfig,
+}
+
+/// How the worker exports Temporal SDK metrics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemporalMetricsConfig {
+    /// No metrics export (default).
+    None,
+    /// Serve a Prometheus scrape endpoint from the worker process.
+    /// Controlled by `TEMPORAL_METRICS_PROMETHEUS_ADDR` (default `0.0.0.0:9464`).
+    Prometheus { socket_addr: std::net::SocketAddr },
+    /// Push metrics to an OpenTelemetry collector over OTLP.
+    Otlp {
+        /// Collector endpoint. From `TEMPORAL_METRICS_OTLP_URL`, falling back
+        /// to the standard `OTEL_EXPORTER_OTLP_ENDPOINT`.
+        url: String,
+        /// `grpc` (default) or `http`. From `TEMPORAL_METRICS_OTLP_PROTOCOL`.
+        use_http: bool,
+        /// Extra headers (e.g. auth). From `TEMPORAL_METRICS_OTLP_HEADERS`
+        /// as comma-separated `key=value` pairs.
+        headers: BTreeMap<String, String>,
+    },
 }
 
 /// Bounds for task-queue poller autoscaling (applies to both workflow and
@@ -190,6 +214,7 @@ impl DbtTemporalConfig {
             max_cached_workflows: tuning::parse_env_usize("WORKER_MAX_CACHED_WORKFLOWS", 1000)?,
             deployment_name: std::env::var("TEMPORAL_DEPLOYMENT_NAME").ok(),
             poller_autoscaling: tuning::parse_poller_autoscaling()?,
+            temporal_metrics: tuning::parse_temporal_metrics()?,
         })
     }
 }
@@ -233,6 +258,12 @@ mod tests {
         "WORKER_POLLER_MIN",
         "WORKER_POLLER_MAX",
         "WORKER_POLLER_INITIAL",
+        "TEMPORAL_METRICS_EXPORTER",
+        "TEMPORAL_METRICS_PROMETHEUS_ADDR",
+        "TEMPORAL_METRICS_OTLP_URL",
+        "TEMPORAL_METRICS_OTLP_PROTOCOL",
+        "TEMPORAL_METRICS_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
     ];
 
     fn make_project_dir() -> tempfile::TempDir {
@@ -494,6 +525,89 @@ mod tests {
                     ("WORKER_POLLER_MAX", Some("5")),
                 ],
             ),
+            || {
+                assert!(DbtTemporalConfig::from_env().is_err());
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_metrics_default_none() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(&env_with_project(project_str, vec![]), || {
+            let cfg = DbtTemporalConfig::from_env()?;
+            assert_eq!(cfg.temporal_metrics, TemporalMetricsConfig::None);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_reads_prometheus_metrics() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![
+                    ("TEMPORAL_METRICS_EXPORTER", Some("prometheus")),
+                    ("TEMPORAL_METRICS_PROMETHEUS_ADDR", Some("127.0.0.1:9999")),
+                ],
+            ),
+            || {
+                let cfg = DbtTemporalConfig::from_env()?;
+                let TemporalMetricsConfig::Prometheus { socket_addr } = cfg.temporal_metrics else {
+                    anyhow::bail!("expected Prometheus metrics config");
+                };
+                assert_eq!(socket_addr.to_string(), "127.0.0.1:9999");
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_reads_otlp_metrics_with_fallback_endpoint() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![
+                    ("TEMPORAL_METRICS_EXPORTER", Some("otlp")),
+                    ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://collector:4317")),
+                    ("TEMPORAL_METRICS_OTLP_HEADERS", Some("x-api-key=abc, x-team=data")),
+                ],
+            ),
+            || {
+                let cfg = DbtTemporalConfig::from_env()?;
+                let TemporalMetricsConfig::Otlp {
+                    url,
+                    use_http,
+                    headers,
+                } = cfg.temporal_metrics
+                else {
+                    anyhow::bail!("expected OTLP metrics config");
+                };
+                assert_eq!(url, "http://collector:4317");
+                assert!(!use_http);
+                assert_eq!(headers.get("x-api-key").map(String::as_str), Some("abc"));
+                assert_eq!(headers.get("x-team").map(String::as_str), Some("data"));
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn from_env_otlp_metrics_without_endpoint_errors() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(project_str, vec![("TEMPORAL_METRICS_EXPORTER", Some("otlp"))]),
             || {
                 assert!(DbtTemporalConfig::from_env().is_err());
                 Ok(())

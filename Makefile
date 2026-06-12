@@ -13,8 +13,10 @@ build:
 build-release:
 	cargo build --release
 
+# Same stack/thread discipline as coverage: dbt-fusion needs deep stacks and
+# the loader races when two tests load the same project in parallel.
 test:
-	cargo test
+	RUST_MIN_STACK=16777216 cargo test --workspace -- --test-threads=1
 
 test-examples:
 	./tests/test_examples.sh

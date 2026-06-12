@@ -253,13 +253,11 @@ mod tests {
             ..Default::default()
         };
         let verdict = evaluate(&criteria, ts("2026-06-12T11:30:00Z"), ts("2026-06-12T12:00:00Z"));
-        match verdict {
-            FreshnessVerdict::Fresh(o) => {
-                assert_eq!(o.status, "pass");
-                assert!((o.max_loaded_at_time_ago_in_s - 1800.0).abs() < f64::EPSILON);
-            }
-            other => panic!("expected fresh, got {other:?}"),
-        }
+        assert!(
+            matches!(verdict, FreshnessVerdict::Fresh(ref o)
+                if o.status == "pass" && (o.max_loaded_at_time_ago_in_s - 1800.0).abs() < f64::EPSILON),
+            "expected fresh: {verdict:?}"
+        );
     }
 
     #[test]
@@ -281,16 +279,11 @@ mod tests {
             ..Default::default()
         };
         let verdict = evaluate(&criteria, ts("2026-06-01T12:00:00Z"), ts("2026-06-12T12:00:00Z"));
-        match verdict {
-            FreshnessVerdict::Stale {
-                age_secs,
-                max_allowed_secs,
-            } => {
-                assert_eq!(max_allowed_secs, 86_400);
-                assert!(age_secs > 86_400.0);
-            }
-            other => panic!("expected stale, got {other:?}"),
-        }
+        assert!(
+            matches!(verdict, FreshnessVerdict::Stale { age_secs, max_allowed_secs }
+                if max_allowed_secs == 86_400 && age_secs > 86_400.0),
+            "expected stale: {verdict:?}"
+        );
     }
 
     #[test]
@@ -334,6 +327,76 @@ mod tests {
             "2026-06-12T00:00:00+00:00"
         );
         assert!(parse_timestamp("not a time").is_err());
+    }
+
+    fn empty_jinja_env() -> dbt_jinja_utils::jinja_environment::JinjaEnv {
+        dbt_jinja_utils::jinja_environment::JinjaEnv::new(minijinja::Environment::new())
+    }
+
+    #[test]
+    fn run_freshness_check_requires_criteria() {
+        use dbt_schemas::schemas::nodes::DbtSource;
+
+        let source = DbtSource::default();
+        let err = run_freshness_check(&source, &empty_jinja_env(), &BTreeMap::new()).unwrap_err();
+        assert!(err.to_string().contains("no freshness criteria"));
+    }
+
+    #[test]
+    fn run_freshness_check_requires_loaded_at() {
+        use dbt_schemas::schemas::nodes::DbtSource;
+
+        let mut source = DbtSource::default();
+        let mut attr = source.__source_attr__.clone();
+        attr.freshness = Some(FreshnessDefinition {
+            warn_after: Some(rules(1, FreshnessPeriod::hour)),
+            ..Default::default()
+        });
+        source.__source_attr__ = attr;
+        let err = run_freshness_check(&source, &empty_jinja_env(), &BTreeMap::new()).unwrap_err();
+        assert!(err.to_string().contains("no loaded_at_field"));
+    }
+
+    #[test]
+    fn run_freshness_check_surfaces_query_errors() {
+        use dbt_schemas::schemas::nodes::DbtSource;
+
+        // An environment without the dbt macros: the collect_freshness call
+        // fails at evaluation and must surface as a (retryable) adapter error.
+        let mut source = DbtSource::default();
+        let mut attr = source.__source_attr__.clone();
+        attr.loaded_at_field = Some("loaded_at".to_string());
+        attr.freshness = Some(FreshnessDefinition {
+            error_after: Some(rules(1, FreshnessPeriod::day)),
+            ..Default::default()
+        });
+        source.__source_attr__ = attr;
+        let err = run_freshness_check(&source, &empty_jinja_env(), &BTreeMap::new()).unwrap_err();
+        assert!(err.is_retryable(), "query failures must stay retryable: {err}");
+    }
+
+    #[test]
+    fn extract_timestamps_reads_first_row() {
+        let result = minijinja::Value::from_serialize(serde_json::json!({
+            "table": {"rows": [{
+                "max_loaded_at": "2026-06-12T10:00:00Z",
+                "snapshotted_at": "2026-06-12T11:00:00Z",
+            }]},
+        }));
+        let (max_loaded_at, snapshotted_at) = extract_timestamps(&result).unwrap();
+        assert_eq!((snapshotted_at - max_loaded_at).num_seconds(), 3600);
+    }
+
+    #[test]
+    fn extract_timestamps_rejects_missing_results() {
+        assert!(extract_timestamps(&minijinja::Value::from(())).is_err());
+        let no_rows = minijinja::Value::from_serialize(serde_json::json!({"table": {"rows": []}}));
+        assert!(extract_timestamps(&no_rows).is_err());
+        let null_cell = minijinja::Value::from_serialize(serde_json::json!({
+            "table": {"rows": [{"max_loaded_at": null, "snapshotted_at": "2026-06-12T11:00:00Z"}]},
+        }));
+        let err = extract_timestamps(&null_cell).unwrap_err();
+        assert!(err.to_string().contains("NULL"), "{err}");
     }
 
     #[test]

@@ -545,3 +545,56 @@ async fn test_state_modified_selector() -> Result<()> {
     std::fs::remove_dir_all(&fixture_dir).ok();
     result
 }
+
+/// Microbatch window inputs are accepted on any run: ref()/source() swap to
+/// time-window-aware versions, and non-microbatch models build unchanged.
+#[tokio::test(flavor = "current_thread")]
+async fn test_event_time_window_passthrough() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = fixture_path("waffle_hut");
+
+    let config = test_config(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            () = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let client = connect_client(&infra.temporal_addr).await?;
+            let mut input = make_input("run", None, None, false);
+            input.event_time_start = Some("2018-01-01T00:00:00Z".to_string());
+            input.event_time_end = Some("2018-02-01T00:00:00Z".to_string());
+            let run = run_dbt_workflow(&client, &task_queue, input).await?;
+            assert!(run.output.success, "run with event_time window should succeed");
+            assert_eq!(
+                run.output
+                    .node_results
+                    .iter()
+                    .filter(|r| r.status == NodeStatus::Success)
+                    .count(),
+                5,
+                "all five models should build under an event_time window"
+            );
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    result
+}

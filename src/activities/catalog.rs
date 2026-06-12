@@ -256,6 +256,8 @@ fn assemble_catalog(entries: &[CatalogEntry<'_>], invocation_id: &str) -> serde_
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn target(unique_id: &str, identifier: &str, table_type: &str, is_source: bool) -> Target {
@@ -268,6 +270,40 @@ mod tests {
             table_type: table_type.to_string(),
             is_source,
         }
+    }
+
+    #[test]
+    fn column_pairs_reads_name_and_data_type() {
+        let cols = minijinja::Value::from_serialize(vec![
+            BTreeMap::from([("name", "id"), ("data_type", "integer")]),
+            BTreeMap::from([("name", "status"), ("data_type", "text")]),
+        ]);
+        let pairs = column_pairs(&cols).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("id".to_string(), "integer".to_string()),
+                ("status".to_string(), "text".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn column_pairs_falls_back_to_dtype_then_unknown() {
+        let cols = minijinja::Value::from_serialize(vec![
+            BTreeMap::from([("name", "a"), ("dtype", "varchar")]),
+            BTreeMap::from([("name", "b")]),
+        ]);
+        let pairs = column_pairs(&cols).unwrap();
+        assert_eq!(pairs[0].1, "varchar");
+        assert_eq!(pairs[1].1, "unknown");
+    }
+
+    #[test]
+    fn column_pairs_errors_without_name_or_iterability() {
+        let no_name = minijinja::Value::from_serialize(vec![BTreeMap::from([("dtype", "int")])]);
+        assert!(column_pairs(&no_name).is_err());
+        assert!(column_pairs(&minijinja::Value::from(42)).is_err());
     }
 
     #[test]

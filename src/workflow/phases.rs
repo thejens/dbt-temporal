@@ -443,6 +443,7 @@ mod tests {
             write_artifacts: false,
             has_on_run_start: false,
             has_on_run_end: false,
+            priority_scheduling: false,
         }
     }
 

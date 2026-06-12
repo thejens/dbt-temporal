@@ -67,6 +67,7 @@ pub struct DbtRunInput {
 
 /// Output of the plan_project activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Wire type: independent serde flags, not a state machine.
 pub struct ExecutionPlan {
     /// Resolved project name — always set by the plan activity.
     pub project: String,
@@ -92,6 +93,10 @@ pub struct ExecutionPlan {
     /// Whether dbt_project.yml (or any loaded package) defines on-run-end hooks.
     #[serde(default)]
     pub has_on_run_end: bool,
+    /// Whether activities carry priority/fairness keys (worker config;
+    /// requires Temporal server >= 1.31 to take effect).
+    #[serde(default)]
+    pub priority_scheduling: bool,
 }
 
 /// Metadata about a single dbt node.
@@ -105,6 +110,10 @@ pub struct NodeInfo {
     pub materialization: Option<String>,
     pub package_name: String,
     pub depends_on: Vec<String>,
+    /// Scheduling priority key (1 = highest .. 5 = lowest) from critical-path
+    /// depth. Only set when priority scheduling is enabled on the worker.
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 /// Input to the execute_node activity.

@@ -81,6 +81,13 @@ pub struct DbtTemporalConfig {
     /// Worker metrics export (slot usage, schedule-to-start latency, poll counts,
     /// sticky cache hit rate, …). Controlled by `TEMPORAL_METRICS_EXPORTER`.
     pub temporal_metrics: TemporalMetricsConfig,
+    /// Priority-aware activity scheduling: per-node priority keys from
+    /// critical-path depth plus a per-run fairness key, so blocking-path
+    /// models run first under slot scarcity and concurrent runs share workers
+    /// proportionally. Requires Temporal server >= 1.31 to take effect
+    /// (older servers ignore the fields). Controlled by
+    /// `TEMPORAL_PRIORITY_SCHEDULING` (default: off).
+    pub priority_scheduling: bool,
 }
 
 /// How the worker exports Temporal SDK metrics.
@@ -152,6 +159,10 @@ pub struct WriteRunLog(pub bool);
 #[derive(Debug, Clone)]
 pub struct WriteArtifacts(pub bool);
 
+/// Newtype wrapper for priority-scheduling config.
+#[derive(Debug, Clone)]
+pub struct PriorityScheduling(pub bool);
+
 impl DbtTemporalConfig {
     /// Read configuration from environment variables.
     ///
@@ -215,6 +226,9 @@ impl DbtTemporalConfig {
             deployment_name: std::env::var("TEMPORAL_DEPLOYMENT_NAME").ok(),
             poller_autoscaling: tuning::parse_poller_autoscaling()?,
             temporal_metrics: tuning::parse_temporal_metrics()?,
+            priority_scheduling: std::env::var("TEMPORAL_PRIORITY_SCHEDULING")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         })
     }
 }
@@ -264,6 +278,7 @@ mod tests {
         "TEMPORAL_METRICS_OTLP_PROTOCOL",
         "TEMPORAL_METRICS_OTLP_HEADERS",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "TEMPORAL_PRIORITY_SCHEDULING",
     ];
 
     fn make_project_dir() -> tempfile::TempDir {

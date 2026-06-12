@@ -193,6 +193,7 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
             write_run_log: WriteRunLog(write_run_log),
             write_artifacts: WriteArtifacts(true),
+            priority_scheduling: crate::config::PriorityScheduling(false),
         }
     }
 
@@ -316,6 +317,7 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
             write_run_log: WriteRunLog(false),
             write_artifacts: WriteArtifacts(true),
+            priority_scheduling: crate::config::PriorityScheduling(false),
         };
 
         let input = StoreArtifactsInput {

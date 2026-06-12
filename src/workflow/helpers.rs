@@ -423,6 +423,7 @@ mod tests {
                     materialization: mat.map(ToString::to_string),
                     package_name: "waffle".to_string(),
                     depends_on: deps.iter().map(|d| format!("model.waffle.{d}")).collect(),
+                    priority: None,
                 },
             );
         }
@@ -440,6 +441,7 @@ mod tests {
             write_artifacts: false,
             has_on_run_start: false,
             has_on_run_end: false,
+            priority_scheduling: false,
         }
     }
 

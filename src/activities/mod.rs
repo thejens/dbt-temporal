@@ -20,7 +20,8 @@ use temporalio_sdk::error::ApplicationFailure;
 
 use crate::artifact_store::ArtifactStore;
 use crate::config::{
-    RegisteredSearchAttributes, SearchAttributeConfig, WriteArtifacts, WriteRunLog,
+    PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig, WriteArtifacts,
+    WriteRunLog,
 };
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
@@ -39,6 +40,7 @@ pub struct DbtActivities {
     pub registered_attrs: RegisteredSearchAttributes,
     pub write_run_log: WriteRunLog,
     pub write_artifacts: WriteArtifacts,
+    pub priority_scheduling: PriorityScheduling,
 }
 
 impl std::fmt::Debug for DbtActivities {
@@ -129,6 +131,7 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(BTreeSet::new()),
             write_run_log: WriteRunLog(true),
             write_artifacts: WriteArtifacts(false),
+            priority_scheduling: PriorityScheduling(false),
         };
         let s = format!("{activities:?}");
         assert!(s.contains("DbtActivities"));

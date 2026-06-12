@@ -45,7 +45,9 @@ impl fmt::Display for DbtTemporalError {
         match self {
             Self::Compilation(msg) => write!(f, "compilation error: {msg}"),
             Self::Configuration(msg) => write!(f, "configuration error: {msg}"),
-            Self::Adapter(err) => write!(f, "adapter error: {err}"),
+            // Alternate format prints the full anyhow context chain — the top
+            // context alone ("parsing X") routinely hides the actionable cause.
+            Self::Adapter(err) => write!(f, "adapter error: {err:#}"),
             Self::ProjectNotFound(msg) => write!(f, "project not found: {msg}"),
             Self::TestFailure {
                 unique_id,

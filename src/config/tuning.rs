@@ -638,6 +638,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_temporal_metrics_otlp_grpc_protocol_with_headers() -> Result<()> {
+        with_env(
+            &metrics_env(&[
+                ("TEMPORAL_METRICS_EXPORTER", Some("otlp")),
+                ("TEMPORAL_METRICS_OTLP_URL", Some("http://collector:4317")),
+                ("TEMPORAL_METRICS_OTLP_PROTOCOL", Some("grpc")),
+                ("TEMPORAL_METRICS_OTLP_HEADERS", Some("x-auth=secret,x-team=data")),
+            ]),
+            || {
+                let TemporalMetricsConfig::Otlp {
+                    url,
+                    use_http,
+                    headers,
+                } = parse_temporal_metrics()?
+                else {
+                    anyhow::bail!("expected Otlp config");
+                };
+                assert_eq!(url, "http://collector:4317");
+                assert!(!use_http);
+                assert_eq!(headers.len(), 2);
+                assert_eq!(headers.get("x-auth").map(String::as_str), Some("secret"));
+                assert_eq!(headers.get("x-team").map(String::as_str), Some("data"));
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn parse_temporal_metrics_rejects_unknown_otlp_protocol() -> Result<()> {
+        with_env(
+            &metrics_env(&[
+                ("TEMPORAL_METRICS_EXPORTER", Some("otlp")),
+                ("TEMPORAL_METRICS_OTLP_URL", Some("http://collector:4317")),
+                ("TEMPORAL_METRICS_OTLP_PROTOCOL", Some("carrier-pigeon")),
+            ]),
+            || {
+                let Err(err) = parse_temporal_metrics() else {
+                    anyhow::bail!("expected error for unknown protocol");
+                };
+                assert!(err.to_string().contains("TEMPORAL_METRICS_OTLP_PROTOCOL"), "got: {err}");
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
     fn parse_header_pairs_rejects_missing_equals() {
         assert!(parse_header_pairs("just-a-key").is_err());
     }

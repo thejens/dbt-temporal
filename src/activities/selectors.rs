@@ -460,6 +460,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_selectors_filters_by_config_materialized() {
+        use dbt_schemas::schemas::common::DbtMaterialization;
+
+        let (mut ids, mut nodes) = build_three_model_project();
+        let mut view = (*nodes.models["model.shop.stg_orders"]).clone();
+        view.__base_attr__.materialized = DbtMaterialization::View;
+        nodes
+            .models
+            .insert("model.shop.stg_orders".to_string(), Arc::new(view));
+        ids.sort();
+
+        let out =
+            apply_selectors(ids, &nodes, Some("config.materialized:view"), None, None).unwrap();
+        assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
+    }
+
+    #[test]
     fn apply_selectors_no_filters_returns_input() {
         let (ids, nodes) = build_three_model_project();
         let out = apply_selectors(ids.clone(), &nodes, None, None, None).unwrap();
@@ -820,5 +837,52 @@ mod tests {
             {"checksum": {"name": "sha256", "checksum": "zzz999"}}}});
         let state = StateSelector::from_previous_manifest(&nodes, &changed);
         assert!(state.modified.contains("model.shop.csum"));
+    }
+
+    // --- node_is_modified checksum fallback ---
+
+    fn model_with_checksum(checksum: dbt_schemas::schemas::common::DbtChecksum) -> DbtModel {
+        let mut model = DbtModel::default();
+        model.__common_attr__.raw_code = None;
+        model.__common_attr__.checksum = checksum;
+        model
+    }
+
+    #[test]
+    fn node_is_modified_compares_checksums_when_raw_code_absent() {
+        use dbt_schemas::schemas::common::DbtChecksum;
+
+        let model = model_with_checksum(DbtChecksum::String("abc".to_string()));
+        // Same checksum, prev stored as a plain string.
+        assert!(!node_is_modified(&model, &serde_json::json!({"checksum": "abc"})));
+        // Same checksum, prev stored dbt-core style ({name, checksum}).
+        assert!(!node_is_modified(
+            &model,
+            &serde_json::json!({"checksum": {"name": "sha256", "checksum": "abc"}})
+        ));
+        // Different checksum.
+        assert!(node_is_modified(&model, &serde_json::json!({"checksum": "xyz"})));
+        // Object-shaped current checksum.
+        let model = model_with_checksum(DbtChecksum::Object(
+            dbt_schemas::schemas::common::DbtChecksumObject {
+                name: "sha256".to_string(),
+                checksum: "abc".to_string(),
+            },
+        ));
+        assert!(!node_is_modified(&model, &serde_json::json!({"checksum": "abc"})));
+    }
+
+    #[test]
+    fn node_is_modified_treats_empty_or_missing_checksums_as_modified() {
+        use dbt_schemas::schemas::common::DbtChecksum;
+
+        let model = model_with_checksum(DbtChecksum::String("abc".to_string()));
+        // No checksum in the previous manifest entry: no signal -> modified.
+        assert!(node_is_modified(&model, &serde_json::json!({})));
+        // Empty previous checksum (FileHash.empty()): conservative -> modified.
+        assert!(node_is_modified(&model, &serde_json::json!({"checksum": ""})));
+        // Empty current checksum: same.
+        let empty = model_with_checksum(DbtChecksum::String(String::new()));
+        assert!(node_is_modified(&empty, &serde_json::json!({"checksum": "abc"})));
     }
 }

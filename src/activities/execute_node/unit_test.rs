@@ -878,6 +878,19 @@ mod tests {
         assert_eq!(prepend_fixture_ctes("select 1", &[]), "select 1");
     }
 
+    #[test]
+    fn split_leading_with_bails_on_unterminated_block_comment() {
+        assert!(split_leading_with("/* never closed with a as ()").is_none());
+    }
+
+    #[test]
+    fn split_leading_with_recursive_prefix_identifier_is_not_recursive() {
+        // `recursivex` is an identifier (a CTE name), not the keyword.
+        let (_, recursive, rest) = split_leading_with("with recursivex as (select 1)").unwrap();
+        assert!(!recursive);
+        assert_eq!(rest.trim_start(), "recursivex as (select 1)");
+    }
+
     // --- compare_actual_expected ---
 
     fn batch(ids: &[i64], labels: &[&str]) -> RecordBatch {
@@ -919,10 +932,284 @@ mod tests {
     }
 
     #[test]
+    fn compare_handles_null_cells_as_equal() {
+        let id_col: ArrayRef = Arc::new(Int64Array::from(vec![None, None]));
+        let label_col: ArrayRef =
+            Arc::new(StringArray::from(vec!["actual".to_string(), "expected".to_string()]));
+        let b = RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)])
+            .unwrap();
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(outcome.passed, "NULL must compare equal to NULL");
+    }
+
+    #[test]
+    fn compare_truncates_long_diffs() {
+        let n = i64::try_from(MAX_DIFF_LINES).expect("small constant") + 10;
+        let ids: Vec<i64> = (0..n).collect();
+        let labels: Vec<&str> = (0..n).map(|_| "actual").collect();
+        let b = batch(&ids, &labels);
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(!outcome.passed);
+        assert_eq!(outcome.failures, n);
+        assert!(outcome.diff.contains("diff truncated"));
+    }
+
+    #[test]
+    fn compare_rejects_non_string_label_column() {
+        let id_col: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let label_col: ArrayRef = Arc::new(Int64Array::from(vec![7]));
+        let b = RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)])
+            .unwrap();
+        assert!(compare_actual_expected(&b).is_err());
+    }
+
+    #[test]
+    fn compare_rejects_unknown_label_values() {
+        let b = batch(&[1], &["maybe"]);
+        assert!(compare_actual_expected(&b).is_err());
+    }
+
+    #[test]
     fn compare_errors_without_label_column() {
         let id_col: ArrayRef = Arc::new(Int64Array::from(vec![1]));
         let b = RecordBatch::try_from_iter(vec![("id", id_col)]).unwrap();
         assert!(compare_actual_expected(&b).is_err());
+    }
+
+    // --- resolve_given_input ---
+
+    fn nodes_with(
+        models: &[(&str, &str, &str)],
+        seeds: &[(&str, &str, &str)],
+        sources: &[(&str, &str, &str)],
+    ) -> Nodes {
+        use dbt_schemas::schemas::nodes::{DbtModel, DbtSeed, DbtSource};
+
+        let mut nodes = Nodes::default();
+        for (uid, name, package) in models {
+            let mut m = DbtModel::default();
+            (*uid).clone_into(&mut m.__common_attr__.unique_id);
+            (*name).clone_into(&mut m.__common_attr__.name);
+            (*package).clone_into(&mut m.__common_attr__.package_name);
+            nodes.models.insert((*uid).to_string(), Arc::new(m));
+        }
+        for (uid, name, package) in seeds {
+            let mut s = DbtSeed::default();
+            (*uid).clone_into(&mut s.__common_attr__.unique_id);
+            (*name).clone_into(&mut s.__common_attr__.name);
+            (*package).clone_into(&mut s.__common_attr__.package_name);
+            nodes.seeds.insert((*uid).to_string(), Arc::new(s));
+        }
+        for (uid, source_name, table) in sources {
+            let mut s = DbtSource::default();
+            (*uid).clone_into(&mut s.__common_attr__.unique_id);
+            (*table).clone_into(&mut s.__common_attr__.name);
+            (*source_name).clone_into(&mut s.__source_attr__.source_name);
+            nodes.sources.insert((*uid).to_string(), Arc::new(s));
+        }
+        nodes
+    }
+
+    #[test]
+    fn resolve_given_input_this_returns_tested_model() {
+        let nodes = Nodes::default();
+        let id = resolve_given_input(&GivenInput::This, "model.p.m", "p", &nodes).unwrap();
+        assert_eq!(id, "model.p.m");
+    }
+
+    #[test]
+    fn resolve_given_input_finds_models_and_seeds_by_name() {
+        let nodes = nodes_with(
+            &[("model.p.stg_orders", "stg_orders", "p")],
+            &[("seed.p.countries", "countries", "p")],
+            &[],
+        );
+        let by_ref = |name: &str| GivenInput::Ref {
+            name: name.to_string(),
+            package: None,
+        };
+        assert_eq!(
+            resolve_given_input(&by_ref("stg_orders"), "model.p.m", "p", &nodes).unwrap(),
+            "model.p.stg_orders"
+        );
+        assert_eq!(
+            resolve_given_input(&by_ref("countries"), "model.p.m", "p", &nodes).unwrap(),
+            "seed.p.countries"
+        );
+        assert!(resolve_given_input(&by_ref("nope"), "model.p.m", "p", &nodes).is_err());
+    }
+
+    #[test]
+    fn resolve_given_input_respects_package_qualifier() {
+        let nodes = nodes_with(
+            &[
+                ("model.a.shared", "shared", "a"),
+                ("model.b.shared", "shared", "b"),
+            ],
+            &[],
+            &[],
+        );
+        let qualified = GivenInput::Ref {
+            name: "shared".to_string(),
+            package: Some("b".to_string()),
+        };
+        assert_eq!(
+            resolve_given_input(&qualified, "model.a.m", "a", &nodes).unwrap(),
+            "model.b.shared"
+        );
+        // Unqualified + ambiguous: the unit test's own package wins.
+        let bare = GivenInput::Ref {
+            name: "shared".to_string(),
+            package: None,
+        };
+        assert_eq!(resolve_given_input(&bare, "model.a.m", "a", &nodes).unwrap(), "model.a.shared");
+    }
+
+    #[test]
+    fn resolve_given_input_finds_sources() {
+        let nodes = nodes_with(&[], &[], &[("source.p.raw.orders", "raw", "orders")]);
+        let input = GivenInput::Source {
+            source: "raw".to_string(),
+            table: "orders".to_string(),
+        };
+        assert_eq!(
+            resolve_given_input(&input, "model.p.m", "p", &nodes).unwrap(),
+            "source.p.raw.orders"
+        );
+        let missing = GivenInput::Source {
+            source: "raw".to_string(),
+            table: "nope".to_string(),
+        };
+        assert!(resolve_given_input(&missing, "model.p.m", "p", &nodes).is_err());
+    }
+
+    #[test]
+    fn resolve_given_input_ambiguous_foreign_packages_errors() {
+        // Two foreign candidates, none in the unit test's package: refuse to
+        // guess and demand qualification.
+        let nodes = nodes_with(
+            &[
+                ("model.a.shared", "shared", "a"),
+                ("model.b.shared", "shared", "b"),
+            ],
+            &[],
+            &[],
+        );
+        let bare = GivenInput::Ref {
+            name: "shared".to_string(),
+            package: None,
+        };
+        let err = resolve_given_input(&bare, "model.c.m", "c", &nodes).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn resolve_given_input_finds_snapshots() {
+        use dbt_schemas::schemas::nodes::DbtSnapshot;
+
+        let mut nodes = Nodes::default();
+        let mut snap = DbtSnapshot::default();
+        snap.__common_attr__.unique_id = "snapshot.p.history".to_string();
+        snap.__common_attr__.name = "history".to_string();
+        snap.__common_attr__.package_name = "p".to_string();
+        nodes
+            .snapshots
+            .insert("snapshot.p.history".to_string(), Arc::new(snap));
+        let input = GivenInput::Ref {
+            name: "history".to_string(),
+            package: None,
+        };
+        assert_eq!(
+            resolve_given_input(&input, "model.p.m", "p", &nodes).unwrap(),
+            "snapshot.p.history"
+        );
+    }
+
+    // --- inject_expected_config ---
+
+    fn unit_with_expect(rows: Option<Rows>, format: Formats, fixture: Option<&str>) -> DbtUnitTest {
+        let mut unit = DbtUnitTest::default();
+        unit.__common_attr__.unique_id = "unit_test.p.m.t".to_string();
+        unit.__unit_test_attr__.expect = dbt_schemas::schemas::common::Expect {
+            rows,
+            format,
+            fixture: fixture.map(ToString::to_string),
+        };
+        unit
+    }
+
+    fn empty_config() -> YmlValue {
+        YmlValue::mapping(dbt_yaml::Mapping::new())
+    }
+
+    #[track_caller]
+    fn as_mapping(config: &YmlValue) -> &dbt_yaml::Mapping {
+        let YmlValue::Mapping(map, _) = config else {
+            panic!("config should stay a mapping")
+        };
+        map
+    }
+
+    #[test]
+    fn inject_expected_config_sets_rows_for_dict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut row = BTreeMap::new();
+        row.insert("id".to_string(), YmlValue::number(1_i64.into()));
+        let unit = unit_with_expect(Some(Rows::List(vec![row])), Formats::Dict, None);
+        let mut config = empty_config();
+        inject_expected_config(&mut config, &unit, dir.path()).unwrap();
+        let map = as_mapping(&config);
+        assert!(map.contains_key("expected_rows"));
+        assert!(!map.contains_key("expected_sql"));
+    }
+
+    #[test]
+    fn inject_expected_config_sets_sql_with_empty_rows_for_sql_format() {
+        // expected_rows must always exist (empty) because the materialization
+        // evaluates `expected_rows | length` unconditionally.
+        let dir = tempfile::tempdir().unwrap();
+        let unit =
+            unit_with_expect(Some(Rows::String("select 1 as id".to_string())), Formats::Sql, None);
+        let mut config = empty_config();
+        inject_expected_config(&mut config, &unit, dir.path()).unwrap();
+        let map = as_mapping(&config);
+        assert_eq!(map.get("expected_sql").and_then(|v| v.as_str()), Some("select 1 as id"));
+        assert!(
+            map.get("expected_rows")
+                .is_some_and(|v| v.as_sequence().is_some_and(Vec::is_empty))
+        );
+    }
+
+    #[test]
+    fn inject_expected_config_parses_csv_fixture_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = dir.path().join("tests/fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+        std::fs::write(
+            fixtures.join("expected.csv"),
+            "id,status
+1,done
+",
+        )
+        .unwrap();
+        let unit = unit_with_expect(None, Formats::Csv, Some("expected"));
+        let mut config = empty_config();
+        inject_expected_config(&mut config, &unit, dir.path()).unwrap();
+        let map = as_mapping(&config);
+        let rows = map
+            .get("expected_rows")
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn inject_expected_config_rejects_non_mapping_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = unit_with_expect(Some(Rows::List(vec![])), Formats::Dict, None);
+        let mut config = YmlValue::null();
+        let err = inject_expected_config(&mut config, &unit, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("mapping"));
     }
 
     // --- fixture_content / resolve_fixture ---
@@ -975,6 +1262,30 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fixture_csv_parse_errors_are_wrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        // The csv crate rejects rows whose field count differs from the header.
+        let err = resolve_fixture(
+            Some(&Rows::String("id,status\n1,done,extra\n".to_string())),
+            &Formats::Csv,
+            None,
+            dir.path(),
+            "unit_test.p.t",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parsing csv fixture"));
+    }
+
+    #[test]
+    fn resolve_fixture_dict_rejects_fixture_files() {
+        // dict rows live inline in the YAML; a fixture file makes no sense.
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_fixture(None, &Formats::Dict, Some("rows"), dir.path(), "unit_test.p.t")
+            .unwrap_err();
+        assert!(err.to_string().contains("dict-format"));
+    }
+
+    #[test]
     fn resolve_fixture_sql_passes_through() {
         let dir = tempfile::tempdir().unwrap();
         let result = resolve_fixture(
@@ -985,9 +1296,18 @@ mod tests {
             "unit_test.p.t",
         )
         .unwrap();
-        match result {
-            FixtureData::Sql(sql) => assert_eq!(sql, "select 1 as id"),
-            FixtureData::Rows(_) => panic!("expected sql fixture"),
-        }
+        assert!(
+            matches!(result, FixtureData::Sql(ref sql) if sql == "select 1 as id"),
+            "expected sql fixture: {result:?}"
+        );
+    }
+
+    #[test]
+    fn inject_expected_config_propagates_fixture_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = unit_with_expect(None, Formats::Csv, Some("no_such_fixture"));
+        let mut config = empty_config();
+        let err = inject_expected_config(&mut config, &unit, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("no_such_fixture"));
     }
 }

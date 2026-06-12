@@ -20,6 +20,9 @@ async fn test_artifacts() -> Result<()> {
     config.write_artifacts = true;
     config.write_run_log = true;
     config.write_catalog = true;
+    // Exercise the priority/fairness wiring on a real run — older Temporal
+    // dev servers simply ignore the fields.
+    config.priority_scheduling = true;
     let task_queue = config.temporal_task_queue.clone();
     let artifact_dir = config.artifact_store.clone();
 
@@ -133,6 +136,22 @@ async fn test_artifacts() -> Result<()> {
                 .as_object()
                 .ok_or_else(|| anyhow::anyhow!("catalog sources should be an object"))?;
             assert_eq!(sources.len(), 3, "catalog should cover the 3 raw sources");
+
+            // Deferred run: point refs at the stored manifest. Everything is
+            // already built, so this exercises defer-manifest loading without
+            // changing results.
+            let mut deferred = make_input("run", Some("customers"), None, false);
+            deferred.defer_manifest_ref = Some(artifacts.manifest_path.clone());
+            let defer_run = run_dbt_workflow(&client, &task_queue, deferred).await?;
+            assert!(defer_run.output.success, "deferred run should succeed");
+            assert!(
+                defer_run
+                    .output
+                    .node_results
+                    .iter()
+                    .any(|r| r.unique_id == "model.waffle_hut.customers"),
+                "deferred run should rebuild customers"
+            );
 
             Ok(())
         })

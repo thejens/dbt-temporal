@@ -909,6 +909,22 @@ mod tests {
         assert_eq!(out, "rendered-ok");
     }
 
+    // NOTE: the macro-missing branch (template exists, leaf macro absent) is
+    // deliberately untested — fusion's `State::lookup` recurses without bound
+    // on a missing name and overflows the stack.
+
+    #[test]
+    fn render_materialization_surfaces_macro_call_errors() {
+        let env = jinja_env_with_templates(&[(
+            "dbt.materialization_boom_default",
+            "{% macro materialization_boom_default() %}{{ no_such_function() }}{% endmacro %}",
+        )]);
+        let ctx = BTreeMap::new();
+        let err = render_materialization(&env, "dbt.materialization_boom_default", &ctx)
+            .expect_err("erroring macro should propagate");
+        assert!(err.to_string().contains("materialization_boom_default"));
+    }
+
     #[test]
     fn render_materialization_errors_when_template_missing() {
         let env = jinja_env_with_templates(&[]);

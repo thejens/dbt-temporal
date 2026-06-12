@@ -71,11 +71,19 @@ fn init_default() {
 fn init_dbt_pipeline() -> Result<TelemetryHandle> {
     let max_log_verbosity = parse_log_level("DBT_LOG_LEVEL")?.unwrap_or(LevelFilter::INFO);
     let log_format = parse_log_format("DBT_LOG_FORMAT")?.unwrap_or(LogFormat::Default);
+    let config = fs_trace_config(max_log_verbosity, log_format);
 
-    // The worker is long-lived and serves many runs, so per-run trace
-    // correlation happens via Invocation root spans opened inside activities —
-    // this process-level invocation id only labels worker-lifecycle telemetry.
-    let config = FsTraceConfig::new(
+    let (handle, _config_provider) =
+        init_tracing(config).context("initializing dbt telemetry pipeline")?;
+    Ok(handle)
+}
+
+/// The worker's `FsTraceConfig`: OTLP export on, no file sinks. The worker is
+/// long-lived and serves many runs, so per-run trace correlation happens via
+/// Invocation root spans opened inside activities — this process-level
+/// invocation id only labels worker-lifecycle telemetry.
+fn fs_trace_config(max_log_verbosity: LevelFilter, log_format: LogFormat) -> FsTraceConfig {
+    FsTraceConfig::new(
         "dbt-temporal",
         FsCommand::Unset,
         None, // project_dir — multi-project worker; no single project root
@@ -97,11 +105,7 @@ fn init_dbt_pipeline() -> Result<TelemetryHandle> {
         0,     // log_file_max_bytes
         false, // disable_console_output
     )
-    .with_command_name("dbt-temporal");
-
-    let (handle, _config_provider) =
-        init_tracing(config).context("initializing dbt telemetry pipeline")?;
-    Ok(handle)
+    .with_command_name("dbt-temporal")
 }
 
 /// Parse a `LevelFilter` from an env var (`error|warn|info|debug|trace|off`).
@@ -143,6 +147,31 @@ mod tests {
         assert!(!env_truthy("TEST_TRACING_TRUTHY"));
         unsafe { std::env::remove_var("TEST_TRACING_TRUTHY") };
         assert!(!env_truthy("TEST_TRACING_TRUTHY"));
+    }
+
+    #[test]
+    fn init_registers_default_stack_when_otlp_is_off() {
+        // The lib test binary registers no other global subscriber, so the
+        // one-time global init is safe to exercise here. Must stay the only
+        // test calling init() — a second registration would panic.
+        unsafe { std::env::remove_var("DBT_EXPORT_TO_OTLP") };
+        let handle = init().unwrap();
+        assert!(handle.is_none(), "default stack returns no telemetry handle");
+    }
+
+    #[test]
+    fn fs_trace_config_builds_for_all_formats() {
+        // Constructing the config exercises the long positional-argument
+        // call against upstream's signature; a compile-time drift in argument
+        // meaning surfaces here rather than at worker startup.
+        for format in [
+            LogFormat::Default,
+            LogFormat::Text,
+            LogFormat::Json,
+            LogFormat::Otel,
+        ] {
+            let _config = fs_trace_config(LevelFilter::DEBUG, format);
+        }
     }
 
     #[test]

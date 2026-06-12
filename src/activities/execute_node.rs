@@ -56,7 +56,9 @@ pub async fn execute_node_outer(
                 }
                 Err(e) => {
                     super::node_telemetry::record_outcome(&spans, NodeStatus::Error);
-                    tracing::error!(node = %unique_id, error = %e, "activity failed");
+                    // {:#} prints the whole context chain; the top context
+                    // alone routinely hides the actionable cause.
+                    tracing::error!(node = %unique_id, error = %format!("{e:#}"), "activity failed");
                     let dbt_err = downcast_or_wrap_as_adapter(e);
                     let patterns = registry_non_retryable_patterns(&activities.registry, &project);
                     Err(classify_for_temporal(&dbt_err, patterns.as_deref().unwrap_or(&[])))
@@ -457,8 +459,14 @@ async fn execute_node_inner(
             .retrieve(manifest_ref)
             .await
             .with_context(|| format!("loading defer manifest from {manifest_ref}"))?;
+        // Manifests must parse through dbt's own serde path (JSON → YmlValue →
+        // typed): node config structs serialize warehouse-specific keys
+        // flattened, which the plain serde_json deserializer rejects
+        // ("missing field __warehouse_specific_config__").
+        let manifest_str = std::str::from_utf8(&bytes).context("defer manifest is not UTF-8")?;
         let manifest: dbt_schemas::schemas::manifest::DbtManifest =
-            serde_json::from_slice(&bytes).context("parsing defer manifest JSON")?;
+            dbt_schemas::schemas::serde::typed_struct_from_json_str(manifest_str, None)
+                .map_err(|e| anyhow::anyhow!("parsing defer manifest JSON: {e}"))?;
         let quoting = dbt_schemas::schemas::common::DbtQuoting {
             database: Some(false),
             schema: Some(true),
@@ -1453,6 +1461,51 @@ mod tests {
 
         let registry = Arc::new(ProjectRegistry::new(BTreeMap::new()));
         assert!(registry_non_retryable_patterns(&registry, "missing").is_none());
+    }
+
+    // --- test_stores_failures ---
+
+    fn nodes_with_test(
+        store_failures: Option<bool>,
+        store_failures_as: Option<dbt_schemas::schemas::common::StoreFailuresAs>,
+    ) -> dbt_schemas::schemas::Nodes {
+        use dbt_schemas::schemas::nodes::DbtTest;
+
+        let mut test = DbtTest::default();
+        test.deprecated_config.store_failures = store_failures;
+        test.deprecated_config.store_failures_as = store_failures_as;
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes.tests.insert("test.p.t".to_string(), Arc::new(test));
+        nodes
+    }
+
+    #[test]
+    fn test_stores_failures_on_flag_or_persistent_as() {
+        use dbt_schemas::schemas::common::StoreFailuresAs;
+
+        assert!(test_stores_failures(&nodes_with_test(Some(true), None), "test.p.t"));
+        assert!(test_stores_failures(
+            &nodes_with_test(None, Some(StoreFailuresAs::Table)),
+            "test.p.t"
+        ));
+        assert!(test_stores_failures(
+            &nodes_with_test(Some(false), Some(StoreFailuresAs::View)),
+            "test.p.t"
+        ));
+    }
+
+    #[test]
+    fn test_stores_failures_off_for_ephemeral_default_or_unknown() {
+        use dbt_schemas::schemas::common::StoreFailuresAs;
+
+        assert!(!test_stores_failures(&nodes_with_test(None, None), "test.p.t"));
+        assert!(!test_stores_failures(&nodes_with_test(Some(false), None), "test.p.t"));
+        // store_failures_as: ephemeral never persists, even with the flag on.
+        assert!(!test_stores_failures(
+            &nodes_with_test(Some(true), Some(StoreFailuresAs::Ephemeral)),
+            "test.p.t"
+        ));
+        assert!(!test_stores_failures(&nodes_with_test(Some(true), None), "test.p.missing"));
     }
 
     // --- build_test_kwargs_map ---

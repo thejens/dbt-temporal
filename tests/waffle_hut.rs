@@ -28,6 +28,7 @@ mod waffle_hut {
     mod env_isolation;
     mod env_vars;
     mod failure;
+    mod freshness;
     mod hooks;
     mod lifecycle_hooks;
     mod multi_project;

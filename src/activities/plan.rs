@@ -55,6 +55,16 @@ pub async fn plan_project_inner(
             if !command_includes_node_type(input.command.as_str(), rt) {
                 return false;
             }
+            if rt == NodeType::Source {
+                return state
+                    .resolver_state
+                    .nodes
+                    .sources
+                    .get(*id)
+                    .is_some_and(|s| {
+                        super::execute_node::freshness::source_has_freshness_check(s)
+                    });
+            }
             if rt == NodeType::Test
                 && node
                     .common()
@@ -343,6 +353,9 @@ fn raw_code_is_generic_test_macro_def(raw_code: &str) -> bool {
 fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
     match command {
         "run" => matches!(rt, NodeType::Model),
+        // `dbt source freshness`: checks sources only. Sources without
+        // freshness criteria are filtered out separately in the planner.
+        "source-freshness" => matches!(rt, NodeType::Source),
         "build" => matches!(
             rt,
             NodeType::Model

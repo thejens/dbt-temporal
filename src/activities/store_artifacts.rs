@@ -57,6 +57,19 @@ pub async fn store_artifacts_inner(
         None
     };
 
+    // Freshness runs additionally produce a sources.json artifact, mirroring
+    // `dbt source freshness`. Only sources that completed the check carry an
+    // outcome; stale sources fail their activity and appear in run_results
+    // with the error message instead.
+    if input.node_results.iter().any(|r| r.freshness.is_some()) {
+        let sources_json = build_sources_json(&input).context("serializing sources.json")?;
+        let path = store
+            .store(&input.invocation_id, "sources.json", sources_json.as_bytes())
+            .await
+            .context("storing sources.json")?;
+        info!(path = %path, "stored sources.json");
+    }
+
     Ok(StoreArtifactsOutput {
         run_results_path,
         manifest_path,
@@ -85,6 +98,43 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
     serde_json::to_string_pretty(&run_results).map_err(Into::into)
 }
 
+/// Build the `sources.json` content from freshness-bearing node results.
+fn build_sources_json(input: &StoreArtifactsInput) -> Result<String, anyhow::Error> {
+    let results: Vec<serde_json::Value> = input
+        .node_results
+        .iter()
+        .filter_map(|r| {
+            let f = r.freshness.as_ref()?;
+            Some(serde_json::json!({
+                "unique_id": r.unique_id,
+                "max_loaded_at": f.max_loaded_at,
+                "snapshotted_at": f.snapshotted_at,
+                "max_loaded_at_time_ago_in_s": f.max_loaded_at_time_ago_in_s,
+                "status": f.status,
+                "criteria": f.criteria,
+                "adapter_response": r.adapter_response,
+                "timing": r.timing,
+                "execution_time": r.execution_time,
+            }))
+        })
+        .collect();
+    let total: std::time::Duration = input
+        .node_results
+        .iter()
+        .map(|r| std::time::Duration::from_secs_f64(r.execution_time.max(0.0)))
+        .sum();
+    let artifact = serde_json::json!({
+        "metadata": {
+            "invocation_id": input.invocation_id,
+            "dbt_version": env!("CARGO_PKG_VERSION"),
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+        },
+        "results": results,
+        "elapsed_time": total.as_secs_f64(),
+    });
+    serde_json::to_string_pretty(&artifact).map_err(Into::into)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -102,7 +152,43 @@ mod tests {
             compiled_code: None,
             timing: vec![],
             failures: None,
+            freshness: None,
         }
+    }
+
+    #[test]
+    fn build_sources_json_includes_only_freshness_results() -> anyhow::Result<()> {
+        let mut fresh = sample_result("source.p.s.orders", NodeStatus::Success, 0.4);
+        fresh.freshness = Some(crate::types::SourceFreshnessOutcome {
+            max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
+            snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
+            max_loaded_at_time_ago_in_s: 3600.0,
+            status: "pass".into(),
+            criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
+        });
+        let input = StoreArtifactsInput {
+            invocation_id: "inv-9".into(),
+            node_results: vec![fresh, sample_result("model.p.m", NodeStatus::Success, 1.0)],
+            manifest_json: None,
+            manifest_ref: None,
+            run_log: None,
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&build_sources_json(&input)?)?;
+        let results = parsed["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1, "non-freshness results must be excluded");
+        assert_eq!(results[0]["unique_id"], "source.p.s.orders");
+        assert_eq!(results[0]["status"], "pass");
+        assert!(
+            (results[0]["max_loaded_at_time_ago_in_s"]
+                .as_f64()
+                .expect("age")
+                - 3600.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(results[0]["criteria"].is_object());
+        Ok(())
     }
 
     #[test]

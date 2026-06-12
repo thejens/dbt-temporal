@@ -1,3 +1,4 @@
+pub(super) mod freshness;
 mod raw_sql;
 mod schema_patch;
 mod schema_patcher;
@@ -646,7 +647,7 @@ async fn execute_node_inner(
     // (e.g. in `get_create_view_as_sql(target_relation, sql)`). Unit tests
     // have no raw SQL of their own (their path is the defining YAML); their
     // input SQL is assembled below from the tested model + fixtures.
-    let raw_sql_result = if rt == NodeType::UnitTest {
+    let raw_sql_result = if matches!(rt, NodeType::UnitTest | NodeType::Source) {
         Ok(String::new())
     } else {
         resolve_raw_sql(state, common, rt, &node_path)
@@ -705,9 +706,9 @@ async fn execute_node_inner(
     }
 
     match raw_sql_result {
-        Ok(_) if rt == NodeType::UnitTest => {
-            // Unit test SQL was assembled above; the node's own path points
-            // at the defining YAML, not runnable SQL.
+        Ok(_) if matches!(rt, NodeType::UnitTest | NodeType::Source) => {
+            // Unit test SQL is assembled above; sources have no runnable SQL
+            // of their own (freshness queries come from macros).
         }
         Ok(raw_sql) if !raw_sql.trim().is_empty() => {
             // Use the model's original file path as the rendering filename so any
@@ -808,11 +809,69 @@ async fn execute_node_inner(
                 completed_at: compile_end_iso,
             }],
             failures: None,
+            freshness: None,
         });
     }
 
     // --- EXECUTE PHASE ---
     let execute_start = chrono::Utc::now();
+
+    // Sources only appear in `source-freshness` plans: run the freshness
+    // check instead of a materialization and return early. A stale source
+    // (error_after exceeded) fails the activity as non-retryable.
+    if rt == NodeType::Source {
+        let source = state
+            .resolver_state
+            .nodes
+            .sources
+            .get(unique_id)
+            .ok_or_else(|| {
+                DbtTemporalError::ProjectNotFound(format!("source not found: {unique_id}"))
+            })?;
+        let verdict = freshness::run_freshness_check(source, &jinja_env, &node_context)?;
+        let execute_end = chrono::Utc::now();
+        let execution_time = start_instant.elapsed().as_secs_f64();
+        let outcome = match verdict {
+            freshness::FreshnessVerdict::Stale {
+                age_secs,
+                max_allowed_secs,
+            } => {
+                return Err(DbtTemporalError::StaleSource {
+                    unique_id: unique_id.clone(),
+                    age_secs,
+                    max_allowed_secs,
+                }
+                .into());
+            }
+            freshness::FreshnessVerdict::Warning(outcome) => {
+                warn!(
+                    node = %unique_id,
+                    age_secs = outcome.max_loaded_at_time_ago_in_s,
+                    "source freshness warning (warn_after exceeded)"
+                );
+                outcome
+            }
+            freshness::FreshnessVerdict::Fresh(outcome) => outcome,
+        };
+        let message = format!(
+            "freshness {} (age {:.0}s, max_loaded_at {})",
+            outcome.status.to_uppercase(),
+            outcome.max_loaded_at_time_ago_in_s,
+            outcome.max_loaded_at
+        );
+        info!(node = %unique_id, message = %message, "source freshness check complete");
+        return Ok(NodeExecutionResult {
+            unique_id: unique_id.clone(),
+            status: NodeStatus::Success,
+            execution_time,
+            message: Some(message),
+            adapter_response: extract_adapter_response(&result_store),
+            compiled_code: None,
+            timing: build_timing_entries(compile_start, compile_end, execute_start, execute_end),
+            failures: None,
+            freshness: Some(outcome),
+        });
+    }
 
     // Ensure the target schema/dataset exists (dbt does this before materializations).
     // Dispatches to the adapter-specific create_schema macro (e.g. CREATE SCHEMA IF NOT EXISTS).
@@ -944,6 +1003,7 @@ async fn execute_node_inner(
         compiled_code,
         timing,
         failures,
+        freshness: None,
     })
 }
 

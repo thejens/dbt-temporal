@@ -617,6 +617,7 @@ mod tests {
             compiled_code: None,
             timing: vec![],
             failures: None,
+            freshness: None,
         }];
         let phs =
             build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &results);

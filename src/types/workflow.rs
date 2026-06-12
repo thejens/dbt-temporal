@@ -205,6 +205,27 @@ pub struct NodeExecutionResult {
     pub timing: Vec<TimingEntry>,
     /// For test nodes: number of failures.
     pub failures: Option<i64>,
+    /// For source nodes under `source-freshness`: the freshness check detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<SourceFreshnessOutcome>,
+}
+
+/// Detail of a completed source freshness check, carried on the node result
+/// so `store_artifacts` can assemble `sources.json` without re-resolving the
+/// source's criteria.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceFreshnessOutcome {
+    /// RFC3339 timestamp of `max(loaded_at_field)` in the source.
+    pub max_loaded_at: String,
+    /// RFC3339 timestamp taken by the warehouse at check time.
+    pub snapshotted_at: String,
+    /// Age of the freshest row in seconds (snapshotted_at - max_loaded_at).
+    pub max_loaded_at_time_ago_in_s: f64,
+    /// `pass` | `warn` (dbt's FreshnessStatus; `error` aborts the activity
+    /// instead of producing an outcome).
+    pub status: String,
+    /// The warn_after/error_after criteria the check was evaluated against.
+    pub criteria: dbt_schemas::schemas::common::FreshnessDefinition,
 }
 
 /// A single timing phase (compile or execute).
@@ -455,6 +476,7 @@ mod tests {
                 completed_at: "2025-01-01T00:00:01Z".into(),
             }],
             failures: None,
+            freshness: None,
         };
         let json = serde_json::to_string(&result)?;
         let back: NodeExecutionResult = serde_json::from_str(&json)?;

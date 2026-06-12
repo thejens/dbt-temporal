@@ -24,6 +24,13 @@ pub enum DbtTemporalError {
         failures: i64,
         diff: String,
     },
+    /// A source freshness check exceeded its error_after threshold —
+    /// non-retryable (the source won't get fresher by retrying).
+    StaleSource {
+        unique_id: String,
+        age_secs: f64,
+        max_allowed_secs: i64,
+    },
 }
 
 impl DbtTemporalError {
@@ -50,6 +57,15 @@ impl fmt::Display for DbtTemporalError {
                 failures,
                 diff,
             } => write!(f, "unit test failed: {unique_id} ({failures} differing row(s))\n{diff}"),
+            Self::StaleSource {
+                unique_id,
+                age_secs,
+                max_allowed_secs,
+            } => write!(
+                f,
+                "source freshness error: {unique_id} is stale \
+                 (age {age_secs:.0}s exceeds error_after {max_allowed_secs}s)"
+            ),
         }
     }
 }
@@ -62,7 +78,8 @@ impl std::error::Error for DbtTemporalError {
             | Self::Configuration(_)
             | Self::ProjectNotFound(_)
             | Self::TestFailure { .. }
-            | Self::UnitTestFailure { .. } => None,
+            | Self::UnitTestFailure { .. }
+            | Self::StaleSource { .. } => None,
         }
     }
 }

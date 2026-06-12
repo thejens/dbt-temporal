@@ -41,6 +41,7 @@ flowchart TD
 - **Multi-project** — load multiple dbt projects into one worker; select which to run per workflow invocation
 - **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
 - **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
+- **Source freshness** — the `source-freshness` command runs each source's freshness query (`loaded_at_field` or `loaded_at_query`) as a parallel activity, evaluates `warn_after`/`error_after`, fails the run on stale sources, and writes a `sources.json` artifact
 - **dbt unit tests** — `unit_tests:` definitions run as activities in `dbt build`, executing the model's SQL against `given` fixtures (dict/CSV/SQL, inline or fixture files) and comparing to `expect` rows order-insensitively; a unit test runs before its model and a failure skips the model and everything downstream
 - **Per-workflow environment overrides** — each workflow can override `env_var()` values, including database connection settings, enabling parallel runs against different warehouses from a single worker
 - **Artifact storage** — write `run_results.json`, `manifest.json`, and a CLI-style run log to local disk, S3, or GCS
@@ -77,7 +78,7 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 }'
 ```
 
-All fields are optional. `command` defaults to `build`. `project` is auto-resolved when only one project is loaded.
+All fields are optional. `command` defaults to `build`; `run`, `compile`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
 
 Additional inputs: `defer_manifest_ref` (defer unbuilt refs to a previous manifest, `--defer --state` equivalent), `event_time_start`/`event_time_end` (microbatch window), `retry_from` — point it at a previous run's `run_results.json` artifact to re-run only the nodes that did not succeed (the `dbt retry` equivalent; start it with the same `select`/`exclude` as the original run) — and `state_manifest_ref`, which enables `state:modified` / `state:new` select methods against a previous `manifest.json` artifact (the `--state` equivalent; slim CI pattern: `"select": "state:modified+", "state_manifest_ref": "<prod manifest>"`, often combined with `defer_manifest_ref` pointing at the same manifest).
 

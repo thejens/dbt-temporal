@@ -294,6 +294,7 @@ mod tests {
             compiled_code: None,
             timing: vec![],
             failures,
+            freshness: None,
         }
     }
 

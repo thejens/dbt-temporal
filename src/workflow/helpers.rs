@@ -140,6 +140,7 @@ pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         compiled_code: None,
         timing: vec![],
         failures: None,
+        freshness: None,
     }
 }
 
@@ -153,6 +154,7 @@ pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
         compiled_code: None,
         timing: vec![],
         failures: None,
+        freshness: None,
     }
 }
 
@@ -166,6 +168,7 @@ pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         compiled_code: None,
         timing: vec![],
         failures: None,
+        freshness: None,
     }
 }
 

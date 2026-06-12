@@ -205,17 +205,14 @@ impl DbtTemporalConfig {
                 .transpose()
                 .context("invalid HEALTH_PORT")?,
             write_artifacts: std::env::var("WRITE_ARTIFACTS")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false),
+                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true"),
             write_catalog: std::env::var("WRITE_CATALOG")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false),
+                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true"),
             artifact_store: std::env::var("ARTIFACT_STORE")
                 .unwrap_or_else(|_| "/tmp/dbt-artifacts".to_string()),
             search_attributes: tuning::parse_search_attributes()?,
             write_run_log: std::env::var("WRITE_RUN_LOG")
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(true),
+                .map_or(true, |v| v != "0" && v.to_lowercase() != "false"),
             worker_tuning: tuning::parse_worker_tuning()?,
             sticky_queue_timeout_secs: tuning::parse_env_u64(
                 "WORKER_STICKY_QUEUE_TIMEOUT_SECS",
@@ -239,8 +236,7 @@ impl DbtTemporalConfig {
             poller_autoscaling: tuning::parse_poller_autoscaling()?,
             temporal_metrics: tuning::parse_temporal_metrics()?,
             priority_scheduling: std::env::var("TEMPORAL_PRIORITY_SCHEDULING")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         })
     }
 }

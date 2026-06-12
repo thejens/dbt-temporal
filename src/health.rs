@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 const TOUCH_INTERVAL: Duration = Duration::from_secs(15);
-const STALE_THRESHOLD: Duration = Duration::from_secs(60);
+const STALE_THRESHOLD: Duration = Duration::from_mins(1);
 
 /// Touch the health file once (create or update mtime).
 pub async fn touch(path: &Path) -> std::io::Result<()> {
@@ -62,7 +62,7 @@ pub fn spawn_health_server(port: u16, path: PathBuf) -> tokio::task::JoinHandle<
 }
 
 async fn run_health_server(listener: tokio::net::TcpListener, path: PathBuf) {
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let port = listener.local_addr().map_or(0, |a| a.port());
     info!(port, "health HTTP server listening");
 
     loop {

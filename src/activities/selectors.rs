@@ -294,15 +294,13 @@ fn matches_base_criteria(
             bare.eq_ignore_ascii_case(&criteria.value)
         }
         MethodName::Package => node.common().package_name == criteria.value,
-        MethodName::Config => {
-            if criteria.method_args.first().map(String::as_str) == Some("materialized") {
-                node.base()
-                    .materialized
-                    .to_string()
-                    .eq_ignore_ascii_case(&criteria.value)
-            } else {
-                false
-            }
+        MethodName::Config
+            if criteria.method_args.first().map(String::as_str) == Some("materialized") =>
+        {
+            node.base()
+                .materialized
+                .to_string()
+                .eq_ignore_ascii_case(&criteria.value)
         }
         _ => false,
     }

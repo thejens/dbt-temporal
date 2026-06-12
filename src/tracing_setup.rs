@@ -43,9 +43,7 @@ pub fn init() -> Result<Option<TelemetryHandle>> {
 
 /// `1`/`true` (case-insensitive) → true.
 fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// The fmt-based stack used when OTLP export is off.

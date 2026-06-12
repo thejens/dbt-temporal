@@ -68,8 +68,7 @@ pub fn parse_worker_tuning() -> Result<WorkerTuningConfig> {
 /// fast at boot with the env var name in the error.
 pub fn parse_poller_autoscaling() -> Result<Option<PollerAutoscalingConfig>> {
     let enabled = std::env::var("WORKER_POLLER_AUTOSCALING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     if !enabled {
         return Ok(None);
     }

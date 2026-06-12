@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         let path = std::env::var("HEALTH_FILE").unwrap_or_else(|_| "/tmp/health".to_string());
         let meta = std::fs::metadata(&path)?;
         let age = meta.modified()?.elapsed().unwrap_or(Duration::MAX);
-        if age < Duration::from_secs(60) {
+        if age < Duration::from_mins(1) {
             std::process::exit(0);
         }
         std::process::exit(1);

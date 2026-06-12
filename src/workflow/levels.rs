@@ -252,8 +252,8 @@ async fn execute_one_level(
         let future = ctx.start_activity(
             DbtActivities::execute_node,
             node_input,
-            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(3600))
-                .heartbeat_timeout(Duration::from_secs(300))
+            ActivityOptions::with_start_to_close_timeout(Duration::from_hours(1))
+                .heartbeat_timeout(Duration::from_mins(5))
                 .maybe_activity_id(activity_label.clone())
                 .maybe_summary(activity_label)
                 .cancellation_type(ActivityCancellationType::TryCancel)

@@ -260,6 +260,7 @@ pub fn bigquery_test_config_with_project_dir(
         health_file: None,
         health_port: None,
         write_artifacts: false,
+        write_catalog: false,
         artifact_store: artifact_dir.to_string_lossy().to_string(),
         search_attributes: std::collections::BTreeMap::default(),
         write_run_log: false,

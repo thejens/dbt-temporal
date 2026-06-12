@@ -1,6 +1,7 @@
 // The `#[activities]` macro generates per-activity definition types without Debug impls.
 #![allow(missing_debug_implementations)]
 
+mod catalog;
 pub mod dag;
 pub mod execute_node;
 pub mod heartbeat;
@@ -21,7 +22,7 @@ use temporalio_sdk::error::ApplicationFailure;
 use crate::artifact_store::ArtifactStore;
 use crate::config::{
     PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig, WriteArtifacts,
-    WriteRunLog,
+    WriteCatalog, WriteRunLog,
 };
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
@@ -40,6 +41,7 @@ pub struct DbtActivities {
     pub registered_attrs: RegisteredSearchAttributes,
     pub write_run_log: WriteRunLog,
     pub write_artifacts: WriteArtifacts,
+    pub write_catalog: WriteCatalog,
     pub priority_scheduling: PriorityScheduling,
 }
 
@@ -131,6 +133,7 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(BTreeSet::new()),
             write_run_log: WriteRunLog(true),
             write_artifacts: WriteArtifacts(false),
+            write_catalog: WriteCatalog(false),
             priority_scheduling: PriorityScheduling(false),
         };
         let s = format!("{activities:?}");

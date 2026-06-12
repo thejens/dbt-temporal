@@ -10,6 +10,7 @@ pub use self::discovery::is_remote_source;
 
 /// Configuration for the dbt-temporal worker, read from environment variables.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Env-derived flags: independent toggles, not a state machine.
 pub struct DbtTemporalConfig {
     // Temporal connection
     pub temporal_address: String,
@@ -32,6 +33,10 @@ pub struct DbtTemporalConfig {
     /// Whether to write artifacts (run_results.json, manifest.json, log.txt) after each run.
     /// Controlled by `WRITE_ARTIFACTS` (default: false).
     pub write_artifacts: bool,
+    /// Whether to also generate a `catalog.json` artifact (warehouse column
+    /// metadata for the run's relations) when storing artifacts.
+    /// Controlled by `WRITE_CATALOG` (default: false). Requires `WRITE_ARTIFACTS`.
+    pub write_catalog: bool,
     /// Artifact store location. Accepts a local path or a cloud URL (`gs://…`, `s3://…`).
     /// Controlled by `ARTIFACT_STORE` (default: `/tmp/dbt-artifacts`).
     pub artifact_store: String,
@@ -159,6 +164,10 @@ pub struct WriteRunLog(pub bool);
 #[derive(Debug, Clone)]
 pub struct WriteArtifacts(pub bool);
 
+/// Newtype: whether catalog.json generation is enabled (`WRITE_CATALOG`).
+#[derive(Debug, Clone, Copy)]
+pub struct WriteCatalog(pub bool);
+
 /// Newtype wrapper for priority-scheduling config.
 #[derive(Debug, Clone)]
 pub struct PriorityScheduling(pub bool);
@@ -196,6 +205,9 @@ impl DbtTemporalConfig {
                 .transpose()
                 .context("invalid HEALTH_PORT")?,
             write_artifacts: std::env::var("WRITE_ARTIFACTS")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            write_catalog: std::env::var("WRITE_CATALOG")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
             artifact_store: std::env::var("ARTIFACT_STORE")
@@ -257,6 +269,7 @@ mod tests {
         "HEALTH_FILE",
         "HEALTH_PORT",
         "WRITE_ARTIFACTS",
+        "WRITE_CATALOG",
         "ARTIFACT_STORE",
         "WRITE_RUN_LOG",
         "TEMPORAL_SEARCH_ATTRIBUTES",

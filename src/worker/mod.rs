@@ -14,7 +14,7 @@ use tracing::info;
 use crate::activities::DbtActivities;
 use crate::config::{
     DbtTemporalConfig, PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig,
-    WriteArtifacts, WriteRunLog,
+    WriteArtifacts, WriteCatalog, WriteRunLog,
 };
 use crate::project_registry::ProjectRegistry;
 use crate::worker_state::WorkerState;
@@ -163,6 +163,7 @@ pub async fn connect_and_register(
         registered_attrs: RegisteredSearchAttributes(registered_attrs),
         write_run_log: WriteRunLog(config.write_run_log),
         write_artifacts: WriteArtifacts(config.write_artifacts),
+        write_catalog: WriteCatalog(config.write_catalog),
         priority_scheduling: PriorityScheduling(config.priority_scheduling),
     };
 

@@ -129,6 +129,7 @@ pub fn build_store_artifacts_input(
 ) -> StoreArtifactsInput {
     StoreArtifactsInput {
         invocation_id: plan.invocation_id.clone(),
+        project: Some(plan.project.clone()),
         node_results: all_results.to_vec(),
         manifest_json: plan.manifest_json.clone(),
         manifest_ref: plan.manifest_ref.clone(),

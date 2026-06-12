@@ -240,6 +240,9 @@ pub struct TimingEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreArtifactsInput {
     pub invocation_id: String,
+    /// Project the run executed against — needed for catalog generation.
+    #[serde(default)]
+    pub project: Option<String>,
     pub node_results: Vec<NodeExecutionResult>,
     /// Inline manifest JSON, or None if stored via manifest_ref.
     pub manifest_json: Option<String>,
@@ -260,6 +263,9 @@ pub struct StoreArtifactsOutput {
     /// Path/URI where log.txt was stored (if run-log writing was enabled).
     #[serde(default)]
     pub log_path: Option<String>,
+    /// Path/URI where catalog.json was stored (if catalog writing was enabled).
+    #[serde(default)]
+    pub catalog_path: Option<String>,
 }
 
 /// Final workflow output.

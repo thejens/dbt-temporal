@@ -188,6 +188,19 @@ const fn is_create_schema_eligible(rt: NodeType) -> bool {
     matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot | NodeType::UnitTest)
 }
 
+/// True if this test node persists failing rows to the warehouse
+/// (`store_failures` / `store_failures_as: table|view`). Such tests need
+/// their audit schema created before the materialization runs.
+fn test_stores_failures(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> bool {
+    use dbt_schemas::schemas::common::StoreFailuresAs;
+
+    nodes.tests.get(unique_id).is_some_and(|test| {
+        let config = &test.deprecated_config;
+        matches!(config.store_failures_as, Some(StoreFailuresAs::Table | StoreFailuresAs::View))
+            || (config.store_failures_as.is_none() && config.store_failures == Some(true))
+    })
+}
+
 /// True if a node of this resource_type + materialization should produce an
 /// adapter response. Used as a no-op guard: an empty adapter response on a
 /// node that *should* execute SQL is a sign that `statement('main')` never
@@ -876,7 +889,11 @@ async fn execute_node_inner(
     // Ensure the target schema/dataset exists (dbt does this before materializations).
     // Dispatches to the adapter-specific create_schema macro (e.g. CREATE SCHEMA IF NOT EXISTS).
     // Uses `this` which is the target relation (database + schema + identifier).
-    if is_create_schema_eligible(rt)
+    // Tests normally only read, but with store_failures they write failing
+    // rows into the audit schema — which may not exist yet.
+    let needs_schema = is_create_schema_eligible(rt)
+        || (rt == NodeType::Test && test_stores_failures(&state.resolver_state.nodes, unique_id));
+    if needs_schema
         && let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", &node_context, &[])
     {
         tracing::warn!(node = %unique_id, error = %e, "create_schema failed (non-fatal)");

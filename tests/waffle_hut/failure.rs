@@ -345,3 +345,106 @@ async fn test_retry_from_failure() -> Result<()> {
     std::fs::remove_dir_all(&fixture_dir).ok();
     result
 }
+
+/// store_failures: a warn-severity test that finds failing rows persists them
+/// to the audit schema (created on demand) while the run stays green.
+#[tokio::test(flavor = "current_thread")]
+async fn test_store_failures_persists_failing_rows() -> Result<()> {
+    init_tracing();
+
+    let infra = shared_infra();
+    let fixture_dir = copy_fixture("waffle_hut")?;
+    std::fs::remove_dir_all(fixture_dir.join("target")).ok();
+
+    // Amend the existing schema.yml — a second yml patching stg_customers
+    // would be rejected as a duplicate resource definition.
+    let schema_path = fixture_dir.join("models/schema.yml");
+    let schema_yml = std::fs::read_to_string(&schema_path).context("reading schema.yml")?;
+    let amended = schema_yml.replace(
+        "  - name: stg_customers
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+",
+        "  - name: stg_customers
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+      - name: first_name
+        tests:
+          - accepted_values:
+              name: stored_failures_check
+              values: ['__nobody__']
+              config:
+                severity: warn
+                store_failures: true
+",
+    );
+    anyhow::ensure!(amended != schema_yml, "schema.yml anchor not found");
+    std::fs::write(&schema_path, amended).context("writing amended schema.yml")?;
+
+    let config = test_config(infra, &fixture_dir)?;
+    let task_queue = config.temporal_task_queue.clone();
+
+    let mut worker = dbt_temporal::worker::build_worker(&config)
+        .await
+        .context("building worker")?;
+
+    let local = tokio::task::LocalSet::new();
+    let worker_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    let worker_abort_rx = std::sync::Arc::clone(&worker_abort);
+    let _worker_task = local.spawn_local(async move {
+        tokio::select! {
+            r = worker.run() => r,
+            () = worker_abort_rx.notified() => Ok(()),
+        }
+    });
+
+    let result: Result<()> = local
+        .run_until(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let client = connect_client(&infra.temporal_addr).await?;
+            let run =
+                run_dbt_workflow(&client, &task_queue, make_input("build", None, None, false))
+                    .await?;
+            assert!(run.output.success, "warn-severity test must not fail the run");
+
+            let test_result = run
+                .output
+                .node_results
+                .iter()
+                .find(|r| r.unique_id.contains("stored_failures_check"))
+                .context("stored_failures_check test missing from results")?;
+            assert!(
+                test_result.failures.is_some_and(|n| n > 0),
+                "test should report failing rows: {test_result:?}"
+            );
+
+            // The failing rows must be persisted in the warehouse. The audit
+            // schema is derived by the resolver, so locate the table by name.
+            let schema = psql_query(
+                infra,
+                "select table_schema from information_schema.tables \
+                 where table_name = 'stored_failures_check'",
+            );
+            let schema = schema.trim();
+            assert!(!schema.is_empty(), "stored_failures_check table should exist in some schema");
+            let count = psql_query(
+                infra,
+                &format!("select count(*) from \"{schema}\".stored_failures_check"),
+            );
+            let count: i64 = count.trim().parse().context("parsing stored row count")?;
+            assert!(count > 0, "audit table should hold the failing rows, got {count}");
+            Ok(())
+        })
+        .await;
+
+    worker_abort.notify_one();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+    result
+}

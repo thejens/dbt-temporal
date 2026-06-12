@@ -19,6 +19,7 @@ async fn test_artifacts() -> Result<()> {
     let mut config = test_config(infra, &fixture_dir)?;
     config.write_artifacts = true;
     config.write_run_log = true;
+    config.write_catalog = true;
     let task_queue = config.temporal_task_queue.clone();
     let artifact_dir = config.artifact_store.clone();
 
@@ -104,6 +105,34 @@ async fn test_artifacts() -> Result<()> {
                 output.log_path.is_some(),
                 "DbtRunOutput.log_path should be set when write_run_log=true"
             );
+
+            // Verify catalog.json: all 5 built models with columns, plus the
+            // raw sources, keyed by unique_id.
+            let catalog_path = artifacts.catalog_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("catalog_path should be set when write_catalog=true")
+            })?;
+            assert!(
+                Path::new(catalog_path).exists(),
+                "catalog.json should exist at {catalog_path}"
+            );
+            let catalog: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(catalog_path).context("reading catalog.json")?,
+            )
+            .context("parsing catalog.json")?;
+            let nodes = catalog["nodes"]
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("catalog nodes should be an object"))?;
+            assert_eq!(nodes.len(), 5, "catalog should cover the 5 built models");
+            let customers = &nodes["model.waffle_hut.customers"];
+            assert_eq!(customers["metadata"]["name"], "customers");
+            assert!(
+                customers["columns"]["customer_id"].is_object(),
+                "customers catalog entry should list customer_id: {customers}"
+            );
+            let sources = catalog["sources"]
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("catalog sources should be an object"))?;
+            assert_eq!(sources.len(), 3, "catalog should cover the 3 raw sources");
 
             Ok(())
         })

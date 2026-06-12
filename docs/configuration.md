@@ -81,6 +81,7 @@ DBT_PROJECT_DIRS=/local/analytics,git+https://github.com/org/shared-models.git#m
 | `WRITE_ARTIFACTS` | `false` | Enable artifact writing (`run_results.json`, `manifest.json`, `log.txt`) after each run |
 | `ARTIFACT_STORE` | `/tmp/dbt-artifacts` | Local path or cloud URL (`gs://…`, `s3://…`). Cloud URLs require `gcs` or `aws` feature. |
 | `WRITE_RUN_LOG` | `true` | Write a CLI-style run log (`log.txt`) to the artifact store alongside `run_results.json` |
+| `WRITE_CATALOG` | `false` | Also generate a partial `catalog.json` (`dbt docs generate` equivalent): per-relation column names and types from the warehouse for every node the run built plus all sources. Table types come from each node's materialization; comments/owner/stats are omitted. Catalog problems are logged but never fail the run. Requires `WRITE_ARTIFACTS=1`. |
 
 `ARTIFACT_STORE` accepts the same URL schemes as `DBT_PROJECT_DIRS`:
 

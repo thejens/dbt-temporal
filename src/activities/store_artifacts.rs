@@ -57,6 +57,24 @@ pub async fn store_artifacts_inner(
         None
     };
 
+    // Optionally generate catalog.json (column metadata for the run's
+    // relations). Catalog problems are logged, never fatal — the run's real
+    // artifacts are already stored at this point.
+    let catalog_path = if activities.write_catalog.0 {
+        match generate_and_store_catalog(activities, &input, store.as_ref()).await {
+            Ok(path) => {
+                info!(path = %path, "stored catalog.json");
+                Some(path)
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "catalog.json generation failed (non-fatal)");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Freshness runs additionally produce a sources.json artifact, mirroring
     // `dbt source freshness`. Only sources that completed the check carry an
     // outcome; stale sources fail their activity and appear in run_results
@@ -74,7 +92,26 @@ pub async fn store_artifacts_inner(
         run_results_path,
         manifest_path,
         log_path,
+        catalog_path,
     })
+}
+
+/// Build catalog.json for the run's project and store it.
+async fn generate_and_store_catalog(
+    activities: &DbtActivities,
+    input: &StoreArtifactsInput,
+    store: &dyn crate::artifact_store::ArtifactStore,
+) -> Result<String, anyhow::Error> {
+    let state = activities
+        .registry
+        .get(input.project.as_deref())
+        .context("resolving project for catalog generation")?;
+    let catalog_json =
+        super::catalog::build_catalog_json(state, &input.node_results, &input.invocation_id)?;
+    store
+        .store(&input.invocation_id, "catalog.json", catalog_json.as_bytes())
+        .await
+        .context("storing catalog.json")
 }
 
 /// Build the `run_results.json` content from the store artifacts input.
@@ -168,6 +205,7 @@ mod tests {
         });
         let input = StoreArtifactsInput {
             invocation_id: "inv-9".into(),
+            project: None,
             node_results: vec![fresh, sample_result("model.p.m", NodeStatus::Success, 1.0)],
             manifest_json: None,
             manifest_ref: None,
@@ -195,6 +233,7 @@ mod tests {
     fn build_run_results_json_structure() -> anyhow::Result<()> {
         let input = StoreArtifactsInput {
             invocation_id: "inv-123".into(),
+            project: None,
             node_results: vec![
                 sample_result("model.a", NodeStatus::Success, 1.5),
                 sample_result("model.b", NodeStatus::Error, 0.3),
@@ -232,6 +271,7 @@ mod tests {
     fn build_run_results_json_empty_results() -> anyhow::Result<()> {
         let input = StoreArtifactsInput {
             invocation_id: "inv-empty".into(),
+            project: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: None,
@@ -279,6 +319,7 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
             write_run_log: WriteRunLog(write_run_log),
             write_artifacts: WriteArtifacts(true),
+            write_catalog: crate::config::WriteCatalog(false),
             priority_scheduling: crate::config::PriorityScheduling(false),
         }
     }
@@ -290,6 +331,7 @@ mod tests {
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-1".into(),
+            project: None,
             node_results: vec![sample_result("model.a", NodeStatus::Success, 0.1)],
             manifest_json: Some("{\"manifest\":\"yes\"}".to_string()),
             manifest_ref: None,
@@ -318,6 +360,7 @@ mod tests {
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-2".into(),
+            project: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: Some("/already/stored/manifest.json".to_string()),
@@ -336,6 +379,7 @@ mod tests {
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-3".into(),
+            project: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: None,
@@ -356,6 +400,7 @@ mod tests {
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-log".into(),
+            project: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,
@@ -381,6 +426,7 @@ mod tests {
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-skiplog".into(),
+            project: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,
@@ -403,11 +449,13 @@ mod tests {
             registered_attrs: RegisteredSearchAttributes(std::collections::BTreeSet::new()),
             write_run_log: WriteRunLog(false),
             write_artifacts: WriteArtifacts(true),
+            write_catalog: crate::config::WriteCatalog(false),
             priority_scheduling: crate::config::PriorityScheduling(false),
         };
 
         let input = StoreArtifactsInput {
             invocation_id: "inv-noop".into(),
+            project: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,

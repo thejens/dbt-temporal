@@ -264,6 +264,7 @@ mod tests {
             health_file: None,
             health_port: None,
             write_artifacts: false,
+            write_catalog: false,
             artifact_store: "/tmp/dbt-artifacts".into(),
             search_attributes: std::collections::BTreeMap::new(),
             write_run_log: true,

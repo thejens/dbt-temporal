@@ -54,6 +54,11 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 filetime = "0.2"
 arrow-select = "56"
+# Unit test result comparison (patched to the sdf-labs fork like all arrow crates).
+arrow-array = "56"
+arrow-cast = "56"
+# CSV fixture parsing for dbt unit tests.
+csv = "1"
 tempfile = "3"
 prost-types = { version = "0.7", package = "prost-wkt-types" }
 

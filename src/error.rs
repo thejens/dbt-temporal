@@ -17,6 +17,13 @@ pub enum DbtTemporalError {
     ProjectNotFound(String),
     /// A dbt test query returned failing rows — non-retryable (data won't change on retry).
     TestFailure { unique_id: String, failures: i64 },
+    /// A dbt unit test's actual output differed from the expected fixture —
+    /// non-retryable (fixtures and model SQL won't change on retry).
+    UnitTestFailure {
+        unique_id: String,
+        failures: i64,
+        diff: String,
+    },
 }
 
 impl DbtTemporalError {
@@ -38,6 +45,11 @@ impl fmt::Display for DbtTemporalError {
                 failures,
                 ..
             } => write!(f, "test failed: {unique_id} ({failures} failing row(s))"),
+            Self::UnitTestFailure {
+                unique_id,
+                failures,
+                diff,
+            } => write!(f, "unit test failed: {unique_id} ({failures} differing row(s))\n{diff}"),
         }
     }
 }
@@ -49,7 +61,8 @@ impl std::error::Error for DbtTemporalError {
             Self::Compilation(_)
             | Self::Configuration(_)
             | Self::ProjectNotFound(_)
-            | Self::TestFailure { .. } => None,
+            | Self::TestFailure { .. }
+            | Self::UnitTestFailure { .. } => None,
         }
     }
 }

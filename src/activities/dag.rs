@@ -170,6 +170,56 @@ pub fn inject_test_gates(
     }
 }
 
+/// Rewire unit test edges so unit tests run BEFORE the model they test.
+///
+/// Matches dbt semantics: a unit test executes the model's SQL against
+/// fixtures, so it needs the model's *inputs* (for column-type probing of
+/// mocked relations) but not the model itself; the model in turn must wait
+/// for its unit tests and is skipped when one fails.
+///
+/// Concretely, for unit test U testing model M:
+/// * `deps[U]` loses M and inherits M's own selected deps.
+/// * `deps[M]` gains U (only when M is selected — `dbt test`-style runs
+///   schedule unit tests without their models).
+pub fn inject_unit_test_gates(
+    nodes: &Nodes,
+    selected_ids: &[String],
+    deps: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let selected_set: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
+
+    // Snapshot tested-model deps first so two unit tests on the same model
+    // both inherit the model's ORIGINAL inputs (not each other via the gate
+    // edges added below).
+    let mut rewires: Vec<(String, String, BTreeSet<String>)> = Vec::new();
+    for id in selected_ids {
+        let Some(unit) = nodes.unit_tests.get(id) else {
+            continue;
+        };
+        let Some(model_id) = unit
+            .tested_node_unique_id
+            .clone()
+            .or_else(|| unit.__base_attr__.depends_on.nodes.first().cloned())
+        else {
+            continue;
+        };
+        let model_deps = deps.get(&model_id).cloned().unwrap_or_default();
+        rewires.push((id.clone(), model_id, model_deps));
+    }
+
+    for (unit_id, model_id, model_deps) in rewires {
+        if let Some(unit_deps) = deps.get_mut(&unit_id) {
+            unit_deps.remove(&model_id);
+            unit_deps.extend(model_deps);
+        }
+        if selected_set.contains(model_id.as_str())
+            && let Some(m_deps) = deps.get_mut(&model_id)
+        {
+            m_deps.insert(unit_id);
+        }
+    }
+}
+
 /// Compute topological levels from a dependency map using Kahn's algorithm.
 /// Returns levels where each level's nodes have no deps on nodes in the same or later levels.
 pub fn topological_levels(
@@ -687,5 +737,106 @@ mod tests {
         let deps_map = build_dependency_map(&nodes, &selected);
         // No selected ancestor reachable through model.other.b → empty dep set.
         assert!(deps_map["model.x.a"].is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod unit_test_gate_tests {
+    use std::sync::Arc;
+
+    use dbt_schemas::schemas::nodes::DbtUnitTest;
+
+    use super::*;
+
+    fn add_unit_test(nodes: &mut Nodes, unique_id: &str, tested_model: &str) {
+        let mut unit = DbtUnitTest {
+            tested_node_unique_id: Some(tested_model.to_string()),
+            ..Default::default()
+        };
+        unique_id.clone_into(&mut unit.__common_attr__.unique_id);
+        nodes
+            .unit_tests
+            .insert(unique_id.to_string(), Arc::new(unit));
+    }
+
+    fn deps(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+        entries
+            .iter()
+            .map(|(node, node_deps)| {
+                (node.to_string(), node_deps.iter().map(ToString::to_string).collect())
+            })
+            .collect()
+    }
+
+    fn selected(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn unit_test_gates_model_and_inherits_inputs() {
+        let mut nodes = Nodes::default();
+        add_unit_test(&mut nodes, "unit_test.p.u", "model.p.m");
+        let sel = selected(&["model.p.input", "model.p.m", "unit_test.p.u"]);
+        let mut d = deps(&[
+            ("model.p.input", &[]),
+            ("model.p.m", &["model.p.input"]),
+            ("unit_test.p.u", &["model.p.m"]),
+        ]);
+        inject_unit_test_gates(&nodes, &sel, &mut d);
+
+        // The unit test no longer waits for the model; it inherits the
+        // model's inputs and gates the model instead.
+        assert_eq!(d["unit_test.p.u"], deps(&[("x", &["model.p.input"])])["x"]);
+        assert!(d["model.p.m"].contains("unit_test.p.u"));
+        assert!(d["model.p.m"].contains("model.p.input"));
+        // No cycle: levels must compute.
+        topological_levels(&d).unwrap();
+    }
+
+    #[test]
+    fn two_unit_tests_on_same_model_do_not_chain() {
+        let mut nodes = Nodes::default();
+        add_unit_test(&mut nodes, "unit_test.p.u1", "model.p.m");
+        add_unit_test(&mut nodes, "unit_test.p.u2", "model.p.m");
+        let sel = selected(&["model.p.m", "unit_test.p.u1", "unit_test.p.u2"]);
+        let mut d = deps(&[
+            ("model.p.m", &[]),
+            ("unit_test.p.u1", &["model.p.m"]),
+            ("unit_test.p.u2", &["model.p.m"]),
+        ]);
+        inject_unit_test_gates(&nodes, &sel, &mut d);
+
+        // Both unit tests run first, in parallel.
+        assert!(d["unit_test.p.u1"].is_empty());
+        assert!(d["unit_test.p.u2"].is_empty());
+        assert!(d["model.p.m"].contains("unit_test.p.u1"));
+        assert!(d["model.p.m"].contains("unit_test.p.u2"));
+        topological_levels(&d).unwrap();
+    }
+
+    #[test]
+    fn unit_test_without_selected_model_runs_standalone() {
+        // `dbt test`-style selection: the model is not in the plan, so the
+        // unit test must not gain edges to it.
+        let mut nodes = Nodes::default();
+        add_unit_test(&mut nodes, "unit_test.p.u", "model.p.m");
+        let sel = selected(&["unit_test.p.u"]);
+        let mut d = deps(&[("unit_test.p.u", &[])]);
+        inject_unit_test_gates(&nodes, &sel, &mut d);
+
+        assert!(d["unit_test.p.u"].is_empty());
+        assert!(!d.contains_key("model.p.m"));
+        topological_levels(&d).unwrap();
+    }
+
+    #[test]
+    fn non_unit_test_nodes_are_untouched() {
+        let nodes = Nodes::default();
+        let sel = selected(&["model.p.a", "model.p.b"]);
+        let mut d = deps(&[("model.p.a", &[]), ("model.p.b", &["model.p.a"])]);
+        let before = d.clone();
+        inject_unit_test_gates(&nodes, &sel, &mut d);
+        assert_eq!(d, before);
     }
 }

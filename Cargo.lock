@@ -2676,12 +2676,15 @@ name = "dbt-temporal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-cast",
  "arrow-select",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
  "chrono",
+ "csv",
  "dbt-adapter",
  "dbt-agate",
  "dbt-antlr4",

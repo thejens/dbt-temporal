@@ -43,6 +43,13 @@ pub fn get_node_config_yml(
                 return v;
             }
         }
+        NodeType::UnitTest => {
+            if let Some(unit) = nodes.unit_tests.get(unique_id)
+                && let Ok(v) = dbt_yaml::to_value(&unit.deprecated_config)
+            {
+                return v;
+            }
+        }
         _ => {}
     }
 

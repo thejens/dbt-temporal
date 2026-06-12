@@ -1,6 +1,7 @@
 mod raw_sql;
 mod schema_patch;
 mod schema_patcher;
+mod unit_test;
 mod yml_to_value;
 
 use std::collections::BTreeMap;
@@ -167,20 +168,23 @@ fn patch_compiled_schema(
 /// Pick the materialization name to dispatch on. Seeds are forced to "seed"
 /// because dbt-fusion still reports their `base.materialized` as "table"
 /// (issue #1345); without the override `materialization_table_default` would
-/// be invoked with empty SQL and produce invalid CREATE statements.
+/// be invoked with empty SQL and produce invalid CREATE statements. Unit
+/// tests always dispatch to the bundled `unit` materialization.
 fn select_materialization_name(rt: NodeType, base_materialized: &str) -> String {
-    if rt == NodeType::Seed {
-        "seed".to_string()
-    } else {
-        base_materialized.to_lowercase()
+    match rt {
+        NodeType::Seed => "seed".to_string(),
+        NodeType::UnitTest => "unit".to_string(),
+        _ => base_materialized.to_lowercase(),
     }
 }
 
 /// True if the node is one we expect `create_schema(this)` to be called for
 /// before materialization. Tests and operations don't get a schema-create
-/// pass — they only read.
+/// pass — they only read. Unit tests qualify because the `unit`
+/// materialization creates a temp table in the target schema to probe column
+/// types, and may run before anything else has created that schema.
 const fn is_create_schema_eligible(rt: NodeType) -> bool {
-    matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot)
+    matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot | NodeType::UnitTest)
 }
 
 /// True if a node of this resource_type + materialization should produce an
@@ -192,7 +196,7 @@ const fn expects_adapter_response(rt: NodeType, materialization: &str) -> bool {
         // Ephemeral models never execute against the warehouse — they're
         // inlined as CTEs in their downstream consumer's SQL.
         NodeType::Model => !matches!(materialization.as_bytes(), b"ephemeral"),
-        NodeType::Seed | NodeType::Snapshot | NodeType::Test => true,
+        NodeType::Seed | NodeType::Snapshot | NodeType::Test | NodeType::UnitTest => true,
         _ => false,
     }
 }
@@ -479,7 +483,15 @@ async fn execute_node_inner(
     );
 
     // Serialize the node config for the deprecated_config parameter.
-    let deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
+    let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
+
+    // The `unit` materialization reads the expected fixture from
+    // config.get('expected_rows') / config.get('expected_sql').
+    if rt == NodeType::UnitTest
+        && let Some(unit) = state.resolver_state.nodes.unit_tests.get(unique_id)
+    {
+        unit_test::inject_expected_config(&mut deprecated_config, unit, &state.io_args.in_dir)?;
+    }
 
     // Build agate_table for seeds (loads CSV data — uses in_dir only).
     let agate_table =
@@ -631,8 +643,14 @@ async fn execute_node_inner(
     // Resolve raw SQL: build_run_node_context does NOT populate the top-level
     // "sql" context variable — that's the caller's responsibility. The
     // materialization template uses {{ sql }} as the compiled model query
-    // (e.g. in `get_create_view_as_sql(target_relation, sql)`).
-    let raw_sql_result = resolve_raw_sql(state, common, rt, &node_path);
+    // (e.g. in `get_create_view_as_sql(target_relation, sql)`). Unit tests
+    // have no raw SQL of their own (their path is the defining YAML); their
+    // input SQL is assembled below from the tested model + fixtures.
+    let raw_sql_result = if rt == NodeType::UnitTest {
+        Ok(String::new())
+    } else {
+        resolve_raw_sql(state, common, rt, &node_path)
+    };
 
     // For generic tests, inject _dbt_generic_test_kwargs from test metadata.
     // The primary path uses generated SQL with inlined kwargs (from test_sql_cache),
@@ -663,7 +681,34 @@ async fn execute_node_inner(
         .into());
     }
 
+    if rt == NodeType::UnitTest {
+        let unit = state
+            .resolver_state
+            .nodes
+            .unit_tests
+            .get(unique_id)
+            .ok_or_else(|| {
+                DbtTemporalError::ProjectNotFound(format!("unit test not found: {unique_id}"))
+            })?;
+        let sql = unit_test::build_unit_test_sql(
+            state,
+            unit,
+            &state.resolver_state.nodes,
+            &jinja_env,
+            &node_context,
+            &state.io_args.in_dir,
+            &ephemeral_dir,
+        )?;
+        let sql = patch_compiled_schema(sql, env_schema.as_deref(), &state.default_schema);
+        node_context.insert("sql".to_owned(), minijinja::Value::from(sql.clone()));
+        node_context.insert("compiled_code".to_owned(), minijinja::Value::from(sql));
+    }
+
     match raw_sql_result {
+        Ok(_) if rt == NodeType::UnitTest => {
+            // Unit test SQL was assembled above; the node's own path points
+            // at the defining YAML, not runnable SQL.
+        }
         Ok(raw_sql) if !raw_sql.trim().is_empty() => {
             // Use the model's original file path as the rendering filename so any
             // Jinja error references the source file rather than `<unknown>`.
@@ -823,6 +868,24 @@ async fn execute_node_inner(
         .into());
     }
 
+    // Unit tests: compare the actual vs expected partitions of the executed
+    // union query. Differences are non-retryable — fixtures and model SQL
+    // won't change on retry.
+    let unit_outcome = if rt == NodeType::UnitTest {
+        let outcome = unit_test::extract_unit_test_outcome(&result_store)?;
+        if !outcome.passed {
+            return Err(DbtTemporalError::UnitTestFailure {
+                unique_id: unique_id.clone(),
+                failures: outcome.failures,
+                diff: outcome.diff,
+            }
+            .into());
+        }
+        Some(outcome)
+    } else {
+        None
+    };
+
     // For test nodes, extract failure count from the result table (not rows_affected).
     // The test materialization wraps the query in get_test_sql() which returns a single row
     // with a `failures` column. rows_affected is always 1 (one row returned), not the count.
@@ -835,7 +898,10 @@ async fn execute_node_inner(
     // Build a human-readable message from the adapter response for the Temporal UI.
     // Falls back to materialization type when the adapter doesn't return metadata
     // (e.g. ephemeral models that never execute against the warehouse).
-    let message = build_success_message(&adapter_response, &materialization);
+    let message = unit_outcome.map_or_else(
+        || build_success_message(&adapter_response, &materialization),
+        |o| Some(format!("unit test passed ({} row(s) compared)", o.actual_rows)),
+    );
 
     info!(
         node = %unique_id,

@@ -32,4 +32,5 @@ mod waffle_hut {
     mod lifecycle_hooks;
     mod multi_project;
     mod robustness;
+    mod unit_tests;
 }

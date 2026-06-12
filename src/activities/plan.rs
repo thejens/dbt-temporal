@@ -8,7 +8,9 @@ use tracing::warn;
 use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo};
 
 use super::DbtActivities;
-use super::dag::{build_dependency_map, inject_test_gates, topological_levels};
+use super::dag::{
+    build_dependency_map, inject_test_gates, inject_unit_test_gates, topological_levels,
+};
 use super::selectors::apply_selectors;
 
 const MANIFEST_INLINE_THRESHOLD: usize = 3 * 1024 * 1024; // 3 MB
@@ -161,6 +163,9 @@ pub async fn plan_project_inner(
     // Tests act as gates: non-test downstream nodes must wait for all tests on their
     // upstream model to pass before starting. If a test fails, downstreams are skipped.
     let mut deps = build_dependency_map(&state.resolver_state.nodes, &selected_ids);
+    // Unit test rewiring must run before data-test gates so unit tests
+    // inherit the tested model's original inputs, not gate edges.
+    inject_unit_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
     inject_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
     let levels = topological_levels(&deps)?;
 
@@ -338,9 +343,16 @@ fn raw_code_is_generic_test_macro_def(raw_code: &str) -> bool {
 fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
     match command {
         "run" => matches!(rt, NodeType::Model),
-        "build" => {
-            matches!(rt, NodeType::Model | NodeType::Test | NodeType::Seed | NodeType::Snapshot)
-        }
+        "build" => matches!(
+            rt,
+            NodeType::Model
+                | NodeType::Test
+                | NodeType::Seed
+                | NodeType::Snapshot
+                | NodeType::UnitTest
+        ),
+        // Unit tests are hard-excluded from compile, matching dbt-core: their
+        // SQL is assembled at execution time from fixtures + warehouse probes.
         "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
         _ => false,
     }

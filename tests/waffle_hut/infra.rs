@@ -293,6 +293,7 @@ pub fn test_config(infra: &SharedInfra, fixture_dir: &Path) -> Result<DbtTempora
         deployment_name: None,
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
+        priority_scheduling: false,
     })
 }
 
@@ -359,6 +360,7 @@ pub fn test_config_env_var_profile(
         deployment_name: None,
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
+        priority_scheduling: false,
     })
 }
 
@@ -431,6 +433,7 @@ pub fn test_config_multi_project(
         deployment_name: None,
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
+        priority_scheduling: false,
     })
 }
 
@@ -710,6 +713,7 @@ pub fn test_config_with_schema(
         deployment_name: None,
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
+        priority_scheduling: false,
     };
 
     Ok((config, schema))

@@ -111,6 +111,7 @@ mod tests {
             deployment_name: None,
             poller_autoscaling: None,
             temporal_metrics: TemporalMetricsConfig::None,
+            priority_scheduling: false,
         }
     }
 

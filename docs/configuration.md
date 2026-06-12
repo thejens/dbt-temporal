@@ -208,6 +208,16 @@ The resource-based tuner is cgroup-aware: in containers with CPU/memory limits, 
 | `WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND` | unlimited | Server-side rate limit on activities/second for the entire task queue (across all workers). |
 | `WORKER_GRACEFUL_SHUTDOWN_SECS` | none | Grace period (in seconds) before canceling in-flight activities on shutdown. Without this, the worker waits for all activities to complete. |
 
+**Priority scheduling** — when activity slots are scarce (rate limits, resource-based tuning, or many concurrent runs on one task queue), Temporal can dispatch backlogged activities in a smarter order:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEMPORAL_PRIORITY_SCHEDULING` | off | Set to `1` to attach a priority key and fairness key to every node activity. |
+
+With the flag on, each node gets a priority key (1–5) derived from its critical-path height: nodes with long chains of dependents run first, so the DAG's longest path — which bounds total run time — is never starved by wide, shallow levels. Each activity also carries the run's `invocation_id` as a fairness key, so concurrent dbt runs sharing a task queue split worker capacity evenly instead of first-come-first-served.
+
+Requires Temporal server ≥ 1.31; older servers silently ignore the fields, so the flag is safe to enable everywhere.
+
 **Worker metrics** — Temporal SDK metrics (task slot usage, schedule-to-start latency, poll counts, sticky cache hit rate, …). These are the numbers to watch when tuning the options above:
 
 | Variable | Default | Description |

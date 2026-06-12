@@ -236,6 +236,19 @@ async fn execute_one_level(
     // Second pass: schedule activities.
     let mut futures = Vec::new();
     for (unique_id, node_input, activity_label) in nodes_to_schedule {
+        // Priority/fairness keys (server >= 1.31; older servers ignore them):
+        // priority_key orders nodes within a run by critical-path depth,
+        // fairness_key gives concurrent runs proportional dispatch on a
+        // shared queue instead of FIFO starvation.
+        let priority = if state.plan.priority_scheduling {
+            Some(temporalio_common::Priority {
+                priority_key: state.plan.nodes.get(&unique_id).and_then(|n| n.priority),
+                fairness_key: Some(truncate_fairness_key(&state.plan.invocation_id)),
+                fairness_weight: None,
+            })
+        } else {
+            None
+        };
         let future = ctx.start_activity(
             DbtActivities::execute_node,
             node_input,
@@ -245,6 +258,7 @@ async fn execute_one_level(
                 .maybe_summary(activity_label)
                 .cancellation_type(ActivityCancellationType::TryCancel)
                 .retry_policy(build_retry_policy(state.retry_config))
+                .maybe_priority(priority)
                 .build(),
         );
         futures.push((unique_id, future));
@@ -328,4 +342,42 @@ async fn execute_one_level(
     });
 
     Ok(())
+}
+
+/// Fairness keys are limited to 64 bytes server-side; truncate on a char
+/// boundary rather than letting the server reject the task.
+fn truncate_fairness_key(key: &str) -> String {
+    let mut end = key.len().min(64);
+    while end > 0 && !key.is_char_boundary(end) {
+        end -= 1;
+    }
+    key[..end].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_fairness_key;
+
+    #[test]
+    fn fairness_key_short_passes_through() {
+        assert_eq!(truncate_fairness_key("run-abc123"), "run-abc123");
+        assert_eq!(truncate_fairness_key(""), "");
+    }
+
+    #[test]
+    fn fairness_key_truncates_to_64_bytes() {
+        let long = "x".repeat(100);
+        let out = truncate_fairness_key(&long);
+        assert_eq!(out.len(), 64);
+    }
+
+    #[test]
+    fn fairness_key_truncates_on_char_boundary() {
+        // 'ä' is 2 bytes; with a 1-byte prefix the ä's sit at odd offsets, so
+        // byte 64 falls mid-char and must back off to 63 rather than panic.
+        let multibyte = format!("x{}", "ä".repeat(40));
+        let out = truncate_fairness_key(&multibyte);
+        assert_eq!(out.len(), 63);
+        assert_eq!(out, format!("x{}", "ä".repeat(31)));
+    }
 }

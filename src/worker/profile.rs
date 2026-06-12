@@ -143,9 +143,7 @@ pub fn render_profile_with_env(
 /// So we lean toward the harmless direction. Strings that *mention* the
 /// substring (comments, doc keys) trigger the rebuild — that's fine.
 pub fn profile_uses_env_vars(profiles_path: &std::path::Path) -> bool {
-    std::fs::read_to_string(profiles_path)
-        .map(|content| content.contains("env_var("))
-        .unwrap_or(false)
+    std::fs::read_to_string(profiles_path).is_ok_and(|content| content.contains("env_var("))
 }
 
 #[cfg(test)]

@@ -244,7 +244,7 @@ pub async fn plan_and_announce(
         .start_activity(
             DbtActivities::plan_project,
             input.clone(),
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+            ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
         )
         .await
         .map_err(|e| {
@@ -322,8 +322,8 @@ pub async fn run_on_run_start(
     ctx.start_activity(
         DbtActivities::run_project_hooks,
         build_project_hooks_input(ProjectHookPhase::OnRunStart, plan, input, effective_env, &[]),
-        ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
-            .heartbeat_timeout(Duration::from_secs(120))
+        ActivityOptions::with_start_to_close_timeout(Duration::from_mins(5))
+            .heartbeat_timeout(Duration::from_mins(2))
             .build(),
     )
     .await
@@ -347,7 +347,7 @@ pub async fn store_run_artifacts(
         .start_activity(
             DbtActivities::store_artifacts,
             build_store_artifacts_input(plan, all_results, log_lines),
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(120)),
+            ActivityOptions::start_to_close_timeout(Duration::from_mins(2)),
         )
         .await
         .map_err(|e| {
@@ -384,8 +384,8 @@ pub async fn run_on_run_end(
                 effective_env,
                 all_results,
             ),
-            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
-                .heartbeat_timeout(Duration::from_secs(120))
+            ActivityOptions::with_start_to_close_timeout(Duration::from_mins(5))
+                .heartbeat_timeout(Duration::from_mins(2))
                 .build(),
         )
         .await;

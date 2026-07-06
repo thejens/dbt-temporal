@@ -4,8 +4,10 @@ name: Release
 #   - a Debian .deb package (built natively on Debian 12)
 #   - a RHEL .rpm package (built on AlmaLinux 8 / glibc 2.28, so it runs on
 #     RHEL/Alma/Rocky 8 and 9)
-#   - a container image pushed to GitHub Container Registry (GHCR), built by
-#     copying the Debian-built glibc binary in (no in-image compilation)
+#   - two container images pushed to GitHub Container Registry (GHCR), both
+#     built by copying the Debian-built glibc binary in (no in-image
+#     compilation): a debian-slim image (:latest, :<version>) and a distroless
+#     image (:distroless, :<version>-distroless)
 #
 # Each distro package is built inside that distro's own container so the binary
 # links against a matching glibc, and the container image reuses the Debian
@@ -113,7 +115,7 @@ jobs:
           fail_on_unmatched_files: true
 
   container:
-    name: Container image
+    name: Container images (debian-slim + distroless)
     runs-on: ubuntu-latest
     needs: [deb]
     permissions:
@@ -140,8 +142,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image metadata
-        id: meta
+      # Default image (debian-slim): :<version>, :<major.minor>, :latest
+      - name: Metadata (debian-slim)
+        id: meta_slim
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
@@ -150,11 +153,34 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - name: Build and push
+      - name: Build and push (debian-slim)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.release
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta_slim.outputs.tags }}
+          labels: ${{ steps.meta_slim.outputs.labels }}
+
+      # Distroless variant: :<version>-distroless, :<major.minor>-distroless, :distroless
+      - name: Metadata (distroless)
+        id: meta_distroless
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-distroless
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=distroless,suffix=
+
+      - name: Build and push (distroless)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.distroless
+          push: true
+          tags: ${{ steps.meta_distroless.outputs.tags }}
+          labels: ${{ steps.meta_distroless.outputs.labels }}

@@ -1,0 +1,13 @@
+# Distroless variant of the release image: the same prebuilt glibc binary as
+# docker/Dockerfile.release, on gcr.io/distroless/cc-debian12 — no shell, no
+# package manager, minimal attack surface. Still glibc (the cc image ships
+# libc/libssl/libgcc + ca-certificates), so the CDN ADBC drivers dbt dlopens at
+# runtime load correctly.
+#
+# Trade-off vs the debian-slim image: smaller and harder to tamper with, but no
+# shell for `kubectl exec` debugging — pick per environment.
+FROM gcr.io/distroless/cc-debian12
+
+COPY dbt-temporal /usr/local/bin/dbt-temporal
+
+ENTRYPOINT ["dbt-temporal"]

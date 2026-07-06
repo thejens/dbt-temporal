@@ -7,7 +7,8 @@
 //! This layer inserts a default `TelemetryAttributes` for every new span, preventing
 //! the panic while keeping our own `tracing_subscriber::fmt` for log output.
 
-use dbt_telemetry::{TelemetryAttributes, Unknown};
+use dbt_telemetry::Unknown;
+use dbt_tracing::TelemetryAttributes;
 use tracing::span;
 use tracing_subscriber::{layer::Context, registry::LookupSpan};
 

@@ -185,7 +185,7 @@ async fn run_project_hooks_inner(
         // execute it directly. Pure logging hooks render to empty.
         let sql = rendered.trim();
         if !sql.is_empty() {
-            let ctx = dbt_xdbc::QueryCtx::new(format!("{} hook[{idx}]", input.phase));
+            let ctx = dbt_adbc::QueryCtx::new(format!("{} hook[{idx}]", input.phase));
             adapter
                 .execute_without_state(Some(&ctx), sql, false)
                 .map_err(|e| {

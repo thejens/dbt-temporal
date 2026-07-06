@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "adbc-record-replay"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "adbc_core",
+ "arrow",
+ "arrow-schema",
+ "base64 0.22.1",
+ "dashmap",
+ "dbt-adbc",
+ "dbt-fusion-workspace-hack",
+ "once_cell",
+ "parquet",
+ "regex",
+ "rusqlite",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "adbc_core"
 version = "0.22.0"
 source = "git+https://github.com/dbt-labs/arrow-adbc?rev=d2808cf465feb6efc54ee862cb63104803535adb#d2808cf465feb6efc54ee862cb63104803535adb"
@@ -159,9 +179,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.101"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "ar_archive_writer"
@@ -322,7 +342,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "half",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "lexical-core",
  "memchr",
  "num",
@@ -360,7 +380,7 @@ name = "arrow-schema"
 version = "56.0.0"
 source = "git+https://github.com/sdf-labs/arrow-rs?rev=e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1#e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "serde",
  "serde_json",
 ]
@@ -620,7 +640,7 @@ dependencies = [
  "http 0.2.12",
  "http 1.4.0",
  "http-body 1.0.1",
- "lru",
+ "lru 0.16.3",
  "percent-encoding",
  "regex-lite",
  "sha2",
@@ -1060,9 +1080,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.10.0"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "bitmaps"
@@ -1113,7 +1133,7 @@ checksum = "ee04c4c84f1f811b017f2fbb7dd8815c976e7ca98593de9c1e2afad0f636bff4"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "bollard-buildkit-proto",
  "bollard-stubs",
  "bytes",
@@ -1144,7 +1164,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tonic 0.14.3",
+ "tonic 0.14.6",
  "tower-service",
  "url",
  "winapi",
@@ -1158,7 +1178,7 @@ checksum = "85a885520bf6249ab931a764ffdb87b0ceef48e6e7d807cfdb21b751e086e1ad"
 dependencies = [
  "prost 0.14.3",
  "prost-types",
- "tonic 0.14.3",
+ "tonic 0.14.6",
  "tonic-prost",
  "ureq",
 ]
@@ -1589,7 +1609,7 @@ dependencies = [
  "cookie",
  "document-features",
  "idna",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "log",
  "serde",
  "serde_derive",
@@ -1886,7 +1906,7 @@ dependencies = [
  "chrono",
  "half",
  "hashbrown 0.14.5",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "libc",
  "log",
  "object_store",
@@ -1918,7 +1938,7 @@ dependencies = [
  "datafusion-functions-aggregate-common",
  "datafusion-functions-window-common",
  "datafusion-physical-expr-common",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "paste",
  "serde_json",
  "sqlparser",
@@ -1932,7 +1952,7 @@ checksum = "6d155ccbda29591ca71a1344dd6bed26c65a4438072b400df9db59447f590bb6"
 dependencies = [
  "arrow",
  "datafusion-common",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "itertools 0.14.0",
  "paste",
 ]
@@ -1976,9 +1996,10 @@ dependencies = [
 
 [[package]]
 name = "dbt-adapter"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
+ "adbc-record-replay",
  "adbc_core",
  "arrow",
  "arrow-array",
@@ -1992,10 +2013,12 @@ dependencies = [
  "dashmap",
  "dbt-adapter-core",
  "dbt-adapter-sql",
+ "dbt-adbc",
  "dbt-agate",
  "dbt-auth",
  "dbt-cloud-config",
  "dbt-common",
+ "dbt-env",
  "dbt-frontend-common",
  "dbt-fusion-workspace-hack",
  "dbt-handles",
@@ -2003,11 +2026,11 @@ dependencies = [
  "dbt-schemas",
  "dbt-sql-utils",
  "dbt-telemetry",
- "dbt-xdbc",
+ "dbt-tracing",
  "dbt-yaml",
  "fancy-regex",
  "flate2",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "md5",
  "minijinja",
  "minijinja-contrib",
@@ -2020,19 +2043,17 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
- "sqlparser",
  "tokio",
  "tracing",
  "tracy-client",
  "ureq",
  "uuid",
- "xdbc-record-replay",
 ]
 
 [[package]]
 name = "dbt-adapter-core"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "serde",
@@ -2041,8 +2062,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-adapter-sql"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "arrow-schema",
  "dbt-adapter-core",
@@ -2051,718 +2072,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "dbt-agate"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
- "chrono",
- "chrono-tz",
- "dbt-fusion-workspace-hack",
- "im",
- "minijinja",
- "minijinja-contrib",
- "siphasher",
-]
-
-[[package]]
-name = "dbt-antlr4"
-version = "1.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e253f0e70f603b1a230e1b91bd789bd2cfa6ceb2f1ede5e78021233c7d52766f"
-dependencies = [
- "bit-set",
- "bumpalo",
- "byteorder",
- "fxhash",
- "hashbrown 0.16.1",
- "stacker",
- "uuid",
-]
-
-[[package]]
-name = "dbt-auth"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "adbc_core",
- "async-trait",
- "base64 0.22.1",
- "dbt-fusion-workspace-hack",
- "dbt-xdbc",
- "dbt-yaml",
- "once_cell",
- "percent-encoding",
- "pkcs8 0.10.2",
- "reqwest 0.12.28",
- "rsa",
- "serde",
- "serde_json",
- "shellexpand",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "dbt-base"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-cloud-config"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "dbt-schemas",
- "dbt-yaml",
- "dirs",
-]
-
-[[package]]
-name = "dbt-common"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arc-swap",
- "arrow",
- "arrow-schema",
- "blake3",
- "chrono",
- "clap",
- "console",
- "dashmap",
- "dbt-adapter-core",
- "dbt-base",
- "dbt-error",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-telemetry",
- "dbt-tui-progress",
- "dbt-yaml",
- "dunce",
- "hex",
- "humantime",
- "indexmap 2.13.0",
- "itertools 0.14.0",
- "md5",
- "minijinja",
- "normalize-path",
- "once_cell",
- "opentelemetry 0.30.0",
- "opentelemetry-otlp 0.30.0",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk 0.30.0",
- "parquet",
- "pathdiff",
- "powershell_script",
- "proto-rust",
- "rand 0.9.2",
- "regex",
- "rust-embed",
- "scc",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "strum",
- "strum_macros",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "dbt-csv"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow-array",
- "arrow-cast",
- "arrow-schema",
- "chrono",
- "csv",
- "csv-core",
- "dbt-fusion-workspace-hack",
- "dbt-ident",
- "regex",
-]
-
-[[package]]
-name = "dbt-dag"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-common",
- "dbt-fusion-workspace-hack",
- "dbt-schemas",
- "dbt-yaml",
- "itertools 0.14.0",
- "serde_json",
-]
-
-[[package]]
-name = "dbt-deps"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "astral-tokio-tar 0.5.6",
- "async-compression",
- "async-trait",
- "dbt-common",
- "dbt-fusion-workspace-hack",
- "dbt-jinja-utils",
- "dbt-schemas",
- "dbt-telemetry",
- "dbt-yaml",
- "futures",
- "percent-encoding",
- "regex",
- "reqwest 0.12.28",
- "reqwest-middleware",
- "reqwest-retry",
- "scc",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "vortex-events",
-]
-
-[[package]]
-name = "dbt-env"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "dbt-schemas",
-]
-
-[[package]]
-name = "dbt-error"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "datafusion-common",
- "datafusion-expr",
- "dbt-base",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-proc-macros",
- "dbt-yaml",
- "dunce",
- "int-enum",
- "itertools 0.14.0",
- "minijinja",
- "parquet",
- "pathdiff",
- "regex",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "strum",
- "strum_macros",
- "tokio",
-]
-
-[[package]]
-name = "dbt-frontend-common"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "arrow-schema",
- "counter",
- "datafusion-common",
- "datafusion-expr",
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
- "dbt-ident",
- "enum-map",
- "int-enum",
- "itertools 0.14.0",
- "linked-hash-map",
- "regex",
- "serde",
- "serde_json",
- "stringmetrics",
- "strum",
- "strum_macros",
-]
-
-[[package]]
-name = "dbt-fusion-workspace-hack"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8430f049d5c7bbc7a95ae1bd10e769c4008cc6df873faab785eedbbae3ad902"
-
-[[package]]
-name = "dbt-handles"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-ident"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "serde",
- "ustr",
-]
-
-[[package]]
-name = "dbt-jinja-ctx"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "chrono",
- "chrono-tz",
- "dbt-fusion-workspace-hack",
- "dbt-handles",
- "dbt-jinja-vars",
- "indexmap 2.13.0",
- "minijinja",
- "minijinja-contrib",
- "schemars 0.8.22",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dbt-jinja-filters"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "minijinja",
-]
-
-[[package]]
-name = "dbt-jinja-utils"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "chrono",
- "chrono-tz",
- "dashmap",
- "dbt-adapter",
- "dbt-adapter-core",
- "dbt-agate",
- "dbt-common",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-jinja-ctx",
- "dbt-jinja-filters",
- "dbt-jinja-vars",
- "dbt-schemas",
- "dbt-telemetry",
- "dbt-yaml",
- "indexmap 2.13.0",
- "itertools 0.14.0",
- "md5",
- "minijinja",
- "minijinja-contrib",
- "regex",
- "serde",
- "serde_json",
- "tracy-client",
- "uuid",
-]
-
-[[package]]
-name = "dbt-jinja-vars"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "dbt-yaml",
- "indexmap 2.13.0",
- "minijinja",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dbt-lexer-bigquery"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-lexer-bigqueryuntyped"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-lexer-databricks"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-lexer-redshift"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-lexer-snowflake"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-lexer-trino"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-loader"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "async-trait",
- "chrono",
- "chrono-tz",
- "dbt-adapter",
- "dbt-adapter-core",
- "dbt-cloud-config",
- "dbt-common",
- "dbt-deps",
- "dbt-env",
- "dbt-fusion-workspace-hack",
- "dbt-jinja-utils",
- "dbt-jinja-vars",
- "dbt-profile",
- "dbt-schemas",
- "dbt-telemetry",
- "dbt-yaml",
- "dirs",
- "flate2",
- "ignore",
- "indexmap 2.13.0",
- "minijinja",
- "pathdiff",
- "reqwest 0.12.28",
- "reqwest-middleware",
- "reqwest-retry",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
- "uuid",
- "walkdir",
- "zip",
-]
-
-[[package]]
-name = "dbt-parser"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "chrono",
- "chrono-tz",
- "dbt-adapter",
- "dbt-adapter-core",
- "dbt-common",
- "dbt-dag",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-jinja-utils",
- "dbt-schemas",
- "dbt-selector-parser",
- "dbt-telemetry",
- "dbt-yaml",
- "indexmap 2.13.0",
- "itertools 0.14.0",
- "md5",
- "minijinja",
- "num_cpus",
- "pathdiff",
- "regex",
- "ruff_python_ast",
- "ruff_python_parser",
- "ruff_text_size",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dbt-proc-macros"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "dbt-profile"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
- "dbt-jinja-filters",
- "dbt-jinja-vars",
- "dbt-yaml",
- "dirs",
- "minijinja",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "dbt-schema-store"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "arrow-schema",
- "async-trait",
- "base64 0.22.1",
- "bimap",
- "dbt-common",
- "dbt-fusion-workspace-hack",
- "dbt-ident",
- "futures",
- "parquet",
- "scc",
- "serde",
- "serde_arrow",
- "tracing",
-]
-
-[[package]]
-name = "dbt-schemas"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "blake3",
- "chrono",
- "chrono-tz",
- "dbt-adapter-core",
- "dbt-common",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-jinja-vars",
- "dbt-proc-macros",
- "dbt-schema-store",
- "dbt-telemetry",
- "dbt-yaml",
- "dirs",
- "hex",
- "humantime",
- "indexmap 2.13.0",
- "md5",
- "merge",
- "minijinja",
- "minijinja-contrib",
- "pathdiff",
- "schemars 0.8.22",
- "serde",
- "serde_derive",
- "serde_json",
- "serde_with",
- "sha2",
- "strum",
-]
-
-[[package]]
-name = "dbt-selector-parser"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-common",
- "dbt-fusion-workspace-hack",
- "dbt-schemas",
-]
-
-[[package]]
-name = "dbt-sql-keywords"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-fusion-workspace-hack",
-]
-
-[[package]]
-name = "dbt-sql-utils"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "dbt-antlr4",
- "dbt-frontend-common",
- "dbt-fusion-workspace-hack",
- "dbt-lexer-bigquery",
- "dbt-lexer-bigqueryuntyped",
- "dbt-lexer-databricks",
- "dbt-lexer-redshift",
- "dbt-lexer-snowflake",
- "dbt-lexer-trino",
- "minijinja",
-]
-
-[[package]]
-name = "dbt-telemetry"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow",
- "arrow-schema",
- "dbt-fusion-workspace-hack",
- "dbt-tracing",
- "dbt-yaml",
- "pbjson 0.8.0",
- "prost 0.14.3",
- "prost-types",
- "proto-rust-macros",
- "schemars 0.8.22",
- "serde",
- "serde_arrow",
- "serde_json",
- "serde_repr",
- "serde_with",
- "strum",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "dbt-temporal"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow-array",
- "arrow-cast",
- "arrow-select",
- "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
- "chrono",
- "csv",
- "dbt-adapter",
- "dbt-agate",
- "dbt-antlr4",
- "dbt-auth",
- "dbt-common",
- "dbt-csv",
- "dbt-jinja-utils",
- "dbt-loader",
- "dbt-parser",
- "dbt-schemas",
- "dbt-telemetry",
- "dbt-xdbc",
- "dbt-yaml",
- "filetime",
- "futures",
- "futures-util",
- "minijinja",
- "object_store",
- "prost-wkt-types",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "temporalio-client",
- "temporalio-common",
- "temporalio-macros",
- "temporalio-sdk",
- "temporalio-sdk-core",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "dbt-tracing"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "arrow-schema",
- "bitflags 2.10.0",
- "dbt-fusion-workspace-hack",
- "dbt-yaml",
- "erased-serde",
- "opentelemetry 0.30.0",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk 0.30.0",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "serde_repr",
- "strum",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "dbt-tui-progress"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "console",
- "counter",
- "dbt-fusion-workspace-hack",
- "indicatif",
- "itertools 0.14.0",
- "scc",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "dbt-xdbc"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+name = "dbt-adbc"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "adbc_core",
  "adbc_driver_manager",
@@ -2796,14 +2108,733 @@ dependencies = [
 ]
 
 [[package]]
-name = "dbt-yaml"
-version = "0.9.5"
+name = "dbt-agate"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "chrono",
+ "chrono-tz",
+ "dbt-fusion-workspace-hack",
+ "im",
+ "minijinja",
+ "minijinja-contrib",
+ "siphasher",
+]
+
+[[package]]
+name = "dbt-antlr4"
+version = "1.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "469553c677837c341275b2e4cad051310c700ff81cc331005d5bfc26c6690f2e"
+checksum = "e253f0e70f603b1a230e1b91bd789bd2cfa6ceb2f1ede5e78021233c7d52766f"
+dependencies = [
+ "bit-set",
+ "bumpalo",
+ "byteorder",
+ "fxhash",
+ "hashbrown 0.16.1",
+ "stacker",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-auth"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "adbc_core",
+ "async-trait",
+ "base64 0.22.1",
+ "dbt-adbc",
+ "dbt-fusion-workspace-hack",
+ "dbt-yaml",
+ "once_cell",
+ "percent-encoding",
+ "pkcs8 0.10.2",
+ "reqwest 0.12.28",
+ "rsa",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "dbt-base"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-classification-types"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "im",
+ "rust-embed",
+ "serde",
+]
+
+[[package]]
+name = "dbt-cloud-config"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "dbt-schemas",
+ "dbt-yaml",
+ "dirs",
+]
+
+[[package]]
+name = "dbt-common"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arc-swap",
+ "arrow",
+ "arrow-schema",
+ "blake3",
+ "chrono",
+ "clap",
+ "console",
+ "dashmap",
+ "dbt-adapter-core",
+ "dbt-base",
+ "dbt-error",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-telemetry",
+ "dbt-tracing",
+ "dbt-tui-progress",
+ "dbt-yaml",
+ "dunce",
+ "hex",
+ "humantime",
+ "indexmap 2.14.0",
+ "itertools 0.14.0",
+ "md5",
+ "minijinja",
+ "normalize-path",
+ "once_cell",
+ "pathdiff",
+ "powershell_script",
+ "proto-rust",
+ "rand 0.9.2",
+ "regex",
+ "rust-embed",
+ "scc",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-csv"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "chrono",
+ "csv",
+ "csv-core",
+ "dbt-fusion-workspace-hack",
+ "dbt-ident",
+ "regex",
+]
+
+[[package]]
+name = "dbt-dag"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-schemas",
+ "dbt-yaml",
+ "itertools 0.14.0",
+ "serde_json",
+]
+
+[[package]]
+name = "dbt-deps"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "astral-tokio-tar 0.5.6",
+ "async-compression",
+ "async-trait",
+ "dbt-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-utils",
+ "dbt-schemas",
+ "dbt-telemetry",
+ "dbt-yaml",
+ "futures",
+ "percent-encoding",
+ "regex",
+ "reqwest 0.12.28",
+ "reqwest-middleware",
+ "reqwest-retry",
+ "scc",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "vortex-events",
+]
+
+[[package]]
+name = "dbt-env"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "dbt-schemas",
+]
+
+[[package]]
+name = "dbt-error"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "datafusion-common",
+ "datafusion-expr",
+ "dbt-base",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-proc-macros",
+ "dbt-tracing",
+ "dbt-yaml",
+ "dunce",
+ "int-enum",
+ "itertools 0.14.0",
+ "minijinja",
+ "parquet",
+ "pathdiff",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "tokio",
+]
+
+[[package]]
+name = "dbt-frontend-common"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "counter",
+ "datafusion-common",
+ "datafusion-expr",
+ "dbt-adapter-core",
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+ "dbt-ident",
+ "enum-map",
+ "int-enum",
+ "itertools 0.14.0",
+ "linked-hash-map",
+ "regex",
+ "serde",
+ "serde_json",
+ "stringmetrics",
+ "strum",
+ "strum_macros",
+]
+
+[[package]]
+name = "dbt-fusion-workspace-hack"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8430f049d5c7bbc7a95ae1bd10e769c4008cc6df873faab785eedbbae3ad902"
+
+[[package]]
+name = "dbt-handles"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-ident"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "serde",
+ "ustr",
+]
+
+[[package]]
+name = "dbt-jinja-ctx"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "dbt-fusion-workspace-hack",
+ "dbt-handles",
+ "dbt-jinja-vars",
+ "indexmap 2.14.0",
+ "minijinja",
+ "minijinja-contrib",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dbt-jinja-filters"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "minijinja",
+]
+
+[[package]]
+name = "dbt-jinja-utils"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "chrono",
+ "chrono-tz",
+ "dashmap",
+ "dbt-adapter",
+ "dbt-adapter-core",
+ "dbt-agate",
+ "dbt-classification-types",
+ "dbt-common",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-ctx",
+ "dbt-jinja-filters",
+ "dbt-jinja-vars",
+ "dbt-schemas",
+ "dbt-telemetry",
+ "dbt-yaml",
+ "indexmap 2.14.0",
+ "itertools 0.14.0",
+ "md5",
+ "minijinja",
+ "minijinja-contrib",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracy-client",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-jinja-vars"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "dbt-yaml",
+ "indexmap 2.14.0",
+ "minijinja",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dbt-lexer-bigquery"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-lexer-databricks"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-lexer-redshift"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-lexer-snowflake"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-lexer-trino"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-loader"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "dbt-adapter",
+ "dbt-adapter-core",
+ "dbt-cloud-config",
+ "dbt-common",
+ "dbt-deps",
+ "dbt-env",
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-utils",
+ "dbt-jinja-vars",
+ "dbt-profile",
+ "dbt-schemas",
+ "dbt-telemetry",
+ "dbt-yaml",
+ "dirs",
+ "flate2",
+ "ignore",
+ "indexmap 2.14.0",
+ "minijinja",
+ "pathdiff",
+ "reqwest 0.12.28",
+ "reqwest-middleware",
+ "reqwest-retry",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "uuid",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
+name = "dbt-parser"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "dbt-adapter",
+ "dbt-adapter-core",
+ "dbt-common",
+ "dbt-dag",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-utils",
+ "dbt-schemas",
+ "dbt-selector-parser",
+ "dbt-telemetry",
+ "dbt-yaml",
+ "indexmap 2.14.0",
+ "itertools 0.14.0",
+ "md5",
+ "minijinja",
+ "num_cpus",
+ "pathdiff",
+ "regex",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_text_size",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dbt-proc-macros"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "dbt-profile"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-filters",
+ "dbt-jinja-vars",
+ "dbt-yaml",
+ "dirs",
+ "minijinja",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dbt-schema-store"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "async-trait",
+ "base64 0.22.1",
+ "bimap",
+ "dbt-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-ident",
+ "futures",
+ "parquet",
+ "scc",
+ "serde",
+ "serde_arrow",
+ "tracing",
+]
+
+[[package]]
+name = "dbt-schemas"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "blake3",
+ "chrono",
+ "chrono-tz",
+ "dbt-adapter-core",
+ "dbt-common",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-jinja-vars",
+ "dbt-proc-macros",
+ "dbt-schema-store",
+ "dbt-telemetry",
+ "dbt-tracing",
+ "dbt-yaml",
+ "dirs",
+ "hex",
+ "humantime",
+ "indexmap 2.14.0",
+ "md5",
+ "merge",
+ "minijinja",
+ "minijinja-contrib",
+ "pathdiff",
+ "schemars 0.8.22",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "serde_with",
+ "sha2",
+ "strum",
+]
+
+[[package]]
+name = "dbt-selector-parser"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-schemas",
+]
+
+[[package]]
+name = "dbt-sql-keywords"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
+name = "dbt-sql-utils"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "dbt-antlr4",
+ "dbt-frontend-common",
+ "dbt-fusion-workspace-hack",
+ "dbt-lexer-bigquery",
+ "dbt-lexer-databricks",
+ "dbt-lexer-redshift",
+ "dbt-lexer-snowflake",
+ "dbt-lexer-trino",
+ "minijinja",
+]
+
+[[package]]
+name = "dbt-telemetry"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow-schema",
+ "dbt-fusion-workspace-hack",
+ "dbt-tracing",
+ "dbt-yaml",
+ "pbjson 0.8.0",
+ "prost 0.14.3",
+ "prost-types",
+ "proto-rust-macros",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "serde_with",
+ "strum",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-temporal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-cast",
+ "arrow-select",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "chrono",
+ "csv",
+ "dbt-adapter",
+ "dbt-adbc",
+ "dbt-agate",
+ "dbt-antlr4",
+ "dbt-auth",
+ "dbt-common",
+ "dbt-csv",
+ "dbt-jinja-utils",
+ "dbt-loader",
+ "dbt-parser",
+ "dbt-schemas",
+ "dbt-telemetry",
+ "dbt-tracing",
+ "dbt-yaml",
+ "filetime",
+ "futures",
+ "futures-util",
+ "minijinja",
+ "object_store",
+ "prost-wkt-types",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "temporalio-client",
+ "temporalio-common",
+ "temporalio-macros",
+ "temporalio-sdk",
+ "temporalio-sdk-core",
+ "temporalio-workflow",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-tracing"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "bitflags 2.13.0",
+ "dbt-base",
+ "dbt-fusion-workspace-hack",
+ "dbt-yaml",
+ "erased-serde",
+ "opentelemetry 0.30.0",
+ "opentelemetry-otlp 0.30.0",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk 0.30.0",
+ "parquet",
+ "rand 0.9.2",
+ "scc",
+ "schemars 0.8.22",
+ "serde",
+ "serde_arrow",
+ "serde_json",
+ "serde_repr",
+ "strum",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "dbt-tui-progress"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
+dependencies = [
+ "console",
+ "counter",
+ "dbt-fusion-workspace-hack",
+ "indicatif",
+ "itertools 0.14.0",
+ "scc",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "dbt-yaml"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "415dae836aa1570c78342f9a2ce369bf0a51dbb8664630f61408c4b61cd6fb71"
 dependencies = [
  "dbt-yaml_derive",
  "dbt-yaml_schemars_derive",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "itoa",
  "ryu",
  "schemars 0.8.22",
@@ -2813,9 +2844,9 @@ dependencies = [
 
 [[package]]
 name = "dbt-yaml_derive"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ab848fd4c42f96fce89e0322c1ab7ffd0d69a47df0c2effe709175d9ed016b7"
+checksum = "ed8c7e503a2c8060f4ef1fbd0bac5880d5af7de18d6bfe424b866136629cb63d"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -2825,9 +2856,9 @@ dependencies = [
 
 [[package]]
 name = "dbt-yaml_schemars_derive"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fad84529f42703cd2e754d611ce68f8fbaa126f2d299f86bd928ffd20fbd97dc"
+checksum = "477f396afc6ae2ff00ef6e2ae32375d74e5ae265288203a80872b6c1c0e3f07f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3207,7 +3238,7 @@ version = "25.12.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "rustc_version",
 ]
 
@@ -3493,7 +3524,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http 0.2.12",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -3512,7 +3543,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http 1.4.0",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -3562,6 +3593,17 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -4015,12 +4057,12 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.13.0"
+version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
+checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
  "serde",
  "serde_core",
 ]
@@ -4302,7 +4344,7 @@ version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "libc",
  "redox_syscall 0.7.0",
 ]
@@ -4380,6 +4422,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -4495,12 +4546,12 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 [[package]]
 name = "minijinja"
 version = "2.5.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "aho-corasick",
  "dashmap",
  "dbt-fusion-workspace-hack",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "memo-map",
  "minijinja-typecheck-builtins",
  "percent-encoding",
@@ -4513,14 +4564,14 @@ dependencies = [
 [[package]]
 name = "minijinja-contrib"
 version = "2.5.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "chrono",
  "chrono-tz",
  "dbt-fusion-workspace-hack",
  "fancy-regex",
  "iana-time-zone",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "minijinja",
  "rand 0.8.5",
  "regex",
@@ -4534,7 +4585,7 @@ dependencies = [
 [[package]]
 name = "minijinja-typecheck-builtins"
 version = "0.0.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "dbt-yaml",
@@ -4731,7 +4782,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -4824,9 +4875,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -4850,15 +4901,15 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-http"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7a6d09a73194e6b66df7c8f1b680f156d916a1a942abf2de06823dd02b7855d"
+checksum = "5683015d09e2df236ef005b17f6f196f0d5f6313c4fa43a7b6a53b52776e4331"
 dependencies = [
  "async-trait",
  "bytes",
  "http 1.4.0",
- "opentelemetry 0.31.0",
- "reqwest 0.12.28",
+ "opentelemetry 0.32.0",
+ "reqwest 0.13.2",
 ]
 
 [[package]]
@@ -4880,20 +4931,21 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-otlp"
-version = "0.31.1"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f69cd6acbb9af919df949cd1ec9e5e7fdc2ef15d234b6b795aaa525cc02f71f"
+checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
 dependencies = [
  "http 1.4.0",
- "opentelemetry 0.31.0",
- "opentelemetry-http 0.31.0",
- "opentelemetry-proto 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.32.0",
+ "opentelemetry-http 0.32.0",
+ "opentelemetry-proto 0.32.0",
+ "opentelemetry_sdk 0.32.1",
  "prost 0.14.3",
- "reqwest 0.12.28",
+ "reqwest 0.13.2",
  "thiserror 2.0.18",
  "tokio",
- "tonic 0.14.3",
+ "tonic 0.14.6",
+ "tonic-types",
 ]
 
 [[package]]
@@ -4910,14 +4962,14 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-proto"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7175df06de5eaee9909d4805a3d07e28bb752c34cab57fa9cff549da596b30f"
+checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
 dependencies = [
- "opentelemetry 0.31.0",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.32.0",
+ "opentelemetry_sdk 0.32.1",
  "prost 0.14.3",
- "tonic 0.14.3",
+ "tonic 0.14.6",
  "tonic-prost",
 ]
 
@@ -4945,15 +4997,16 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry_sdk"
-version = "0.31.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
 dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "opentelemetry 0.31.0",
+ "opentelemetry 0.32.0",
  "percent-encoding",
+ "portable-atomic",
  "rand 0.9.2",
  "thiserror 2.0.18",
  "tokio",
@@ -5215,7 +5268,7 @@ checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
 dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
 ]
 
 [[package]]
@@ -5638,8 +5691,8 @@ dependencies = [
 
 [[package]]
 name = "proto-rust"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "chrono",
  "dbt-fusion-workspace-hack",
@@ -5650,8 +5703,8 @@ dependencies = [
 
 [[package]]
 name = "proto-rust-macros"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "proc-macro2",
@@ -5675,7 +5728,7 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e8bbe1a966bd2f362681a44f6edce3c2310ac21e4d5067a6e7ec396297a6ea0"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "memchr",
  "unicase",
 ]
@@ -5862,26 +5915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "recursive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0786a43debb760f491b1bc0269fe5e84155353c67482b9e60d0cfb596054b43e"
-dependencies = [
- "recursive-proc-macro-impl",
- "stacker",
-]
-
-[[package]]
-name = "recursive-proc-macro-impl"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76009fbe0614077fc1a2ce255e3a1881a2e3a3527097d5dc6d8212c585e7e38b"
-dependencies = [
- "quote",
- "syn",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5896,7 +5929,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -5905,7 +5938,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49f3fe0889e69e2ae9e41f4d6c4c0181701d00e4697b356fb1f74173a5e0ee27"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -6028,6 +6061,7 @@ checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http 1.4.0",
@@ -6133,9 +6167,9 @@ dependencies = [
 
 [[package]]
 name = "ringbuf"
-version = "0.4.8"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe47b720588c8702e34b5979cb3271a8b1842c7cb6f57408efa70c779363488c"
+checksum = "2d3ecbcab081b935fb9c618b07654924f27686b4aac8818e700580a83eedcb7f"
 dependencies = [
  "crossbeam-utils",
  "portable-atomic",
@@ -6178,7 +6212,7 @@ version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.8.4#3bb0dac23569fb607e781ca8e401c6eba71b14dd"
 dependencies = [
  "aho-corasick",
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "compact_str",
  "is-macro",
  "itertools 0.13.0",
@@ -6194,7 +6228,7 @@ name = "ruff_python_parser"
 version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.8.4#3bb0dac23569fb607e781ca8e401c6eba71b14dd"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "bstr",
  "compact_str",
  "memchr",
@@ -6239,7 +6273,7 @@ version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1c93dd1c9683b438c392c492109cb702b8090b2bfc8fed6f6e4eb4523f17af3"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
@@ -6303,7 +6337,7 @@ version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "146c9e247ccc180c1f61615433868c99f3de3ae256a30a43b49f67c2d9171f34"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -6480,7 +6514,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
  "dyn-clone",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "schemars_derive",
  "serde",
  "serde_json",
@@ -6581,7 +6615,7 @@ version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3297343eaf830f66ede390ea39da1d462b6b0c1b000f420d0a83f898bbbe6ef"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "libc",
@@ -6739,7 +6773,7 @@ dependencies = [
  "chrono",
  "hex",
  "indexmap 1.9.3",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "schemars 0.9.0",
  "schemars 1.2.1",
  "serde_core",
@@ -6993,7 +7027,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec4b661c54b1e4b603b37873a18c59920e4c51ea8ea2cf527d925424dbd4437c"
 dependencies = [
  "log",
- "recursive",
  "sqlparser_derive",
 ]
 
@@ -7146,7 +7179,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "core-foundation 0.9.4",
  "system-configuration-sys",
 ]
@@ -7187,9 +7220,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-client"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "798a49d1838935272b1f3a53c9ccc8ec65465be1a21f0e65c62d44cac765b1bc"
+checksum = "257e69cdc823bfd0707d4daac7470451d59d31aefe519c4eb60d4ceeb77c443e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7210,7 +7243,8 @@ dependencies = [
  "temporalio-common",
  "thiserror 2.0.18",
  "tokio",
- "tonic 0.14.3",
+ "tokio-rustls 0.26.4",
+ "tonic 0.14.6",
  "tower",
  "tracing",
  "url",
@@ -7219,13 +7253,12 @@ dependencies = [
 
 [[package]]
 name = "temporalio-common"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ad25c89ff8b626835e3dc1339b21387c7383c484ae585b67d34ceea074f1d65"
+checksum = "6988555678e6177c08553aece24312643b714d35983ad9bf383c9f9eb77ea6ec"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
  "bon",
  "crc32fast",
  "derive_more",
@@ -7236,26 +7269,23 @@ dependencies = [
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
- "opentelemetry 0.31.0",
- "opentelemetry-otlp 0.31.1",
- "opentelemetry_sdk 0.31.0",
+ "opentelemetry 0.32.0",
+ "opentelemetry-otlp 0.32.0",
+ "opentelemetry_sdk 0.32.1",
  "parking_lot 0.12.5",
- "pbjson 0.9.0",
- "pbjson-build 0.9.0",
  "prometheus",
  "prost 0.14.3",
  "prost-types",
- "prost-wkt",
- "prost-wkt-types",
+ "reqwest 0.12.28",
  "ringbuf",
  "serde",
  "serde_json",
+ "temporalio-common-wasm",
+ "temporalio-protos",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.0.6+spec-1.1.0",
- "tonic 0.14.3",
- "tonic-prost",
- "tonic-prost-build",
+ "tonic 0.14.6",
  "tracing",
  "tracing-core",
  "tracing-subscriber",
@@ -7264,10 +7294,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "temporalio-macros"
-version = "0.4.0"
+name = "temporalio-common-wasm"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "657ca3d6e92c8ec1309af92042b691b6367fa25043a5ec59ee365da2fb8ae620"
+checksum = "5d5dba313ccb58da518e23f85557e7cb9d5a1298fd7d8935328521ca641a4b11"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bon",
+ "crc32fast",
+ "derive_more",
+ "erased-serde",
+ "futures",
+ "parking_lot 0.12.5",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "temporalio-protos",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "temporalio-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80bd354f4226ade84d07266a21456553be402b2187ef72f263c334ec93a2109c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7275,10 +7330,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "temporalio-sdk"
-version = "0.4.0"
+name = "temporalio-protos"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6046cddb8288747e307a836516218fe5426bcaa704145fbabcd5db35fdd13560"
+checksum = "bce29ee903d46edec16df756e78e5ab125e4d342957174d4ac8ee30290ef249a"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "derive_more",
+ "http 1.4.0",
+ "pbjson 0.9.0",
+ "pbjson-build 0.9.0",
+ "prost 0.14.3",
+ "prost-types",
+ "prost-wkt-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "temporalio-sdk"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "964d8c74815d169491e640e5688b7a37525641c59c683ea775a7bc9138c38b5c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7287,12 +7365,14 @@ dependencies = [
  "futures-util",
  "gethostname",
  "parking_lot 0.12.5",
+ "prost 0.14.3",
  "prost-wkt-types",
  "serde",
  "temporalio-client",
  "temporalio-common",
  "temporalio-macros",
  "temporalio-sdk-core",
+ "temporalio-workflow",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -7303,9 +7383,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-sdk-core"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e0eb803a4554e4a45fb4e9469e719536798c9f55807efde7824f679d6f8d96e"
+checksum = "e8498ec9d16b1ca9a85aaf622d7542f2bdefe82972e221f8026d1ddd18686591"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7321,8 +7401,9 @@ dependencies = [
  "futures-util",
  "gethostname",
  "itertools 0.14.0",
- "lru",
+ "lru 0.18.0",
  "mockall",
+ "opentelemetry-otlp 0.32.0",
  "parking_lot 0.12.5",
  "pid",
  "pin-project",
@@ -7343,11 +7424,31 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tonic 0.14.3",
+ "tonic 0.14.6",
  "tracing",
  "url",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "temporalio-workflow"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "144d49f689bc594fbc81da9bf7989858b0e358b6aa28d47400ae822d3e0b559b"
+dependencies = [
+ "anyhow",
+ "bon",
+ "derive_more",
+ "futures-channel",
+ "futures-util",
+ "prost 0.14.3",
+ "prost-wkt-types",
+ "serde",
+ "temporalio-common-wasm",
+ "temporalio-macros",
+ "thiserror 2.0.18",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]
@@ -7630,7 +7731,7 @@ version = "0.9.11+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3afc9a848309fe1aaffaed6e1546a7a14de1f935dc9d89d32afd9a44bab7c46"
 dependencies = [
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "serde_core",
  "serde_spanned",
  "toml_datetime 0.7.5+spec-1.1.0",
@@ -7645,7 +7746,7 @@ version = "1.0.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "399b1124a3c9e16766831c6bba21e50192572cdd98706ea114f9502509686ffc"
 dependencies = [
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "serde_core",
  "serde_spanned",
  "toml_datetime 1.1.1+spec-1.1.0",
@@ -7710,14 +7811,15 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.3"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a286e33f82f8a1ee2df63f4fa35c0becf4a85a0cb03091a15fd7bf0b402dc94a"
+checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2 0.4.13",
  "http 1.4.0",
  "http-body 1.0.1",
@@ -7741,9 +7843,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-build"
-version = "0.14.3"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27aac809edf60b741e2d7db6367214d078856b8a5bff0087e94ff330fb97b6fc"
+checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -7753,20 +7855,20 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost"
-version = "0.14.3"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6c55a2d6a14174563de34409c9f92ff981d006f56da9c6ecd40d9d4a31500b0"
+checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost 0.14.3",
- "tonic 0.14.3",
+ "tonic 0.14.6",
 ]
 
 [[package]]
 name = "tonic-prost-build"
-version = "0.14.3"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4556786613791cfef4ed134aa670b61a85cfcacf71543ef33e8d801abae988f"
+checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -7779,6 +7881,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic-types"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab1b02061f83d519bba3caa167f88f261ef05720ab8ebc954ade70de3348e8"
+dependencies = [
+ "prost 0.14.3",
+ "prost-types",
+ "tonic 0.14.6",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7786,7 +7899,7 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "pin-project-lite",
  "slab",
  "sync_wrapper",
@@ -7804,7 +7917,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
  "async-compression",
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "bytes",
  "futures-core",
  "futures-util",
@@ -8187,8 +8300,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vortex-client"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
  "dbt-env",
  "dbt-fusion-workspace-hack",
@@ -8206,18 +8319,21 @@ dependencies = [
 
 [[package]]
 name = "vortex-events"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
+version = "2.0.0-alpha.3"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=37ba42bd64371e49a717fdd7bf481a7739a41e14#37ba42bd64371e49a717fdd7bf481a7739a41e14"
 dependencies = [
+ "base64 0.22.1",
  "dbt-common",
  "dbt-env",
  "dbt-fusion-workspace-hack",
  "dbt-jinja-utils",
  "dbt-schemas",
  "dbt-yaml",
+ "dirs",
  "md5",
  "proto-rust",
  "serde",
+ "serde_json",
  "uuid",
  "vortex-client",
 ]
@@ -8259,7 +8375,7 @@ version = "1.0.2+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.51.0",
 ]
 
 [[package]]
@@ -8268,7 +8384,7 @@ version = "0.4.0+wasi-0.3.0-rc-2026-01-06"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.51.0",
 ]
 
 [[package]]
@@ -8337,7 +8453,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
 dependencies = [
  "leb128fmt",
- "wasmparser",
+ "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "wasm-encoder"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30b6733b8b91d010a6ac5b0fb237dc46a19650bc4c67db66857e2e787d437204"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.247.0",
 ]
 
 [[package]]
@@ -8347,9 +8473,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
 dependencies = [
  "anyhow",
- "indexmap 2.13.0",
- "wasm-encoder",
- "wasmparser",
+ "indexmap 2.14.0",
+ "wasm-encoder 0.244.0",
+ "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "wasm-metadata"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "665fe59e56cc9b419ca6fcca56673e3421d1a5011e3b65caf6b726fd9e041d10"
+dependencies = [
+ "anyhow",
+ "indexmap 2.14.0",
+ "wasm-encoder 0.247.0",
+ "wasmparser 0.247.0",
 ]
 
 [[package]]
@@ -8399,9 +8537,21 @@ version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.0",
  "hashbrown 0.15.5",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
+ "semver",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e6fb4c2bee46c5ea4d40f8cdb5c131725cd976718ec56f1c8e82fbde5fa2a80"
+dependencies = [
+ "bitflags 2.13.0",
+ "hashbrown 0.17.1",
+ "indexmap 2.14.0",
  "semver",
 ]
 
@@ -8850,7 +9000,17 @@ version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 dependencies = [
- "wit-bindgen-rust-macro",
+ "wit-bindgen-rust-macro 0.51.0",
+]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+dependencies = [
+ "bitflags 2.13.0",
+ "wit-bindgen-rust-macro 0.57.1",
 ]
 
 [[package]]
@@ -8861,7 +9021,18 @@ checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
 dependencies = [
  "anyhow",
  "heck",
- "wit-parser",
+ "wit-parser 0.244.0",
+]
+
+[[package]]
+name = "wit-bindgen-core"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02dee27a2dc20d1008016c742ec9fc6ea498492994ba3750be7454cbc97ff04c"
+dependencies = [
+ "anyhow",
+ "heck",
+ "wit-parser 0.247.0",
 ]
 
 [[package]]
@@ -8872,12 +9043,28 @@ checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
 dependencies = [
  "anyhow",
  "heck",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "prettyplease",
  "syn",
- "wasm-metadata",
- "wit-bindgen-core",
- "wit-component",
+ "wasm-metadata 0.244.0",
+ "wit-bindgen-core 0.51.0",
+ "wit-component 0.244.0",
+]
+
+[[package]]
+name = "wit-bindgen-rust"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5007dae772945b7a5003d69d90a3a4a78929d41f19d004e980c4259a6af4484"
+dependencies = [
+ "anyhow",
+ "heck",
+ "indexmap 2.14.0",
+ "prettyplease",
+ "syn",
+ "wasm-metadata 0.247.0",
+ "wit-bindgen-core 0.57.1",
+ "wit-component 0.247.0",
 ]
 
 [[package]]
@@ -8891,8 +9078,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
- "wit-bindgen-core",
- "wit-bindgen-rust",
+ "wit-bindgen-core 0.51.0",
+ "wit-bindgen-rust 0.51.0",
+]
+
+[[package]]
+name = "wit-bindgen-rust-macro"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af9237d678e3513ad24e96fe98beacdc0db6405284ba2a2400418cf0d42caa89"
+dependencies = [
+ "anyhow",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wit-bindgen-core 0.57.1",
+ "wit-bindgen-rust 0.57.1",
 ]
 
 [[package]]
@@ -8902,16 +9104,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
 dependencies = [
  "anyhow",
- "bitflags 2.10.0",
- "indexmap 2.13.0",
+ "bitflags 2.13.0",
+ "indexmap 2.14.0",
  "log",
  "serde",
  "serde_derive",
  "serde_json",
- "wasm-encoder",
- "wasm-metadata",
- "wasmparser",
- "wit-parser",
+ "wasm-encoder 0.244.0",
+ "wasm-metadata 0.244.0",
+ "wasmparser 0.244.0",
+ "wit-parser 0.244.0",
+]
+
+[[package]]
+name = "wit-component"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d567162a6b9843080e5e0053f696623ff694bae8ae017c9ec536d1873bbe3d8"
+dependencies = [
+ "anyhow",
+ "bitflags 2.13.0",
+ "indexmap 2.14.0",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.247.0",
+ "wasm-metadata 0.247.0",
+ "wasmparser 0.247.0",
+ "wit-parser 0.247.0",
 ]
 
 [[package]]
@@ -8922,14 +9143,33 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
 dependencies = [
  "anyhow",
  "id-arena",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "log",
  "semver",
  "serde",
  "serde_derive",
  "serde_json",
  "unicode-xid",
- "wasmparser",
+ "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "wit-parser"
+version = "0.247.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ffe4064318cdf3c08cb99343b44c039fcefe61ccdf58aa9975285f13d74d1fc"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap 2.14.0",
+ "log",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-xid",
+ "wasmparser 0.247.0",
 ]
 
 [[package]]
@@ -8946,26 +9186,6 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
-]
-
-[[package]]
-name = "xdbc-record-replay"
-version = "2.0.0-alpha.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=2928c13ace5c3596669c264ebda5582b0a745376#2928c13ace5c3596669c264ebda5582b0a745376"
-dependencies = [
- "adbc_core",
- "arrow",
- "arrow-schema",
- "base64 0.22.1",
- "dashmap",
- "dbt-fusion-workspace-hack",
- "dbt-xdbc",
- "once_cell",
- "parquet",
- "regex",
- "rusqlite",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -9097,7 +9317,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.2",
  "hmac",
- "indexmap 2.13.0",
+ "indexmap 2.14.0",
  "lzma-rust2",
  "memchr",
  "pbkdf2",

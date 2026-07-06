@@ -220,6 +220,30 @@ pub fn build_search_attribute_payloads(
         .collect()
 }
 
+/// Re-upsert the `DbtStatus` search attribute to a terminal outcome
+/// (`passed` / `failed` / `skipped` / `cancelled`) as the run ends, so the
+/// workflow list can be filtered by outcome.
+///
+/// No-op unless `DbtStatus` is already in `plan.search_attributes` — that map
+/// has passed the namespace-registration filter, so this only upserts when the
+/// attribute is registered (upserting an unregistered attribute fails the
+/// workflow task). The initial `running` value is set at plan time.
+pub fn upsert_terminal_status(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    plan: &ExecutionPlan,
+    status: &str,
+) -> Result<(), WorkflowTermination> {
+    if !plan.search_attributes.contains_key("DbtStatus") {
+        return Ok(());
+    }
+    let payloads = build_search_attribute_payloads(&BTreeMap::from([(
+        "DbtStatus".to_string(),
+        status.to_string(),
+    )]))?;
+    ctx.upsert_search_attributes(payloads);
+    Ok(())
+}
+
 pub fn write_command_memo(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,

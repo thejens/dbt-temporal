@@ -232,6 +232,7 @@ pub async fn plan_project_inner(
         &state.project_name,
         &input.command,
         input.target.as_deref(),
+        input.select.as_deref(),
         &activities.registered_attrs.0,
     );
 
@@ -374,16 +375,23 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
 /// Build the search-attribute map upserted on every workflow run.
 ///
 /// Starts from the worker-startup static config, then layers the always-set
-/// dynamic attributes (`DbtProject`, `DbtCommand`, `DbtTarget`) — without
-/// overriding caller-provided values for the same keys. Finally filters to
-/// only attributes registered on the namespace; unregistered ones are dropped
-/// with a per-attribute warning so workflow task failures don't surprise the
-/// user.
+/// dynamic attributes (`DbtProject`, `DbtCommand`, `DbtTarget`, `DbtSelector`,
+/// `DbtStatus`) — without overriding caller-provided values for the same keys.
+/// `DbtStatus` starts at `running`; the workflow re-upserts it to the terminal
+/// outcome (`passed`/`failed`/`skipped`/`cancelled`) when the run ends, so the
+/// workflow list can be filtered by outcome. Finally filters to only attributes
+/// registered on the namespace; unregistered ones are dropped with a
+/// per-attribute warning so workflow task failures don't surprise the user.
+///
+/// All values are strings, matching the `Keyword`/`Text` search-attribute types
+/// the upsert pipeline serializes. Numeric attributes (e.g. a node count) would
+/// need a different payload encoding and are intentionally not emitted here.
 fn build_search_attributes(
     static_config: &BTreeMap<String, String>,
     project: &str,
     command: &str,
     target: Option<&str>,
+    select: Option<&str>,
     registered: &std::collections::BTreeSet<String>,
 ) -> BTreeMap<String, String> {
     let mut search_attributes = static_config.clone();
@@ -398,6 +406,14 @@ fn build_search_attributes(
             .entry("DbtTarget".to_string())
             .or_insert_with(|| target.to_string());
     }
+    if let Some(select) = select {
+        search_attributes
+            .entry("DbtSelector".to_string())
+            .or_insert_with(|| select.to_string());
+    }
+    search_attributes
+        .entry("DbtStatus".to_string())
+        .or_insert_with(|| "running".to_string());
 
     if !registered.is_empty() {
         let before = search_attributes.len();
@@ -641,8 +657,14 @@ mod tests {
         let static_config = BTreeMap::new();
         // Empty registered set means filtering is skipped (all kept).
         let registered = BTreeSet::new();
-        let attrs =
-            build_search_attributes(&static_config, "shop", "build", Some("prod"), &registered);
+        let attrs = build_search_attributes(
+            &static_config,
+            "shop",
+            "build",
+            Some("prod"),
+            None,
+            &registered,
+        );
         assert_eq!(attrs.get("DbtProject").map(String::as_str), Some("shop"));
         assert_eq!(attrs.get("DbtCommand").map(String::as_str), Some("build"));
         assert_eq!(attrs.get("DbtTarget").map(String::as_str), Some("prod"));
@@ -656,7 +678,8 @@ mod tests {
         let mut static_config = BTreeMap::new();
         static_config.insert("DbtProject".to_string(), "pinned-project".to_string());
         let registered = BTreeSet::new();
-        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", None, None, &registered);
         assert_eq!(attrs.get("DbtProject").map(String::as_str), Some("pinned-project"));
     }
 
@@ -664,7 +687,8 @@ mod tests {
     fn build_search_attributes_skips_dbttarget_when_input_target_absent() {
         let static_config = BTreeMap::new();
         let registered = BTreeSet::new();
-        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", None, None, &registered);
         assert!(!attrs.contains_key("DbtTarget"));
     }
 
@@ -676,8 +700,14 @@ mod tests {
 
         // Only DbtProject is registered → static + DbtCommand + DbtTarget all dropped.
         let registered = registered_set(&["DbtProject"]);
-        let attrs =
-            build_search_attributes(&static_config, "shop", "build", Some("prod"), &registered);
+        let attrs = build_search_attributes(
+            &static_config,
+            "shop",
+            "build",
+            Some("prod"),
+            None,
+            &registered,
+        );
         assert_eq!(attrs.len(), 1);
         assert!(attrs.contains_key("DbtProject"));
         assert!(!attrs.contains_key("env"));
@@ -692,11 +722,40 @@ mod tests {
         let mut static_config = BTreeMap::new();
         static_config.insert("env".to_string(), "test".to_string());
         let registered = BTreeSet::new();
-        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
-        assert_eq!(attrs.len(), 3); // env + DbtProject + DbtCommand
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", None, None, &registered);
+        assert_eq!(attrs.len(), 4); // env + DbtProject + DbtCommand + DbtStatus
         assert!(attrs.contains_key("env"));
         assert!(attrs.contains_key("DbtProject"));
         assert!(attrs.contains_key("DbtCommand"));
+        assert_eq!(attrs.get("DbtStatus").map(String::as_str), Some("running"));
+    }
+
+    #[test]
+    fn build_search_attributes_sets_selector_and_running_status() {
+        let static_config = BTreeMap::new();
+        let registered = BTreeSet::new();
+        let attrs = build_search_attributes(
+            &static_config,
+            "shop",
+            "build",
+            None,
+            Some("tag:nightly+"),
+            &registered,
+        );
+        // DbtSelector mirrors --select so runs can be filtered by what they built.
+        assert_eq!(attrs.get("DbtSelector").map(String::as_str), Some("tag:nightly+"));
+        // DbtStatus starts at "running"; the workflow re-upserts the terminal outcome.
+        assert_eq!(attrs.get("DbtStatus").map(String::as_str), Some("running"));
+    }
+
+    #[test]
+    fn build_search_attributes_omits_selector_when_absent() {
+        let static_config = BTreeMap::new();
+        let registered = BTreeSet::new();
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", None, None, &registered);
+        assert!(!attrs.contains_key("DbtSelector"));
     }
 
     #[test]
@@ -705,7 +764,8 @@ mod tests {
         let mut static_config = BTreeMap::new();
         static_config.insert("foo".to_string(), "bar".to_string());
         let registered = registered_set(&["DbtTarget"]); // present but no match
-        let attrs = build_search_attributes(&static_config, "shop", "build", None, &registered);
+        let attrs =
+            build_search_attributes(&static_config, "shop", "build", None, None, &registered);
         assert!(attrs.is_empty());
     }
 

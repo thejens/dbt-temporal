@@ -175,7 +175,9 @@ pub async fn connect_and_register(
 
     // Register activities and workflow on the worker
     worker.register_activities(activities);
-    worker.register_workflow::<DbtRunWorkflow>();
+    worker
+        .register_workflow::<DbtRunWorkflow>()
+        .map_err(|e| anyhow::anyhow!("registering DbtRunWorkflow: {e}"))?;
 
     Ok(worker)
 }
@@ -352,6 +354,7 @@ pub async fn initialize_project(
         &token,
         listener_factory,
         Arc::new(dbt_parser::resolver_hooks::NoOpResolverHooks),
+        Arc::new(dbt_jinja_utils::DefaultJinjaFactory),
     )
     .await
     .context("dbt resolve")?;

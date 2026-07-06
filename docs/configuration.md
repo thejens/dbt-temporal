@@ -139,6 +139,8 @@ Workflows automatically upsert [Temporal search attributes](https://docs.tempora
 | `DbtProject` | Resolved project name |
 | `DbtCommand` | `run` or `build` |
 | `DbtTarget` | Target name (only if specified in workflow input) |
+| `DbtSelector` | The `--select` expression (only if specified in workflow input) |
+| `DbtStatus` | Run outcome — starts at `running`, then re-upserted to `passed` / `failed` / `skipped` / `cancelled` when the run ends, so you can filter the workflow list by outcome |
 
 **Static attributes** can be added via the `TEMPORAL_SEARCH_ATTRIBUTES` env var — a JSON object of string key-value pairs applied to every workflow run by this worker:
 
@@ -154,6 +156,8 @@ Static values take precedence over dynamic ones if the same key is used.
 > temporal operator search-attribute create --name DbtProject --type Keyword
 > temporal operator search-attribute create --name DbtCommand --type Keyword
 > temporal operator search-attribute create --name DbtTarget --type Keyword
+> temporal operator search-attribute create --name DbtSelector --type Keyword
+> temporal operator search-attribute create --name DbtStatus --type Keyword
 > ```
 > If the operator service is unreachable (e.g. some Temporal Cloud configurations), the worker logs a warning and skips all attribute upserts.
 

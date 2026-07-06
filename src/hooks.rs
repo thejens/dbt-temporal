@@ -5,7 +5,7 @@ use anyhow::Context;
 use temporalio_common::UntypedWorkflow;
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
-use temporalio_common::protos::temporal::api::enums::v1::ParentClosePolicy;
+use temporalio_common::protos::coresdk::child_workflow::ParentClosePolicy;
 
 use temporalio_sdk::ChildWorkflowOptions;
 use tracing::{info, warn};
@@ -242,7 +242,7 @@ pub async fn execute_hooks(
 
         if hook.fire_and_forget {
             // Start but don't await result — the child runs independently.
-            match ctx.child_workflow(wf, raw_input, opts).await {
+            match ctx.start_child_workflow(wf, raw_input, opts).await {
                 Ok(_started) => {
                     info!(
                         workflow_type = %hook.workflow_type,
@@ -356,7 +356,7 @@ async fn run_child_workflow(
     opts: ChildWorkflowOptions,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let started = ctx
-        .child_workflow(wf, input, opts)
+        .start_child_workflow(wf, input, opts)
         .await
         .context("child workflow failed to start")?;
 

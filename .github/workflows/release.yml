@@ -4,12 +4,14 @@ name: Release
 #   - a Debian .deb package (built natively on Debian 12)
 #   - a RHEL .rpm package (built on AlmaLinux 8 / glibc 2.28, so it runs on
 #     RHEL/Alma/Rocky 8 and 9)
-#   - a container image pushed to GitHub Container Registry (GHCR)
+#   - a container image pushed to GitHub Container Registry (GHCR), built by
+#     copying the Debian-built glibc binary in (no in-image compilation)
 #
 # Each distro package is built inside that distro's own container so the binary
-# links against a matching glibc. A crates.io publish is intentionally absent:
-# the crate depends on unpublished dbt-core (Fusion) git crates and a
-# `[patch.crates-io]` block for forked arrow-rs/ring, both of which
+# links against a matching glibc, and the container image reuses the Debian
+# binary rather than compiling a second time. A crates.io publish is
+# intentionally absent: the crate depends on unpublished dbt-core (Fusion) git
+# crates and a `[patch.crates-io]` block for forked arrow-rs/ring, both of which
 # `cargo publish` rejects. Build from source with
 # `cargo install --git https://github.com/thejens/dbt-temporal` instead.
 on:
@@ -23,7 +25,7 @@ env:
 
 jobs:
   deb:
-    name: Debian package (.deb)
+    name: Debian package (.deb) + binary
     runs-on: ubuntu-latest
     container: debian:12
     permissions:
@@ -52,12 +54,19 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # Reused by the container job so the image isn't compiled a second time.
+      - name: Upload binary for the container job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-temporal-linux-x86_64
+          path: target/release/dbt-temporal
+
       - name: Package .deb
         run: |
           cargo install cargo-deb
           cargo deb --no-build
 
-      - name: Upload to release
+      - name: Upload .deb to release
         uses: softprops/action-gh-release@v2
         with:
           files: target/debian/*.deb
@@ -106,11 +115,21 @@ jobs:
   container:
     name: Container image
     runs-on: ubuntu-latest
+    needs: [deb]
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download the Debian-built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dbt-temporal-linux-x86_64
+          path: .
+
+      - name: Make binary executable
+        run: chmod +x dbt-temporal
 
       - uses: docker/setup-buildx-action@v3
 
@@ -135,9 +154,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: docker/Dockerfile.release
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

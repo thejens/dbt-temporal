@@ -247,6 +247,15 @@ WORKER_STICKY_QUEUE_TIMEOUT_SECS=5 WORKER_NONSTICKY_TO_STICKY_POLL_RATIO=0.4 car
 WORKER_MAX_ACTIVITIES_PER_SECOND=10 WORKER_GRACEFUL_SHUTDOWN_SECS=30 cargo run
 ```
 
+## Cross-Namespace Invocation (Nexus)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXUS_ENABLED` | off | **Reserved.** Intended to serve `dbt_run` as a [Nexus](https://docs.temporal.io/nexus) operation so callers in other namespaces can start it via a Nexus endpoint. |
+
+> [!NOTE]
+> The Temporal **Rust** SDK does not yet support serving Nexus operation handlers (only the caller side exists), so setting `NEXUS_ENABLED=1` currently just logs a warning at startup — the flag is reserved so enabling Nexus later needs no config change. Until the SDK ships handler support, expose `dbt_run` cross-namespace by pointing a Nexus endpoint at the worker's task queue and backing it with a thin handler written in an SDK that supports Nexus (Go/Java/TS/Python), which starts `dbt_run` on the `dbt-tasks` queue.
+
 ## Observability
 
 ### Workflow Memos

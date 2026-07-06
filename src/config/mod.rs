@@ -93,6 +93,15 @@ pub struct DbtTemporalConfig {
     /// (older servers ignore the fields). Controlled by
     /// `TEMPORAL_PRIORITY_SCHEDULING` (default: off).
     pub priority_scheduling: bool,
+    /// Reserved flag to serve `dbt_run` as a Nexus operation for cross-namespace
+    /// invocation. Controlled by `NEXUS_ENABLED` (default: off).
+    ///
+    /// The Temporal Rust SDK does not yet expose a way to register/serve Nexus
+    /// operation handlers (only the caller side, `NexusOperationOptions`, exists),
+    /// so enabling this currently only logs a warning at startup. The flag is kept
+    /// stable now so wiring the handler needs no config change once the SDK ships
+    /// handler support.
+    pub nexus_enabled: bool,
 }
 
 /// How the worker exports Temporal SDK metrics.
@@ -237,6 +246,8 @@ impl DbtTemporalConfig {
             temporal_metrics: tuning::parse_temporal_metrics()?,
             priority_scheduling: std::env::var("TEMPORAL_PRIORITY_SCHEDULING")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+            nexus_enabled: std::env::var("NEXUS_ENABLED")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         })
     }
 }
@@ -288,6 +299,7 @@ mod tests {
         "TEMPORAL_METRICS_OTLP_HEADERS",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "TEMPORAL_PRIORITY_SCHEDULING",
+        "NEXUS_ENABLED",
     ];
 
     fn make_project_dir() -> tempfile::TempDir {
@@ -656,6 +668,24 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn from_env_nexus_enabled_defaults_false_and_parses_truthy() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(&env_with_project(project_str, vec![]), || {
+            assert!(!DbtTemporalConfig::from_env()?.nexus_enabled);
+            Ok(())
+        })
+        .unwrap();
+        for raw in ["1", "true", "TRUE"] {
+            with_env(&env_with_project(project_str, vec![("NEXUS_ENABLED", Some(raw))]), || {
+                assert!(DbtTemporalConfig::from_env()?.nexus_enabled, "raw={raw}");
+                Ok(())
+            })
+            .unwrap();
+        }
     }
 
     #[test]

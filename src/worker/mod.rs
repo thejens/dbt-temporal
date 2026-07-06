@@ -252,6 +252,15 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
         None
     };
 
+    if config.nexus_enabled {
+        tracing::warn!(
+            "NEXUS_ENABLED is set, but the Temporal Rust SDK does not yet support serving Nexus \
+             operation handlers — the flag is reserved and currently has no effect. Until the SDK \
+             ships handler support, expose dbt_run cross-namespace via a Nexus endpoint backed by \
+             a handler in an SDK that supports it (Go/Java/TS/Python)."
+        );
+    }
+
     info!(
         task_queue = %config.temporal_task_queue,
         namespace = %config.temporal_namespace,

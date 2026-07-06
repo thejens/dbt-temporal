@@ -21,11 +21,13 @@ use temporalio_sdk::{
 
 use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus, RunStatusSnapshot};
 
-use self::helpers::{build_effective_env, build_summary_lines, elapsed_secs, upsert_memo_state};
+use self::helpers::{
+    build_effective_env, build_summary_lines, elapsed_secs, format_final_details, upsert_memo_state,
+};
 use self::levels::execute_levels;
 use self::phases::{
     plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks,
-    run_pre_run_hooks, store_run_artifacts, write_command_memo,
+    run_pre_run_hooks, store_run_artifacts, upsert_terminal_status, write_command_memo,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -119,6 +121,8 @@ impl DbtRunWorkflow {
         )
         .await?
         {
+            upsert_terminal_status(ctx, &plan, "skipped")?;
+            ctx.set_current_details("skipped by pre_run hook".to_string());
             return Ok(out);
         }
 
@@ -135,6 +139,8 @@ impl DbtRunWorkflow {
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
         if levels.was_cancelled {
+            upsert_terminal_status(ctx, &plan, "cancelled")?;
+            ctx.set_current_details("cancelled".to_string());
             return Err(WorkflowTermination::Cancelled);
         }
 
@@ -172,6 +178,13 @@ impl DbtRunWorkflow {
 
         output.success = success;
         output.hook_errors = hook_errors;
+
+        ctx.set_current_details(format_final_details(
+            &output.node_results,
+            success,
+            output.elapsed_time,
+        ));
+        upsert_terminal_status(ctx, &plan, if success { "passed" } else { "failed" })?;
 
         if success {
             Ok(output)

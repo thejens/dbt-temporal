@@ -13,7 +13,7 @@ pub fn build_adapter_engine(
 ) -> Result<Arc<dyn dbt_adapter::AdapterEngine>> {
     use dbt_adapter::adapter::adapter_factory::backend_of;
     use dbt_adapter::cache::RelationCache;
-    use dbt_adapter::engine::XdbcEngine;
+    use dbt_adapter::engine::AdbcEngine;
     use dbt_adapter::engine::query_comment::QueryCommentConfig;
     use dbt_adapter::sql_types::DefaultTypeOps;
     use dbt_adapter::stmt_splitter::DefaultStmtSplitter;
@@ -22,7 +22,7 @@ pub fn build_adapter_engine(
 
     let base_auth: Arc<dyn dbt_auth::Auth> = auth_override.unwrap_or_else(|| {
         let backend = backend_of(adapter_type);
-        dbt_auth::auth_for_backend(backend).into()
+        dbt_auth::auth_for_backend(Box::new(dbt_auth::NoopAuthWarningPrinter), backend).into()
     });
 
     let mapping = db_config.to_mapping().context("serialising db config")?;
@@ -36,7 +36,7 @@ pub fn build_adapter_engine(
         Arc::new(DefaultTypeOps::new(adapter_type));
     let relation_cache = Arc::new(RelationCache::default());
 
-    let engine = XdbcEngine::new(
+    let engine = AdbcEngine::new(
         adapter_type,
         base_auth,
         adapter_config,

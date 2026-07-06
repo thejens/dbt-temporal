@@ -53,5 +53,4 @@ The script:
 |---|---|
 | **Telemetry compatibility layer** | dbt-fusion's adapter code expects `TelemetryAttributes` in span extensions (normally inserted by `TelemetryDataLayer`). Without it, `record_current_span_status_from_attrs` panics. We insert a default `TelemetryAttributes` for every span via [`DbtTelemetryCompatLayer`](../src/telemetry_compat.rs). |
 | **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
-| **dbt-antlr4 version pin** | dbt-fusion's generated SQL lexers (Snowflake, Redshift, etc.) call `dbt_antlr4::recognizer::check_version()` as a regular function, which exists in v1.0.5 but was changed to a macro in later versions. We pin `dbt-antlr4 = "=1.0.5"` in `Cargo.toml` to hold the generated code and runtime in sync. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |

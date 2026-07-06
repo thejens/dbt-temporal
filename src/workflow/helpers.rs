@@ -201,6 +201,25 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
     log_lines
 }
 
+/// Build the terminal one-line `current_details` shown on the workflow once it
+/// finishes. Doubles as the run's label in the Temporal UI list — a compact
+/// pass/error/skip tally so operators can read the outcome without opening the
+/// run. Cancelled nodes are folded into the skip count (matching
+/// `RunStatusSnapshot::tally`).
+pub fn format_final_details(
+    results: &[NodeExecutionResult],
+    success: bool,
+    elapsed_secs: f64,
+) -> String {
+    let count = |s: NodeStatus| results.iter().filter(|r| r.status == s).count();
+    let pass = count(NodeStatus::Success);
+    let error = count(NodeStatus::Error);
+    let skip = count(NodeStatus::Skipped) + count(NodeStatus::Cancelled);
+    let total = results.len();
+    let outcome = if success { "passed" } else { "FAILED" };
+    format!("{outcome} — {pass} ok, {error} error, {skip} skip of {total} in {elapsed_secs:.2}s")
+}
+
 /// Build the dbt-style summary lines that close out a run.
 pub fn build_summary_lines(
     total_nodes: usize,
@@ -821,6 +840,44 @@ mod tests {
         assert!(header[1].contains("1 model"), "got: {}", header[1]);
         assert!(!header[1].contains("models"));
         assert_eq!(header[2], "Concurrency: 1 parallel level");
+    }
+
+    fn result_with_status(uid: &str, status: NodeStatus) -> NodeExecutionResult {
+        NodeExecutionResult {
+            unique_id: uid.to_string(),
+            status,
+            execution_time: 0.0,
+            message: None,
+            adapter_response: BTreeMap::new(),
+            compiled_code: None,
+            timing: vec![],
+            failures: None,
+            freshness: None,
+        }
+    }
+
+    #[test]
+    fn format_final_details_passed_summarises_counts() {
+        let results = vec![
+            result_with_status("a", NodeStatus::Success),
+            result_with_status("b", NodeStatus::Success),
+            result_with_status("c", NodeStatus::Skipped),
+        ];
+        let details = format_final_details(&results, true, 3.456);
+        assert_eq!(details, "passed — 2 ok, 0 error, 1 skip of 3 in 3.46s");
+    }
+
+    #[test]
+    fn format_final_details_failed_folds_cancelled_into_skip() {
+        let results = vec![
+            result_with_status("a", NodeStatus::Success),
+            result_with_status("b", NodeStatus::Error),
+            result_with_status("c", NodeStatus::Skipped),
+            result_with_status("d", NodeStatus::Cancelled),
+        ];
+        let details = format_final_details(&results, false, 12.0);
+        // Cancelled nodes count toward skip, matching RunStatusSnapshot::tally.
+        assert_eq!(details, "FAILED — 1 ok, 1 error, 2 skip of 4 in 12.00s");
     }
 
     #[test]

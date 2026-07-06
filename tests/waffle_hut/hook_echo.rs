@@ -72,6 +72,7 @@ pub async fn build_hook_worker(temporal_addr: &str, task_queue: &str) -> Result<
 
     let opts = WorkerOptions::new(task_queue)
         .register_workflow::<HookEchoWorkflow>()
+        .map_err(|e| anyhow::anyhow!("registering HookEchoWorkflow: {e}"))?
         .build();
 
     Worker::new(&runtime, client, opts).map_err(|e| anyhow::anyhow!("creating worker: {e}"))

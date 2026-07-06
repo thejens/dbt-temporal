@@ -119,6 +119,7 @@ pub fn build_tls_options(
         server_root_ca_cert: None,
         domain: None,
         client_tls_options: client_tls,
+        server_cert_verifier: None,
     }))
 }
 

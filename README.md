@@ -4,12 +4,12 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 
 ![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
 
-> **Status**: Not production-ready. dbt-temporal depends on
-> [dbt-fusion](https://github.com/dbt-labs/dbt-fusion), pinned to a 2026-04-25
-> `main` revision (preview release), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-core) (`0.3.0`), which is
+> **Status**: Not production-ready. dbt-temporal depends on the dbt Fusion engine,
+> now developed in [dbt-core](https://github.com/dbt-labs/dbt-core) as dbt Core v2,
+> pinned to a 2026-07-06 `main` revision (`2.0.0-alpha`), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-core) (`0.5.0`), which is
 > pre-1.0. Several [workarounds](docs/workarounds.md) are needed to make the
-> dbt-fusion engine work in a long-lived worker context. Consider this a proof of
+> Fusion engine work in a long-lived worker context. Consider this a proof of
 > concept — largely developed by [Claude Code](https://claude.ai/claude-code) with
 > no guarantees of code quality.
 
@@ -49,6 +49,29 @@ flowchart TD
 - **Observability** — live node status in Temporal memos, per-node activity names in the Gantt chart, and custom search attributes for filtering
 - **Worker tuning** — fixed concurrency caps or resource-based auto-scaling (cgroup-aware for containers), rate limiting, and graceful shutdown
 - **Health checks** — built-in HTTP health server and exec-based liveness probe for Kubernetes
+
+## Installation
+
+Tagged releases (`v*`) publish Debian/RHEL packages and a container image via
+GitHub Actions.
+
+```bash
+# From source with cargo (works with the git dependencies this crate uses):
+cargo install --git https://github.com/thejens/dbt-temporal --locked
+
+# Or pull the container image from GHCR:
+docker pull ghcr.io/thejens/dbt-temporal:latest
+
+# Or install a distro package from the latest GitHub Release
+# (https://github.com/thejens/dbt-temporal/releases):
+sudo apt install ./dbt-temporal_<version>_amd64.deb        # Debian/Ubuntu
+sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm     # RHEL/Alma/Rocky 8+
+```
+
+> **Not on crates.io.** dbt-temporal depends on the unpublished dbt-core (Fusion)
+> crates via git and a `[patch.crates-io]` block for forked `arrow-rs`/`ring`.
+> `cargo publish` rejects both, so the crate is distributed via `cargo install
+> --git`, GHCR, and release binaries rather than `cargo install dbt-temporal`.
 
 ## Quick Start
 

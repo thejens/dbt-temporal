@@ -134,6 +134,7 @@ fn evaluate(
         Some(
             count
                 * match period {
+                    FreshnessPeriod::second => 1,
                     FreshnessPeriod::minute => 60,
                     FreshnessPeriod::hour => 60 * 60,
                     FreshnessPeriod::day => 60 * 60 * 24,

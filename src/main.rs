@@ -2,20 +2,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-mod activities;
-mod artifact_store;
-mod config;
-mod error;
-mod health;
-mod hooks;
-mod model_store;
-mod project_registry;
-mod telemetry_compat;
-mod tracing_setup;
-mod types;
-mod worker;
-mod worker_state;
-mod workflow;
+// Link against the crate's own library instead of re-declaring the module
+// tree — a second `mod` tree here would compile every module twice (once for
+// the lib target, once for the bin).
+use dbt_temporal::{config, tracing_setup, worker};
 
 #[tokio::main]
 #[allow(clippy::large_futures)]

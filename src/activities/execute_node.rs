@@ -722,8 +722,10 @@ async fn execute_node_inner(
             &ephemeral_dir,
         )?;
         let sql = patch_compiled_schema(sql, env_schema.as_deref(), &state.default_schema);
-        node_context.insert("sql".to_owned(), minijinja::Value::from(sql.clone()));
-        node_context.insert("compiled_code".to_owned(), minijinja::Value::from(sql));
+        // minijinja Values share their string via Arc — clone the Value, not the SQL.
+        let sql_value = minijinja::Value::from(sql);
+        node_context.insert("sql".to_owned(), sql_value.clone());
+        node_context.insert("compiled_code".to_owned(), sql_value);
     }
 
     match raw_sql_result {
@@ -763,13 +765,6 @@ async fn execute_node_inner(
             let compiled =
                 patch_compiled_schema(compiled, env_schema.as_deref(), &state.default_schema);
 
-            // Set both `sql` and `compiled_code` in the context. View materializations
-            // reference `sql`, while table/incremental materializations reference
-            // `compiled_code` (passed to create_table_as / bq_create_table_as).
-            node_context.insert("sql".to_owned(), minijinja::Value::from(compiled.clone()));
-            node_context
-                .insert("compiled_code".to_owned(), minijinja::Value::from(compiled.clone()));
-
             // Write compiled SQL to the temp dir so model.compiled_code / model.compiled_sql
             // resolve correctly when accessed by the materialization template.
             let dest = io_args.out_dir.join("compiled").join(&common.path);
@@ -787,6 +782,14 @@ async fn execute_node_inner(
                     dest.display()
                 ))
             })?;
+
+            // Set both `sql` and `compiled_code` in the context. View materializations
+            // reference `sql`, while table/incremental materializations reference
+            // `compiled_code` (passed to create_table_as / bq_create_table_as).
+            // minijinja Values share their string via Arc — clone the Value, not the SQL.
+            let compiled_value = minijinja::Value::from(compiled);
+            node_context.insert("sql".to_owned(), compiled_value.clone());
+            node_context.insert("compiled_code".to_owned(), compiled_value);
         }
         Ok(_) => {
             empty_raw_sql_dispatch(rt, unique_id)?;

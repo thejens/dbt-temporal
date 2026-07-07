@@ -93,34 +93,67 @@ pub fn apply_selectors(
     exclude: Option<&str>,
     state: Option<&StateSelector>,
 ) -> Result<Vec<String>, anyhow::Error> {
-    if select.is_none() && exclude.is_none() {
+    let select_expr = parse_selector(select).context("invalid --select")?;
+    let exclude_expr = parse_selector(exclude).context("invalid --exclude")?;
+    if select_expr.is_none() && exclude_expr.is_none() {
         return Ok(selected_ids);
     }
 
-    // Build full dependency maps for graph operator traversal.
-    let all_ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
-    let full_deps = build_dependency_map(nodes, &all_ids);
-    let reverse_deps = reverse_dep_map(&full_deps);
+    // Graph operators (`+model`, `model+`, `@model`) walk the dependency maps;
+    // plain selectors never touch them. Building the maps clones every node id
+    // in the project twice, so skip it when nothing walks the graph.
+    let needs_graph = select_expr.as_ref().is_some_and(uses_graph_operators)
+        || exclude_expr.as_ref().is_some_and(uses_graph_operators);
+    let (full_deps, reverse_deps) = if needs_graph {
+        let all_ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+        let full_deps = build_dependency_map(nodes, &all_ids);
+        let reverse_deps = reverse_dep_map(&full_deps);
+        (full_deps, reverse_deps)
+    } else {
+        (BTreeMap::new(), BTreeMap::new())
+    };
 
-    if let Some(sel) = select {
-        let tokens: Vec<String> = sel.split_whitespace().map(String::from).collect();
-        if !tokens.is_empty() {
-            let expr = parse_model_specifiers(&tokens).context("invalid --select")?;
-            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
-            selected_ids.retain(|uid| matched.contains(uid.as_str()));
-        }
+    if let Some(expr) = select_expr {
+        let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
+        selected_ids.retain(|uid| matched.contains(uid.as_str()));
     }
 
-    if let Some(excl) = exclude {
-        let tokens: Vec<String> = excl.split_whitespace().map(String::from).collect();
-        if !tokens.is_empty() {
-            let expr = parse_model_specifiers(&tokens).context("invalid --exclude")?;
-            let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
-            selected_ids.retain(|uid| !matched.contains(uid.as_str()));
-        }
+    if let Some(expr) = exclude_expr {
+        let matched = resolve_expression(nodes, &full_deps, &reverse_deps, state, &expr);
+        selected_ids.retain(|uid| !matched.contains(uid.as_str()));
     }
 
     Ok(selected_ids)
+}
+
+/// Parse a `--select`/`--exclude` string into an expression. `None` when the
+/// input is absent or all-whitespace.
+fn parse_selector(spec: Option<&str>) -> Result<Option<SelectExpression>, anyhow::Error> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let tokens: Vec<String> = spec.split_whitespace().map(String::from).collect();
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parse_model_specifiers(&tokens)?))
+}
+
+/// True if any criterion in the expression walks the dependency graph
+/// (`+model`, `model+`, `@model`), including inside nested excludes.
+fn uses_graph_operators(expr: &SelectExpression) -> bool {
+    match expr {
+        SelectExpression::Atom(c) => {
+            c.childrens_parents
+                || c.parents_depth.is_some()
+                || c.children_depth.is_some()
+                || c.exclude.as_deref().is_some_and(uses_graph_operators)
+        }
+        SelectExpression::And(exprs) | SelectExpression::Or(exprs) => {
+            exprs.iter().any(uses_graph_operators)
+        }
+        SelectExpression::Exclude(inner) => uses_graph_operators(inner),
+    }
 }
 
 /// Reverse a dependency map: from "node -> deps" to "dep -> dependents".

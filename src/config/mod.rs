@@ -214,14 +214,14 @@ impl DbtTemporalConfig {
                 .transpose()
                 .context("invalid HEALTH_PORT")?,
             write_artifacts: std::env::var("WRITE_ARTIFACTS")
-                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true"),
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             write_catalog: std::env::var("WRITE_CATALOG")
-                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true"),
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             artifact_store: std::env::var("ARTIFACT_STORE")
                 .unwrap_or_else(|_| "/tmp/dbt-artifacts".to_string()),
             search_attributes: tuning::parse_search_attributes()?,
             write_run_log: std::env::var("WRITE_RUN_LOG")
-                .map_or(true, |v| v != "0" && v.to_lowercase() != "false"),
+                .map_or(true, |v| v != "0" && !v.eq_ignore_ascii_case("false")),
             worker_tuning: tuning::parse_worker_tuning()?,
             sticky_queue_timeout_secs: tuning::parse_env_u64(
                 "WORKER_STICKY_QUEUE_TIMEOUT_SECS",

@@ -71,7 +71,9 @@ async fn run_project_hooks_inner(
         jinja_env.env.add_func_func("env_var", move |state, args| {
             let map = Arc::clone(&env_overrides);
             let lookup = move |key: &str| -> Option<minijinja::Value> {
-                map.get(key).map(|v| minijinja::Value::from(v.clone()))
+                // Value::from(&str) uses minijinja's inline SmallStr where it fits,
+                // avoiding the second alloc that Value::from(String) would do.
+                map.get(key).map(|v| minijinja::Value::from(v.as_str()))
             };
             dbt_jinja_utils::env_var(false, Some(&lookup), state, args)
         });

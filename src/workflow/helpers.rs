@@ -388,13 +388,24 @@ pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     )
 }
 
+/// Truncate to at most `max_bytes`, backing up to a UTF-8 char boundary so
+/// the slice never panics on multi-byte content (warehouse error messages
+/// routinely carry smart quotes or user data).
+pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut end = s.len().min(max_bytes);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Extract a concise error message from a Temporal activity execution error.
 pub fn short_activity_error(e: &temporalio_sdk::ActivityExecutionError) -> String {
     let full = e.to_string();
 
     // Truncate if very long.
     if full.len() > 200 {
-        format!("{}...", &full[..200])
+        format!("{}...", truncate_at_char_boundary(&full, 200))
     } else {
         full
     }
@@ -953,6 +964,28 @@ mod tests {
         let short = short_activity_error(&err);
         assert_eq!(short.len(), 200);
         assert!(!short.ends_with("..."));
+    }
+
+    #[test]
+    fn short_activity_error_truncates_multibyte_on_char_boundary() {
+        // Byte 200 of the full display lands mid-codepoint here; the slice
+        // must back up to a boundary instead of panicking.
+        let msg = "é".repeat(150);
+        let err = make_serialization_error(&msg);
+        let short = short_activity_error(&err);
+        assert!(short.ends_with("..."), "got: {short}");
+        assert!(short.len() <= 203);
+    }
+
+    // --- truncate_at_char_boundary ---
+
+    #[test]
+    fn truncate_at_char_boundary_backs_up_to_boundary() {
+        // 'a' is 1 byte, 'é' is 2 — a 2-byte cut lands mid-'é'.
+        assert_eq!(truncate_at_char_boundary("aé", 2), "a");
+        assert_eq!(truncate_at_char_boundary("aé", 3), "aé");
+        assert_eq!(truncate_at_char_boundary("aé", 10), "aé");
+        assert_eq!(truncate_at_char_boundary("", 5), "");
     }
 
     // --- format_activity_label ---

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, StringArray};
 use dbt_adapter::load_store::ResultStore;
+use dbt_common::constants::DBT_CTE_PREFIX;
 use dbt_schemas::schemas::Nodes;
 use dbt_schemas::schemas::common::{Formats, Rows};
 use dbt_schemas::schemas::nodes::DbtUnitTest;
@@ -23,9 +24,6 @@ use dbt_yaml::Value as YmlValue;
 
 use crate::error::DbtTemporalError;
 use crate::worker_state::WorkerState;
-
-/// Prefix dbt-fusion uses for ephemeral model CTE references in compiled SQL.
-const EPHEMERAL_CTE_PREFIX: &str = "__dbt__cte__";
 
 /// Maximum number of differing rows included in the failure diff message.
 /// Keeps Temporal failure payloads bounded for tests over large fixtures.
@@ -197,7 +195,7 @@ pub fn build_unit_test_sql(
             .to_string()
             .eq_ignore_ascii_case("ephemeral")
         {
-            format!("{EPHEMERAL_CTE_PREFIX}{}", input_node.common().name)
+            format!("{DBT_CTE_PREFIX}{}", input_node.common().name)
         } else {
             input_base.relation_name.clone().ok_or_else(|| {
                 DbtTemporalError::Compilation(format!(

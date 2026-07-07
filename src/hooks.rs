@@ -148,13 +148,13 @@ fn process_pre_run_completion(
     if event != HookEvent::PreRun {
         return HookCompletionAction::Continue;
     }
-    let Some(bytes) = payload_bytes else {
+    let Some(value) = payload_bytes.and_then(|b| serde_json::from_slice(b).ok()) else {
         return HookCompletionAction::Continue;
     };
-    if let Some(extra) = parse_extra_env(bytes) {
+    if let Some(extra) = parse_extra_env(&value) {
         outcome.extra_env.extend(extra);
     }
-    if let Some((true, reason)) = parse_skip_sentinel(bytes) {
+    if let Some((true, reason)) = parse_skip_sentinel(&value) {
         outcome.skip = true;
         outcome.skip_reason.clone_from(&reason);
         return HookCompletionAction::Skip(reason);
@@ -313,8 +313,9 @@ pub async fn execute_hooks(
 ///
 /// Returns `Some(map)` if the payload contains `{"extra_env": {"KEY": "value", ...}}`.
 /// Values must be strings; non-string values are silently skipped.
-fn parse_extra_env(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, String>> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+fn parse_extra_env(
+    value: &serde_json::Value,
+) -> Option<std::collections::BTreeMap<String, String>> {
     let extra = value.as_object()?.get("extra_env")?.as_object()?;
     let map: std::collections::BTreeMap<String, String> = extra
         .iter()
@@ -329,9 +330,8 @@ fn parse_extra_env(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, St
 /// Skip sentinels:
 /// - JSON `false` → skip with no reason
 /// - `{"skip": true}` → skip, optionally with `"reason"` field
-fn parse_skip_sentinel(bytes: &[u8]) -> Option<(bool, Option<String>)> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    match &value {
+fn parse_skip_sentinel(value: &serde_json::Value) -> Option<(bool, Option<String>)> {
+    match value {
         serde_json::Value::Bool(false) => Some((true, None)),
         serde_json::Value::Object(obj) => {
             let skip = obj.get("skip")?.as_bool()?;
@@ -840,75 +840,72 @@ hooks:
         Ok(())
     }
 
+    /// Parse a raw payload the way `process_pre_run_completion` does before
+    /// handing it to the sentinel/env parsers.
+    fn json(bytes: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(bytes).unwrap()
+    }
+
     #[test]
     fn skip_sentinel_json_false() {
-        let bytes = b"false";
-        let result = parse_skip_sentinel(bytes);
+        let result = parse_skip_sentinel(&json(b"false"));
         assert_eq!(result, Some((true, None)));
     }
 
     #[test]
     fn skip_sentinel_object_skip_true() {
-        let bytes = br#"{"skip": true}"#;
-        let result = parse_skip_sentinel(bytes);
+        let result = parse_skip_sentinel(&json(br#"{"skip": true}"#));
         assert_eq!(result, Some((true, None)));
     }
 
     #[test]
     fn skip_sentinel_object_skip_true_with_reason() {
-        let bytes = br#"{"skip": true, "reason": "not ready"}"#;
-        let result = parse_skip_sentinel(bytes);
+        let result = parse_skip_sentinel(&json(br#"{"skip": true, "reason": "not ready"}"#));
         assert_eq!(result, Some((true, Some("not ready".to_string()))));
     }
 
     #[test]
     fn skip_sentinel_object_skip_false() {
-        let bytes = br#"{"skip": false}"#;
-        let result = parse_skip_sentinel(bytes);
+        let result = parse_skip_sentinel(&json(br#"{"skip": false}"#));
         assert_eq!(result, Some((false, None)));
     }
 
     #[test]
     fn skip_sentinel_json_true_is_not_skip() {
-        let bytes = b"true";
-        let result = parse_skip_sentinel(bytes);
         // `true` doesn't match any sentinel pattern.
-        assert_eq!(result, None);
+        assert_eq!(parse_skip_sentinel(&json(b"true")), None);
     }
 
     #[test]
     fn skip_sentinel_string_is_not_skip() {
-        let bytes = br#""hello""#;
-        let result = parse_skip_sentinel(bytes);
-        assert_eq!(result, None);
+        assert_eq!(parse_skip_sentinel(&json(br#""hello""#)), None);
     }
 
     #[test]
     fn skip_sentinel_null_is_not_skip() {
-        let bytes = b"null";
-        let result = parse_skip_sentinel(bytes);
-        assert_eq!(result, None);
+        assert_eq!(parse_skip_sentinel(&json(b"null")), None);
     }
 
     #[test]
-    fn skip_sentinel_invalid_json() {
-        let bytes = b"not json";
-        let result = parse_skip_sentinel(bytes);
-        assert_eq!(result, None);
+    fn process_pre_run_completion_ignores_unparseable_payload() {
+        // Invalid JSON is dropped before the sentinel parsers run.
+        let mut outcome = HookExecutionOutcome::default();
+        let action = process_pre_run_completion(HookEvent::PreRun, Some(b"not json"), &mut outcome);
+        assert_eq!(action, HookCompletionAction::Continue);
+        assert!(!outcome.skip);
+        assert!(outcome.extra_env.is_empty());
     }
 
     #[test]
     fn skip_sentinel_object_without_skip_field() {
-        let bytes = br#"{"success": true}"#;
-        let result = parse_skip_sentinel(bytes);
         // Object without "skip" field — doesn't match.
-        assert_eq!(result, None);
+        assert_eq!(parse_skip_sentinel(&json(br#"{"success": true}"#)), None);
     }
 
     #[test]
     fn extra_env_basic() {
-        let bytes = br#"{"extra_env": {"FOO": "bar", "NUM": "42"}}"#;
-        let Some(result) = parse_extra_env(bytes) else {
+        let value = json(br#"{"extra_env": {"FOO": "bar", "NUM": "42"}}"#);
+        let Some(result) = parse_extra_env(&value) else {
             panic!("expected extra_env map");
         };
         assert_eq!(result.get("FOO").map(String::as_str), Some("bar"));
@@ -918,20 +915,20 @@ hooks:
     #[test]
     fn extra_env_combined_with_skip() {
         // A hook can return both extra_env and a skip sentinel.
-        let bytes = br#"{"skip": true, "reason": "not ready", "extra_env": {"X": "1"}}"#;
-        let Some(extra) = parse_extra_env(bytes) else {
+        let value = json(br#"{"skip": true, "reason": "not ready", "extra_env": {"X": "1"}}"#);
+        let Some(extra) = parse_extra_env(&value) else {
             panic!("expected extra_env map");
         };
         assert_eq!(extra.get("X").map(String::as_str), Some("1"));
-        let skip = parse_skip_sentinel(bytes);
+        let skip = parse_skip_sentinel(&value);
         assert_eq!(skip, Some((true, Some("not ready".to_string()))));
     }
 
     #[test]
     fn extra_env_non_string_values_skipped() {
         // Non-string values are silently dropped.
-        let bytes = br#"{"extra_env": {"GOOD": "yes", "BAD": 123, "ALSO_BAD": null}}"#;
-        let Some(result) = parse_extra_env(bytes) else {
+        let value = json(br#"{"extra_env": {"GOOD": "yes", "BAD": 123, "ALSO_BAD": null}}"#);
+        let Some(result) = parse_extra_env(&value) else {
             panic!("expected extra_env map");
         };
         assert_eq!(result.len(), 1);
@@ -940,10 +937,10 @@ hooks:
 
     #[test]
     fn extra_env_absent_returns_none() {
-        assert!(parse_extra_env(b"{}").is_none());
-        assert!(parse_extra_env(br#"{"skip": true}"#).is_none());
-        assert!(parse_extra_env(b"false").is_none());
-        assert!(parse_extra_env(b"null").is_none());
+        assert!(parse_extra_env(&json(b"{}")).is_none());
+        assert!(parse_extra_env(&json(br#"{"skip": true}"#)).is_none());
+        assert!(parse_extra_env(&json(b"false")).is_none());
+        assert!(parse_extra_env(&json(b"null")).is_none());
     }
 
     #[test]

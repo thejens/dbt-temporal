@@ -284,6 +284,7 @@ mod tests {
             poller_autoscaling: None,
             temporal_metrics: TemporalMetricsConfig::None,
             priority_scheduling: false,
+            nexus_enabled: false,
         }
     }
 

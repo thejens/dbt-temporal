@@ -1,0 +1,17 @@
+# Release runtime image built from the prebuilt glibc binary produced by the
+# `deb` job in .github/workflows/release.yml — the binary is compiled once and
+# copied in, not rebuilt here. (docker/Dockerfile still builds from source and
+# is what the CI docker-build check uses.)
+#
+# Debian slim keeps glibc so the ADBC warehouse drivers dbt dlopens at runtime
+# — the glibc builds shipped from the dbt CDN — load correctly. The binary is
+# built on debian:12 (same glibc as bookworm-slim), so it runs here unchanged.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY dbt-temporal /usr/local/bin/dbt-temporal
+
+ENTRYPOINT ["dbt-temporal"]

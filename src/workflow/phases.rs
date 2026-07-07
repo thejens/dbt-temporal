@@ -228,19 +228,35 @@ pub fn build_search_attribute_payloads(
 /// has passed the namespace-registration filter, so this only upserts when the
 /// attribute is registered (upserting an unregistered attribute fails the
 /// workflow task). The initial `running` value is set at plan time.
+/// Build the single-entry `DbtStatus` payload list for the terminal upsert, or
+/// `None` when `DbtStatus` isn't in the plan's (registration-filtered)
+/// attributes — upserting an unregistered attribute would fail the workflow
+/// task. Pure, so the gating and payload shape are unit-testable without a
+/// `WorkflowContext`.
+type SearchAttributePayloads =
+    Vec<(String, temporalio_common::protos::temporal::api::common::v1::Payload)>;
+
+fn terminal_status_payloads(
+    plan: &ExecutionPlan,
+    status: &str,
+) -> Option<Result<SearchAttributePayloads, WorkflowTermination>> {
+    if !plan.search_attributes.contains_key("DbtStatus") {
+        return None;
+    }
+    Some(build_search_attribute_payloads(&BTreeMap::from([(
+        "DbtStatus".to_string(),
+        status.to_string(),
+    )])))
+}
+
 pub fn upsert_terminal_status(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
     status: &str,
 ) -> Result<(), WorkflowTermination> {
-    if !plan.search_attributes.contains_key("DbtStatus") {
-        return Ok(());
+    if let Some(payloads) = terminal_status_payloads(plan, status) {
+        ctx.upsert_search_attributes(payloads?);
     }
-    let payloads = build_search_attribute_payloads(&BTreeMap::from([(
-        "DbtStatus".to_string(),
-        status.to_string(),
-    )]))?;
-    ctx.upsert_search_attributes(payloads);
     Ok(())
 }
 
@@ -875,5 +891,29 @@ mod tests {
         // Each Payload contains the JSON-encoded string value.
         let payload_value: serde_json::Value = serde_json::from_slice(&result[1].1.data).unwrap();
         assert_eq!(payload_value, serde_json::json!("shop"));
+    }
+
+    // --- terminal_status_payloads ---
+
+    #[test]
+    fn terminal_status_payloads_none_when_dbtstatus_not_registered() {
+        // empty_plan has no search attributes → DbtStatus is unregistered, so
+        // the terminal upsert must be skipped (upserting it would fail the task).
+        let plan = empty_plan();
+        assert!(terminal_status_payloads(&plan, "passed").is_none());
+    }
+
+    #[test]
+    fn terminal_status_payloads_builds_dbtstatus_when_registered() {
+        let mut plan = empty_plan();
+        plan.search_attributes
+            .insert("DbtStatus".to_string(), "running".to_string());
+        let payloads = terminal_status_payloads(&plan, "failed")
+            .expect("registered → Some")
+            .expect("payload builds");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].0, "DbtStatus");
+        let val: serde_json::Value = serde_json::from_slice(&payloads[0].1.data).unwrap();
+        assert_eq!(val, serde_json::json!("failed"));
     }
 }

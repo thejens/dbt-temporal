@@ -868,6 +868,26 @@ mod tests {
     }
 
     #[test]
+    fn format_final_details_all_passed() {
+        let results = vec![
+            result_with_status("a", NodeStatus::Success),
+            result_with_status("b", NodeStatus::Success),
+        ];
+        assert_eq!(
+            format_final_details(&results, true, 0.5),
+            "passed — 2 ok, 0 error, 0 skip of 2 in 0.50s"
+        );
+    }
+
+    #[test]
+    fn format_final_details_empty_run() {
+        assert_eq!(
+            format_final_details(&[], true, 0.0),
+            "passed — 0 ok, 0 error, 0 skip of 0 in 0.00s"
+        );
+    }
+
+    #[test]
     fn format_final_details_failed_folds_cancelled_into_skip() {
         let results = vec![
             result_with_status("a", NodeStatus::Success),

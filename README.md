@@ -59,8 +59,9 @@ GitHub Actions.
 # From source with cargo (works with the git dependencies this crate uses):
 cargo install --git https://github.com/thejens/dbt-temporal --locked
 
-# Or pull the container image from GHCR:
-docker pull ghcr.io/thejens/dbt-temporal:latest
+# Or pull a container image from GHCR (both glibc, so ADBC drivers load):
+docker pull ghcr.io/thejens/dbt-temporal:latest         # debian-slim (has a shell)
+docker pull ghcr.io/thejens/dbt-temporal:distroless     # distroless/cc (minimal)
 
 # Or install a distro package from the latest GitHub Release
 # (https://github.com/thejens/dbt-temporal/releases):

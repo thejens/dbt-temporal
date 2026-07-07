@@ -170,6 +170,10 @@ pub fn shared_infra() -> &'static SharedInfra {
                         "--search-attribute".to_string(),
                         "DbtTarget=Keyword".to_string(),
                         "--search-attribute".to_string(),
+                        "DbtSelector=Keyword".to_string(),
+                        "--search-attribute".to_string(),
+                        "DbtStatus=Keyword".to_string(),
+                        "--search-attribute".to_string(),
                         "env=Keyword".to_string(),
                     ])
                     .build();
@@ -295,6 +299,7 @@ pub fn test_config(infra: &SharedInfra, fixture_dir: &Path) -> Result<DbtTempora
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
+        nexus_enabled: false,
     })
 }
 
@@ -363,6 +368,7 @@ pub fn test_config_env_var_profile(
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
+        nexus_enabled: false,
     })
 }
 
@@ -437,6 +443,7 @@ pub fn test_config_multi_project(
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
+        nexus_enabled: false,
     })
 }
 
@@ -718,6 +725,7 @@ pub fn test_config_with_schema(
         poller_autoscaling: None,
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
+        nexus_enabled: false,
     };
 
     Ok((config, schema))

@@ -99,5 +99,5 @@ Parallel execution is natural: all nodes in the same topological level are indep
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-core) | `0.3.0` | Workflow orchestration |
-| [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) | Git rev `00969f9` (2026-04-25 `main`) | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `0.5.0` | Workflow orchestration |
+| [dbt Core v2 (Fusion engine)](https://github.com/dbt-labs/dbt-core) | Git rev pinned in [Cargo.toml](../Cargo.toml) (2026-07-06 `main`, `2.0.0-alpha`) | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

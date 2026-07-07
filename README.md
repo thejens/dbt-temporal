@@ -7,16 +7,16 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 > **Status**: Not production-ready. dbt-temporal depends on the dbt Fusion engine,
 > now developed in [dbt-core](https://github.com/dbt-labs/dbt-core) as dbt Core v2,
 > pinned to a 2026-07-06 `main` revision (`2.0.0-alpha`), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-core) (`0.5.0`), which is
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.5.0`), which is
 > pre-1.0. Several [workarounds](docs/workarounds.md) are needed to make the
 > Fusion engine work in a long-lived worker context. Consider this a proof of
 > concept — largely developed by [Claude Code](https://claude.ai/claude-code) with
 > no guarantees of code quality.
 
 > **License**: dbt-temporal itself is [MIT-licensed](LICENSE). Its two main
-> dependencies have their own licenses — see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)
-> for details. Notably, several dbt-fusion crates use the **Elastic License 2.0**,
-> which restricts offering the software as a hosted service to third parties.
+> dependencies are permissively licensed as well — dbt Core v2 is **Apache 2.0**
+> and the Temporal Rust SDK is **MIT**. See
+> [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for details.
 
 ```mermaid
 flowchart TD

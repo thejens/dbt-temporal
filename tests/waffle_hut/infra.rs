@@ -170,6 +170,10 @@ pub fn shared_infra() -> &'static SharedInfra {
                         "--search-attribute".to_string(),
                         "DbtTarget=Keyword".to_string(),
                         "--search-attribute".to_string(),
+                        "DbtSelector=Keyword".to_string(),
+                        "--search-attribute".to_string(),
+                        "DbtStatus=Keyword".to_string(),
+                        "--search-attribute".to_string(),
                         "env=Keyword".to_string(),
                     ])
                     .build();

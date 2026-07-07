@@ -220,6 +220,19 @@ async fn list_registered_search_attributes(
 }
 
 /// Build and run the Temporal worker.
+/// Startup warning to emit when `NEXUS_ENABLED` is set, or `None`. Extracted so
+/// the gating is unit-testable without starting a worker. The Temporal Rust SDK
+/// can't serve Nexus operation handlers yet, so the flag is currently a no-op —
+/// see [`crate::config::DbtTemporalConfig::nexus_enabled`].
+fn nexus_unsupported_warning(nexus_enabled: bool) -> Option<&'static str> {
+    nexus_enabled.then_some(
+        "NEXUS_ENABLED is set, but the Temporal Rust SDK does not yet support serving Nexus \
+         operation handlers — the flag is reserved and currently has no effect. Until the SDK \
+         ships handler support, expose dbt_run cross-namespace via a Nexus endpoint backed by a \
+         handler in an SDK that supports it (Go/Java/TS/Python).",
+    )
+}
+
 #[allow(clippy::future_not_send, clippy::large_futures)]
 // future_not_send: Temporal SDK Worker is !Send by design.
 // large_futures: build_worker returns a large future from SDK initialization.
@@ -252,13 +265,8 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
         None
     };
 
-    if config.nexus_enabled {
-        tracing::warn!(
-            "NEXUS_ENABLED is set, but the Temporal Rust SDK does not yet support serving Nexus \
-             operation handlers — the flag is reserved and currently has no effect. Until the SDK \
-             ships handler support, expose dbt_run cross-namespace via a Nexus endpoint backed by \
-             a handler in an SDK that supports it (Go/Java/TS/Python)."
-        );
+    if let Some(msg) = nexus_unsupported_warning(config.nexus_enabled) {
+        tracing::warn!("{msg}");
     }
 
     info!(
@@ -526,6 +534,12 @@ fn build_sql_caches(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nexus_unsupported_warning_gated_on_flag() {
+        assert!(nexus_unsupported_warning(false).is_none());
+        assert!(nexus_unsupported_warning(true).is_some_and(|m| m.contains("NEXUS_ENABLED")));
+    }
 
     #[tokio::test]
     async fn resolve_project_sources_local_only() -> Result<()> {

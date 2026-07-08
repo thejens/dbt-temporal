@@ -245,6 +245,20 @@ async fn injected_permanent_error_does_not_retry() {
     );
 }
 
+/// A table model creates its target schema before materializing. A transient
+/// failure on that first adapter call is logged and non-fatal — the
+/// materialization proceeds and the node still succeeds (partial resilience
+/// within one activity, independent of Temporal's activity-level retry).
+#[tokio::test]
+async fn create_schema_failure_is_non_fatal() {
+    let harness =
+        Harness::build(&[("t", "{{ config(materialized='table') }}\nselect 1 as id")]).await;
+    harness
+        .faults()
+        .fail_next_executes(1, &AdapterFault::connection_failure());
+    harness.run_ok("t").await;
+}
+
 /// The recovery guarantee: a model that fails against a briefly-unreachable
 /// warehouse succeeds once the warehouse is reachable again — exactly what
 /// Temporal's retry buys.

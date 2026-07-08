@@ -65,9 +65,16 @@ pub fn render_materialization(
         ))
     })?;
 
-    // Call the macro — this executes the materialization body (DDL/DML via adapter).
+    // Call the macro — this executes the materialization body (DDL/DML via
+    // adapter). A transient warehouse failure (dropped connection, throttling,
+    // timeout) arrives here wrapped in a `minijinja::Error`; classify it so it
+    // becomes a retryable `Adapter` error rather than a permanent `Compilation`
+    // one — otherwise Temporal never retries a briefly-unreachable warehouse.
     let result = func.call(&state, &[], &[]).map_err(|e| {
-        DbtTemporalError::Compilation(format!("calling {macro_name} in {template_name}: {e:#}"))
+        crate::error::classify_adapter_execution_error(
+            &e,
+            &format!("calling {macro_name} in {template_name}"),
+        )
     })?;
 
     Ok(result.as_str().map(ToString::to_string).unwrap_or_default())

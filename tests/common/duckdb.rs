@@ -81,6 +81,17 @@ impl Harness {
     /// The DuckDB database is a temp file (not `:memory:`) so state persists
     /// across the per-node connections that `execute_node` opens.
     pub async fn build(models: &[(&str, &str)]) -> Self {
+        Self::build_inner(models, false).await
+    }
+
+    /// Like [`build`](Self::build) but points DuckDB at an unopenable path, so
+    /// the first query fails with a transient IO/connection error — the
+    /// "warehouse briefly unreachable" case that must classify as retryable.
+    pub async fn build_unreachable(models: &[(&str, &str)]) -> Self {
+        Self::build_inner(models, true).await
+    }
+
+    async fn build_inner(models: &[(&str, &str)], unreachable: bool) -> Self {
         let project = TempDir::new().unwrap();
         let profiles = TempDir::new().unwrap();
         let db = TempDir::new().unwrap();
@@ -96,7 +107,13 @@ impl Harness {
             std::fs::write(models_dir.join(format!("{name}.sql")), sql).unwrap();
         }
 
-        let db_path = db.path().join("spike.duckdb");
+        // An unreachable DB uses a path whose parent dir is absent, so DuckDB
+        // fails to open it with a transient "IO Error: Cannot open file".
+        let db_path = if unreachable {
+            db.path().join("unreachable").join("spike.duckdb")
+        } else {
+            db.path().join("spike.duckdb")
+        };
         std::fs::write(
             profiles.path().join("profiles.yml"),
             format!(

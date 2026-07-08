@@ -116,3 +116,18 @@ async fn model_calling_an_undefined_macro_is_not_registered() {
         "expected ProjectNotFound (node dropped during resolve), got: {err:?}"
     );
 }
+
+#[tokio::test]
+async fn unreachable_database_is_a_retryable_adapter_error() {
+    // The whole point of running dbt on Temporal: a briefly-unreachable
+    // warehouse must be retried, not fail the run. An unopenable DuckDB stands
+    // in for a dropped connection (a transient "IO Error"). Before the fix this
+    // surfaced as a non-retryable Compilation error, defeating recovery.
+    let harness = Harness::build_unreachable(&[("good", "select 1 as id")]).await;
+    let err = harness.run_err("good").await;
+    assert!(err.is_retryable(), "an unreachable database must be retryable, got: {err:?}");
+    assert!(
+        matches!(err, DbtTemporalError::Adapter(_)),
+        "expected a retryable Adapter error, got: {err:?}"
+    );
+}

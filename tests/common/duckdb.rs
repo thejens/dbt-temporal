@@ -68,6 +68,14 @@ pub fn raw_query_ok(engine: &Arc<dyn dbt_adapter::AdapterEngine>, sql: &str) -> 
         .is_ok()
 }
 
+/// How `Harness::build_inner` should produce `profiles.yml`.
+enum ProfileMode {
+    /// The harness's own generated profile (`schema: main`, fixed target).
+    Default { unreachable: bool },
+    /// A caller-supplied template with a `{DB_PATH}` placeholder.
+    Template(String),
+}
+
 /// A loaded DuckDB project ready to execute individual nodes against.
 pub struct Harness {
     activities: DbtActivities,
@@ -107,7 +115,24 @@ impl Harness {
         Self::build_files_inner(&owned, false).await
     }
 
+    /// Like [`build_files`](Self::build_files), but with full control over
+    /// `profiles.yml` — e.g. to exercise `env_var()`-driven profile fields
+    /// (`rebuild_adapter_engine_with_env`). `profile_yml` must contain the
+    /// literal placeholder `{DB_PATH}` wherever the DuckDB file path goes;
+    /// the harness substitutes its own managed temp path.
+    pub async fn build_files_with_profile(files: &[(&str, &str)], profile_yml: &str) -> Self {
+        let owned: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+            .collect();
+        Self::build_inner(&owned, ProfileMode::Template(profile_yml.to_string())).await
+    }
+
     async fn build_files_inner(files: &[(String, String)], unreachable: bool) -> Self {
+        Self::build_inner(files, ProfileMode::Default { unreachable }).await
+    }
+
+    async fn build_inner(files: &[(String, String)], profile_mode: ProfileMode) -> Self {
         let project = TempDir::new().unwrap();
         let profiles = TempDir::new().unwrap();
         let db = TempDir::new().unwrap();
@@ -125,22 +150,28 @@ impl Harness {
             std::fs::write(full, content).unwrap();
         }
 
-        // An unreachable DB uses a path whose parent dir is absent, so DuckDB
-        // fails to open it with a transient "IO Error: Cannot open file".
-        let db_path = if unreachable {
-            db.path().join("unreachable").join("spike.duckdb")
-        } else {
-            db.path().join("spike.duckdb")
+        let profile_yml = match profile_mode {
+            ProfileMode::Default { unreachable } => {
+                // An unreachable DB uses a path whose parent dir is absent, so
+                // DuckDB fails to open it with a transient "IO Error: Cannot
+                // open file".
+                let db_path = if unreachable {
+                    db.path().join("unreachable").join("spike.duckdb")
+                } else {
+                    db.path().join("spike.duckdb")
+                };
+                format!(
+                    "{PROJECT}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      \
+                     path: \"{}\"\n      schema: main\n      threads: 1\n",
+                    db_path.display()
+                )
+            }
+            ProfileMode::Template(template) => {
+                let db_path = db.path().join("spike.duckdb");
+                template.replace("{DB_PATH}", &db_path.display().to_string())
+            }
         };
-        std::fs::write(
-            profiles.path().join("profiles.yml"),
-            format!(
-                "{PROJECT}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      \
-                 path: \"{}\"\n      schema: main\n      threads: 1\n",
-                db_path.display()
-            ),
-        )
-        .unwrap();
+        std::fs::write(profiles.path().join("profiles.yml"), profile_yml).unwrap();
 
         let config = build_config(project.path(), profiles.path());
         let mut state = initialize_project(project.path(), &config, None)
@@ -180,6 +211,16 @@ impl Harness {
     /// realistic, warehouse-shaped failures.
     pub const fn faults(&self) -> &FaultHandle {
         &self.faults
+    }
+
+    /// The project's real `WorkerState` — for tests that need to call
+    /// worker-internal functions (e.g. `worker::profile::rebuild_adapter_engine_with_env`)
+    /// directly rather than through `execute_node`/hooks.
+    pub fn state(&self) -> &dbt_temporal::worker_state::WorkerState {
+        self.activities
+            .registry
+            .get(Some(PROJECT))
+            .expect("project registered")
     }
 
     /// Execute one model by name, returning the node result or a classified error.

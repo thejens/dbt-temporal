@@ -226,15 +226,33 @@ fn adapter_failure_is_transient(
         .any(|sig| lower.contains(sig))
 }
 
+/// `dbt_error::ErrorCode` variants that represent an infrastructure-level,
+/// worth-a-retry failure. Derived from dbt's own `AdapterErrorKind` → code and
+/// SQLSTATE-class → code mappings (`dbt-error/src/adapter_errors.rs`):
+/// `Io`/`Cancelled` kinds and SQLSTATE classes 08/40/53/57/58 land here.
+/// Deliberately excludes `DbDriverFailed` (kind `Driver` is ambiguous — the
+/// embedded-DuckDB harness reports both connection IO errors and catalog
+/// errors under it) and `DbAuthFailed`/`DbSyntaxInvalid`/`DbNotFound` (permanent).
+const RETRYABLE_ERROR_CODES: &[dbt_error::ErrorCode] = &[
+    dbt_error::ErrorCode::DbConnectionFailed,
+    dbt_error::ErrorCode::DbUnavailable,
+    dbt_error::ErrorCode::DbResourceExceeded,
+    dbt_error::ErrorCode::DbTxnConflict,
+    dbt_error::ErrorCode::IoError,
+    dbt_error::ErrorCode::TaskCancelled,
+];
+
 /// Classify an error raised while executing adapter DDL/DML (a materialization
-/// macro call, a hook query) into the retry contract.
+/// macro call, a hook's `run_query`/direct SQL) into the retry contract.
 ///
 /// dbt runs warehouse statements through Jinja, so a transient failure arrives
-/// wrapped in a `minijinja::Error`; the underlying `dbt_common::AdapterError`
-/// survives in the source chain. If that adapter error looks transient
-/// (connection drop, throttling, timeout, …) this returns a retryable `Adapter`
-/// error so Temporal can heal a briefly-unreachable warehouse — otherwise a
-/// permanent `Compilation` error carrying `context`.
+/// wrapped in a `minijinja::Error` (or, for some Jinja-exposed functions like
+/// `run_query`, a `dbt_error::FsError`). The underlying `dbt_common::AdapterError`
+/// usually survives in the source chain — walk it and, if found, classify on
+/// its kind/SQLSTATE/vendor-code/message. Some conversions (`run_query`)
+/// discard the `AdapterError` but keep its derived `ErrorCode` on an `FsError`
+/// in the chain; check that too, since it's the only signal left. If neither
+/// is found, default to a permanent `Compilation` error carrying `context`.
 pub fn classify_adapter_execution_error(
     err: &(dyn std::error::Error + 'static),
     context: &str,
@@ -255,6 +273,12 @@ pub fn classify_adapter_execution_error(
                 return DbtTemporalError::Adapter(anyhow::anyhow!("{context}: {adapter_err}"));
             }
             // Found the adapter error, but it's a permanent SQL failure.
+            break;
+        }
+        if let Some(fs_err) = current.downcast_ref::<dbt_error::FsError>() {
+            if RETRYABLE_ERROR_CODES.contains(&fs_err.code) {
+                return DbtTemporalError::Adapter(anyhow::anyhow!("{context}: {fs_err}"));
+            }
             break;
         }
         cursor = current.source();

@@ -2748,6 +2748,7 @@ dependencies = [
  "dbt-auth",
  "dbt-common",
  "dbt-csv",
+ "dbt-error",
  "dbt-jinja-utils",
  "dbt-loader",
  "dbt-parser",

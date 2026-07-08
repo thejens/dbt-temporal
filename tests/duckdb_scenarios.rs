@@ -275,3 +275,103 @@ async fn transient_failure_then_recovers() {
     harness.faults().clear();
     harness.run_ok("good").await;
 }
+
+// --- project hooks (on-run-start / on-run-end) ---
+//
+// Hooks are a separate activity (run_project_hooks_inner) from execute_node,
+// with their own error-wrap sites. `run_query`/`statement` macro calls execute
+// as a side effect during Jinja rendering (like a materialization macro), and
+// raw (non-Jinja) hook text executes as direct SQL — each had its own
+// classify-as-Compilation-or-Adapter wrap, tested independently below.
+
+#[tokio::test]
+async fn hook_with_run_query_succeeds() {
+    // `{% do run_query(...) %}` discards the return value, leaving the
+    // rendered hook output empty — `{{ run_query(...) }}` would instead print
+    // the result and re-execute it as SQL, which is a dbt hook-authoring bug,
+    // not a dbt-temporal one.
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"{{ log('starting', info=True) }}\"\n  - \"{% do run_query('select 1') %}\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    harness
+        .run_hooks("on_run_start")
+        .await
+        .expect("hooks should succeed");
+}
+
+#[tokio::test]
+async fn hook_run_query_against_missing_table_is_compilation_error() {
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"{% do run_query('select * from nope') %}\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    let err = harness.run_hooks_err("on_run_start").await;
+    assert!(
+        matches!(err, DbtTemporalError::Compilation(_)),
+        "expected Compilation (permanent catalog error), got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hook_calling_undefined_macro_is_compilation_error() {
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"{{ nonexistent_macro() }}\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    let err = harness.run_hooks_err("on_run_start").await;
+    assert!(
+        matches!(err, DbtTemporalError::Compilation(_)),
+        "expected Compilation (Jinja render failure), got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hook_run_query_transient_fault_is_a_retryable_adapter_error() {
+    // The same recovery guarantee as execute_node: a hook's run_query() call
+    // hitting a briefly-unreachable warehouse must be retryable, not permanent.
+    //
+    // `render_str`'s error type is `FsResult<T> = Result<T, Box<FsError>>` —
+    // some Jinja-exposed functions (run_query) convert the underlying
+    // AdapterError into an FsError, discarding the AdapterError as a
+    // downcastable source but keeping its derived `ErrorCode`
+    // (classify_adapter_execution_error checks both).
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"{% do run_query('select 1') %}\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    harness
+        .faults()
+        .fail_next_executes(1, &AdapterFault::connection_failure());
+    let err = harness.run_hooks_err("on_run_start").await;
+    assert!(
+        err.is_retryable() && matches!(err, DbtTemporalError::Adapter(_)),
+        "expected a retryable Adapter error, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hook_raw_sql_against_missing_schema_is_compilation_error() {
+    // A hook whose rendered text is non-empty SQL (no Jinja tags) executes
+    // directly via `execute_without_state` — a separate wrap site from the
+    // run_query-via-render_str path above.
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"create table nonexistent_schema_xyz.foo as select 1\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    let err = harness.run_hooks_err("on_run_start").await;
+    assert!(
+        matches!(err, DbtTemporalError::Compilation(_)),
+        "expected Compilation (permanent catalog error), got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hook_raw_sql_transient_fault_is_a_retryable_adapter_error() {
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\non-run-start:\n  \
+               - \"create table t_direct as select 1 as id\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+    harness
+        .faults()
+        .fail_next_executes(1, &AdapterFault::connection_failure());
+    let err = harness.run_hooks_err("on_run_start").await;
+    assert!(
+        err.is_retryable() && matches!(err, DbtTemporalError::Adapter(_)),
+        "expected a retryable Adapter error, got: {err:?}"
+    );
+}

@@ -81,17 +81,29 @@ impl Harness {
     /// The DuckDB database is a temp file (not `:memory:`) so state persists
     /// across the per-node connections that `execute_node` opens.
     pub async fn build(models: &[(&str, &str)]) -> Self {
-        Self::build_inner(models, false).await
+        Self::build_files_inner(&model_files(models), false).await
     }
 
     /// Like [`build`](Self::build) but points DuckDB at an unopenable path, so
     /// the first query fails with a transient IO/connection error — the
     /// "warehouse briefly unreachable" case that must classify as retryable.
     pub async fn build_unreachable(models: &[(&str, &str)]) -> Self {
-        Self::build_inner(models, true).await
+        Self::build_files_inner(&model_files(models), true).await
     }
 
-    async fn build_inner(models: &[(&str, &str)], unreachable: bool) -> Self {
+    /// Load a project from arbitrary `(relative_path, content)` files — e.g.
+    /// `("models/m.sql", …)`, `("tests/t.sql", …)`, `("models/schema.yml", …)`
+    /// — so tests, seeds, and schema definitions can be exercised, not just
+    /// bare models.
+    pub async fn build_files(files: &[(&str, &str)]) -> Self {
+        let owned: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+            .collect();
+        Self::build_files_inner(&owned, false).await
+    }
+
+    async fn build_files_inner(files: &[(String, String)], unreachable: bool) -> Self {
         let project = TempDir::new().unwrap();
         let profiles = TempDir::new().unwrap();
         let db = TempDir::new().unwrap();
@@ -101,10 +113,12 @@ impl Harness {
             format!("name: {PROJECT}\nversion: \"1.0.0\"\nprofile: {PROJECT}\n"),
         )
         .unwrap();
-        let models_dir = project.path().join("models");
-        std::fs::create_dir_all(&models_dir).unwrap();
-        for (name, sql) in models {
-            std::fs::write(models_dir.join(format!("{name}.sql")), sql).unwrap();
+        for (relpath, content) in files {
+            let full = project.path().join(relpath);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, content).unwrap();
         }
 
         // An unreachable DB uses a path whose parent dir is absent, so DuckDB
@@ -152,14 +166,31 @@ impl Harness {
 
     /// Execute one model by name, returning the node result or a classified error.
     pub async fn run(&self, model: &str) -> Result<NodeExecutionResult, anyhow::Error> {
+        self.run_uid(&format!("model.{PROJECT}.{model}")).await
+    }
+
+    /// Execute a node by its full unique id (e.g. `test.spike.my_test`) under
+    /// the `build` command, so tests and unit tests run too.
+    pub async fn run_uid(&self, unique_id: &str) -> Result<NodeExecutionResult, anyhow::Error> {
         let input = serde_json::from_value(serde_json::json!({
-            "unique_id": format!("model.{PROJECT}.{model}"),
+            "unique_id": unique_id,
             "invocation_id": uuid::Uuid::new_v4().to_string(),
             "project": PROJECT,
-            "command": "run",
+            "command": "build",
         }))
         .unwrap();
         execute_node_inner(&self.activities, input).await
+    }
+
+    /// Execute a node by full unique id, expecting failure, returning the
+    /// classified error.
+    pub async fn run_err_uid(&self, unique_id: &str) -> DbtTemporalError {
+        let err = self
+            .run_uid(unique_id)
+            .await
+            .expect_err(&format!("{unique_id} should error"));
+        err.downcast::<DbtTemporalError>()
+            .unwrap_or_else(|e| panic!("expected DbtTemporalError from {unique_id}, got: {e:#}"))
     }
 
     /// Execute a model expected to succeed, asserting `Success` and returning the result.
@@ -181,6 +212,14 @@ impl Harness {
         err.downcast::<DbtTemporalError>()
             .unwrap_or_else(|e| panic!("expected DbtTemporalError from {model}, got: {e:#}"))
     }
+}
+
+/// Map `(name, sql)` model pairs to `(models/name.sql, sql)` project files.
+fn model_files(models: &[(&str, &str)]) -> Vec<(String, String)> {
+    models
+        .iter()
+        .map(|(name, sql)| (format!("models/{name}.sql"), (*sql).to_string()))
+        .collect()
 }
 
 fn build_config(

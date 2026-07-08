@@ -1083,6 +1083,19 @@ mod tests {
         assert_eq!(format_result_tag(NodeStatus::Skipped, Some("ignored"), 9.0), "SKIP");
     }
 
+    #[test]
+    fn format_result_tag_non_terminal_falls_back_to_debug() {
+        // Pending/Running/Cancelled never reach the result-tag path in practice,
+        // but the defensive `_` arm must still yield the Debug form.
+        for status in [
+            NodeStatus::Pending,
+            NodeStatus::Running,
+            NodeStatus::Cancelled,
+        ] {
+            assert_eq!(format_result_tag(status, None, 0.0), format!("{status:?}"));
+        }
+    }
+
     // --- format_progress_line ---
 
     #[test]

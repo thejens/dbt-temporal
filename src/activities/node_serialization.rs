@@ -158,9 +158,7 @@ mod tests {
         let yml = get_node_config_yml(&nodes, "model.waffle.stg", NodeType::Model);
         // Serializing default config produces a mapping (possibly empty); the contract
         // is "anything but the empty-mapping fallback for a present node".
-        let dbt_yaml::Value::Mapping(_, _) = &yml else {
-            panic!("expected mapping config");
-        };
+        assert!(matches!(&yml, dbt_yaml::Value::Mapping(_, _)), "expected mapping config");
     }
 
     #[test]
@@ -170,9 +168,7 @@ mod tests {
             .seeds
             .insert("seed.waffle.raw".to_string(), Arc::new(DbtSeed::default()));
         let yml = get_node_config_yml(&nodes, "seed.waffle.raw", NodeType::Seed);
-        let dbt_yaml::Value::Mapping(_, _) = &yml else {
-            panic!("expected mapping config");
-        };
+        assert!(matches!(&yml, dbt_yaml::Value::Mapping(_, _)), "expected mapping config");
     }
 
     #[test]
@@ -182,9 +178,7 @@ mod tests {
             .snapshots
             .insert("snapshot.waffle.s".to_string(), Arc::new(DbtSnapshot::default()));
         let yml = get_node_config_yml(&nodes, "snapshot.waffle.s", NodeType::Snapshot);
-        let dbt_yaml::Value::Mapping(_, _) = &yml else {
-            panic!("expected mapping config");
-        };
+        assert!(matches!(&yml, dbt_yaml::Value::Mapping(_, _)), "expected mapping config");
     }
 
     #[test]
@@ -194,9 +188,7 @@ mod tests {
             .tests
             .insert("test.waffle.t".to_string(), Arc::new(DbtTest::default()));
         let yml = get_node_config_yml(&nodes, "test.waffle.t", NodeType::Test);
-        let dbt_yaml::Value::Mapping(_, _) = &yml else {
-            panic!("expected mapping config");
-        };
+        assert!(matches!(&yml, dbt_yaml::Value::Mapping(_, _)), "expected mapping config");
     }
 
     #[test]

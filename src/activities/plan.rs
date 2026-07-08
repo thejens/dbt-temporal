@@ -6,6 +6,7 @@ use temporalio_sdk::activities::ActivityContext;
 use tracing::warn;
 
 use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo};
+use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
 use super::dag::{
@@ -15,28 +16,24 @@ use super::selectors::apply_selectors;
 
 const MANIFEST_INLINE_THRESHOLD: usize = 3 * 1024 * 1024; // 3 MB
 
-/// Plan activity inner logic — called from DbtActivities::plan_project.
-#[allow(clippy::too_many_lines)]
-pub async fn plan_project_inner(
-    activities: &DbtActivities,
-    ctx: &ActivityContext,
-    input: DbtRunInput,
-) -> Result<ExecutionPlan, anyhow::Error> {
-    let state = activities.registry.get(input.project.as_deref())?;
-
-    let invocation_id = ctx
-        .info()
-        .workflow_execution
-        .as_ref()
-        .map_or_else(|| uuid::Uuid::new_v4().to_string(), |we| we.run_id.clone());
-
-    // Collect all node IDs that match the command (run vs build).
-    // Ephemeral models are excluded — they're inlined as CTEs wherever they're ref()'d
-    // and never executed as standalone activities.
-    // Generic-test macro definitions (`{% test foo(model, column_name) %}…{% endtest %}`)
-    // are excluded — dbt-fusion's parser registers them as runnable test nodes with
-    // empty `depends_on`, but the body is a macro definition, not a runnable query.
-    // Executing them produces empty SQL and a `Syntax error: Unexpected ")"`.
+/// Collect all node IDs that match the command (run vs build), applying the
+/// exclusions that happen before selectors.
+///
+/// Ephemeral models are excluded — they're inlined as CTEs wherever they're
+/// ref()'d and never executed as standalone activities. Generic-test macro
+/// definitions (`{% test foo(model, column_name) %}…{% endtest %}`) are
+/// excluded — dbt-fusion's parser registers them as runnable test nodes with
+/// empty `depends_on`, but the body is a macro definition, not a runnable
+/// query. Executing them produces empty SQL and a `Syntax error: Unexpected ")"`.
+///
+/// Pure over `state`/`input` (no `ActivityContext`), so it's unit-testable
+/// without a live Temporal worker — also the entry point for integration
+/// tests that drive selection against an embedded engine (e.g. the DuckDB
+/// scenario harness), where standing up an `ActivityContext` would add nothing.
+pub fn select_command_node_ids(
+    state: &WorkerState,
+    input: &DbtRunInput,
+) -> Result<Vec<String>, anyhow::Error> {
     let mut skipped_macro_defs: Vec<String> = Vec::new();
     let selected_ids: Vec<String> = state
         .resolver_state
@@ -92,6 +89,25 @@ pub async fn plan_project_inner(
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes found for command '{}'", input.command);
     }
+    Ok(selected_ids)
+}
+
+/// Plan activity inner logic — called from DbtActivities::plan_project.
+#[allow(clippy::too_many_lines)]
+pub async fn plan_project_inner(
+    activities: &DbtActivities,
+    ctx: &ActivityContext,
+    input: DbtRunInput,
+) -> Result<ExecutionPlan, anyhow::Error> {
+    let state = activities.registry.get(input.project.as_deref())?;
+
+    let invocation_id = ctx
+        .info()
+        .workflow_execution
+        .as_ref()
+        .map_or_else(|| uuid::Uuid::new_v4().to_string(), |we| we.run_id.clone());
+
+    let selected_ids = select_command_node_ids(state, &input)?;
 
     // state: selectors compare against a previous manifest, loaded up front so
     // a missing state_manifest_ref fails with a clear error instead of

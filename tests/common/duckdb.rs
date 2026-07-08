@@ -231,11 +231,23 @@ impl Harness {
     /// Execute a node by its full unique id (e.g. `test.spike.my_test`) under
     /// the `build` command, so tests and unit tests run too.
     pub async fn run_uid(&self, unique_id: &str) -> Result<NodeExecutionResult, anyhow::Error> {
+        self.run_uid_with_env(unique_id, &BTreeMap::new()).await
+    }
+
+    /// Like [`run_uid`](Self::run_uid), with per-workflow `env` overrides — for
+    /// exercising the `rebuild_adapter_engine_with_env` integration inside
+    /// `execute_node_inner` (as opposed to calling the rebuild fn directly).
+    pub async fn run_uid_with_env(
+        &self,
+        unique_id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<NodeExecutionResult, anyhow::Error> {
         let input = serde_json::from_value(serde_json::json!({
             "unique_id": unique_id,
             "invocation_id": uuid::Uuid::new_v4().to_string(),
             "project": PROJECT,
             "command": "build",
+            "env": env,
         }))
         .unwrap();
         execute_node_inner(&self.activities, input).await
@@ -246,6 +258,20 @@ impl Harness {
     pub async fn run_err_uid(&self, unique_id: &str) -> DbtTemporalError {
         let err = self
             .run_uid(unique_id)
+            .await
+            .expect_err(&format!("{unique_id} should error"));
+        err.downcast::<DbtTemporalError>()
+            .unwrap_or_else(|e| panic!("expected DbtTemporalError from {unique_id}, got: {e:#}"))
+    }
+
+    /// Like [`run_err_uid`](Self::run_err_uid), with per-workflow `env` overrides.
+    pub async fn run_err_uid_with_env(
+        &self,
+        unique_id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> DbtTemporalError {
+        let err = self
+            .run_uid_with_env(unique_id, env)
             .await
             .expect_err(&format!("{unique_id} should error"));
         err.downcast::<DbtTemporalError>()

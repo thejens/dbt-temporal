@@ -48,6 +48,11 @@ dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42b
 dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
 dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
 dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
+# FsError/ErrorCode: dbt's own transient/permanent error taxonomy. Some Jinja
+# adapter functions (e.g. run_query) wrap the underlying AdapterError in an
+# FsError, discarding it as a downcastable source but keeping its ErrorCode —
+# the retry classifier reads that field directly for those paths.
+dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
 # layer inserts a default so dbt-fusion's adapter code doesn't panic.
 dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }

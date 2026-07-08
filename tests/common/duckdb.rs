@@ -22,6 +22,7 @@ use dbt_schemas::schemas::common::ResolvedQuoting;
 use dbt_schemas::schemas::profiles::{DbConfig, DuckDbConfig};
 use dbt_temporal::activities::DbtActivities;
 use dbt_temporal::activities::execute_node::execute_node_inner;
+use dbt_temporal::activities::project_hooks::run_project_hooks_inner;
 use dbt_temporal::config::{
     DbtTemporalConfig, PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig,
     TemporalMetricsConfig, WorkerTuningConfig, WriteArtifacts, WriteCatalog, WriteRunLog,
@@ -218,6 +219,29 @@ impl Harness {
             .unwrap_or_else(|e| panic!("model {model} should succeed: {e:#}"));
         assert_eq!(result.status, NodeStatus::Success, "{result:?}");
         result
+    }
+
+    /// Run the `on-run-start` (or `on-run-end`, with empty `node_results`)
+    /// project hooks for this project, returning the classified error on
+    /// failure.
+    pub async fn run_hooks(&self, phase: &str) -> Result<(), anyhow::Error> {
+        let input = serde_json::from_value(serde_json::json!({
+            "phase": phase,
+            "project": PROJECT,
+            "invocation_id": uuid::Uuid::new_v4().to_string(),
+        }))
+        .unwrap();
+        run_project_hooks_inner(&self.activities, input).await
+    }
+
+    /// Run hooks for `phase`, expecting failure, returning the classified error.
+    pub async fn run_hooks_err(&self, phase: &str) -> DbtTemporalError {
+        let err = self
+            .run_hooks(phase)
+            .await
+            .expect_err(&format!("hooks for {phase} should error"));
+        err.downcast::<DbtTemporalError>()
+            .unwrap_or_else(|e| panic!("expected DbtTemporalError from {phase} hooks, got: {e:#}"))
     }
 
     /// Execute a model expected to fail, returning the classified error.

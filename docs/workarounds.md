@@ -54,3 +54,66 @@ The script:
 | **Telemetry compatibility layer** | dbt-fusion's adapter code expects `TelemetryAttributes` in span extensions (normally inserted by `TelemetryDataLayer`). Without it, `record_current_span_status_from_attrs` panics. We insert a default `TelemetryAttributes` for every span via [`DbtTelemetryCompatLayer`](../src/telemetry_compat.rs). |
 | **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
+
+## Candidate upstream issues (not yet filed)
+
+Found while building error-classification/retry tests. **Filing requires
+approval — check with the repo owner before opening any of these**, and never
+mention dbt-temporal by name in a filed issue body (see internal filing policy).
+
+### Confirmed against the current pinned rev (`37ba42bd`)
+
+**DuckDB adapter never populates SQLSTATE, and collapses every error to one
+`AdapterErrorKind`.** `dbt_common::AdapterError::sqlstate()` returns the
+`"00000"` placeholder and `kind()` returns `Driver` for *every* DuckDB failure
+we triggered — a dropped connection (`IO Error: Cannot open file ...`), a
+missing table (`Catalog Error: ...`), and a syntax error (`Parser Error: ...`)
+are structurally indistinguishable; only the free-text message differs.
+Postgres/Redshift-family ADBC drivers populate real SQLSTATE codes for the
+same error classes. This makes transient-vs-permanent classification (needed
+for any retry logic) impossible via structured fields for DuckDB specifically
+— callers are forced to pattern-match message text. Reproduced via
+`tests/common/duckdb.rs` / `tests/duckdb_scenarios.rs` in this repo.
+
+**`FsError` built from an `AdapterError` (via `run_query()` / `render_str`)
+doesn't preserve the original error as `cause`.** Calling a materialization
+macro directly (`Template::call`) surfaces adapter failures as a
+`minijinja::Error` whose `Error::source()` chain still contains the original
+`dbt_common::AdapterError` (kind/sqlstate/vendor_code intact). But
+`run_query()` (via `JinjaEnv::render_str`, returning `FsResult<T> =
+Result<T, Box<FsError>>`) converts the same underlying `AdapterError` into an
+`FsError` (`dbt-error` crate) whose only preserved signal is a coarser
+`ErrorCode` (derived from the AdapterError's kind/sqlstate) — `FsError.cause`
+is `None`, so the original `AdapterError` is unrecoverable. Two code paths
+handling the same failure class, one preserving full detail and one
+discarding it; `FsError`'s constructors would need a variant that also
+attaches `cause` from the source `AdapterError` for parity. Worked around in
+`src/error.rs::classify_adapter_execution_error`, which checks `FsError.code`
+directly as a fallback signal.
+
+### From an earlier rev (`2928c13`, ~2026-06) — re-verify before filing
+
+Observed two bumps back; confirm each still reproduces against `37ba42bd`
+before filing (upstream cleanup may have already addressed some of these).
+
+- **`State::lookup` on a missing macro name recurses without bound and
+  overflows the stack.** A genuine crash bug — highest filing priority in
+  this group if still reproducible.
+- **Source freshness YAML silently drops `loaded_at_field`/`freshness` when
+  not nested under `config:`** (dbt 1.10+ shape) — no parse error, just an
+  ERROR-level log line. Silent data loss for a user writing the older (still
+  common) YAML shape.
+- **`PostgresMetadataAdapter::list_relations_schemas_inner` is `todo!()`** and
+  panics; inside a long-lived worker activity this wedges the worker until
+  the activity timeout fires, presenting as a hang rather than a crash.
+- **Bundled `get_unit_test_sql` macro has no `ORDER BY`**, so
+  `compare_record_batches`'s positional row comparison is nondeterministic
+  against unordered query results.
+- **`get_fixture_sql(rows, column_name_to_data_types)` emits broken SQL**
+  (`as ` with an empty column name) when `column_name_to_data_types` is passed
+  rather than `none`.
+- **`DbtManifest` does not round-trip through `serde_json`** — dbt-fusion's
+  own emitted `manifest.json` fails against the derived `Deserialize` impl
+  (demands a literal `__warehouse_specific_config__` field the serializer
+  doesn't always produce). Requires the `typed_struct_from_json_str`
+  (JSON → YmlValue → typed) path instead of `serde_json::from_slice` directly.

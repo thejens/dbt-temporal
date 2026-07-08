@@ -47,9 +47,15 @@ pub async fn run_project_hooks_outer(
     }
 }
 
+/// Render and execute one phase's `dbt_project.yml` hooks against a project's
+/// `WorkerState`, without a Temporal activity context.
+///
+/// `run_project_hooks_outer` wraps this with cancellation and heartbeat. Also
+/// the entry point for integration tests that drive hooks against an embedded
+/// engine (e.g. the DuckDB scenario harness).
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // async required by the activity signature; rendering itself is sync.
-async fn run_project_hooks_inner(
+pub async fn run_project_hooks_inner(
     activities: &DbtActivities,
     input: ProjectHooksInput,
 ) -> Result<(), anyhow::Error> {
@@ -178,9 +184,20 @@ async fn run_project_hooks_inner(
 
         info!(phase = %input.phase, idx, "rendering hook");
 
-        // Render — `run_query`/`statement`/`log` macros execute as a side effect.
+        // Render — `run_query`/`statement`/`log` macros execute as a side
+        // effect, so a transient warehouse failure (dropped connection,
+        // throttling) can surface here. Classify it the same way
+        // `render_materialization` does, so the AdapterError signal isn't
+        // lost behind a blanket permanent `Compilation` error.
         let rendered = jinja_env.render_str(raw_code, &context, &[]).map_err(|e| {
-            DbtTemporalError::Compilation(format!("{} hook[{idx}]: {e:#}", input.phase))
+            // `render_str` returns `FsResult<T> = Result<T, Box<FsError>>` — pass
+            // the dereferenced `FsError` so its concrete type is preserved for
+            // the classifier's `downcast_ref`; passing `&e` directly would make
+            // the trait object's concrete type `Box<FsError>` instead.
+            crate::error::classify_adapter_execution_error(
+                &*e,
+                &format!("{} hook[{idx}]", input.phase),
+            )
         })?;
 
         // If rendering produced non-empty SQL (e.g. raw `create table ...` strings),
@@ -191,10 +208,10 @@ async fn run_project_hooks_inner(
             adapter
                 .execute_without_state(Some(&ctx), sql, false)
                 .map_err(|e| {
-                    DbtTemporalError::Adapter(anyhow::anyhow!(
-                        "{} hook[{idx}] direct SQL failed: {e:#}",
-                        input.phase
-                    ))
+                    crate::error::classify_adapter_execution_error(
+                        &e,
+                        &format!("{} hook[{idx}] direct SQL failed", input.phase),
+                    )
                 })?;
         }
 

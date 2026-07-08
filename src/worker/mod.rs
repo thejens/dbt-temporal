@@ -233,6 +233,20 @@ fn nexus_unsupported_warning(nexus_enabled: bool) -> Option<&'static str> {
     )
 }
 
+/// Resolve the health-file path when health checks are enabled.
+///
+/// An explicit `HEALTH_FILE` wins; otherwise a configured `HEALTH_PORT` implies
+/// the default `/tmp/health` (the readiness probe needs a file to watch);
+/// otherwise health tracking is off.
+fn resolve_health_path(
+    health_file: Option<&str>,
+    health_port: Option<u16>,
+) -> Option<std::path::PathBuf> {
+    health_file
+        .map(std::path::PathBuf::from)
+        .or_else(|| health_port.map(|_| std::path::PathBuf::from("/tmp/health")))
+}
+
 #[allow(clippy::future_not_send, clippy::large_futures)]
 // future_not_send: Temporal SDK Worker is !Send by design.
 // large_futures: build_worker returns a large future from SDK initialization.
@@ -240,11 +254,7 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
     let mut worker = build_worker(&config).await?;
 
     // Start health file tracker if configured.
-    let health_path = config
-        .health_file
-        .as_deref()
-        .or_else(|| config.health_port.map(|_| "/tmp/health"))
-        .map(std::path::PathBuf::from);
+    let health_path = resolve_health_path(config.health_file.as_deref(), config.health_port);
 
     let _health_touch = if let Some(ref path) = health_path {
         // Touch once synchronously so readiness probes pass immediately.
@@ -539,6 +549,25 @@ mod tests {
     fn nexus_unsupported_warning_gated_on_flag() {
         assert!(nexus_unsupported_warning(false).is_none());
         assert!(nexus_unsupported_warning(true).is_some_and(|m| m.contains("NEXUS_ENABLED")));
+    }
+
+    #[test]
+    fn resolve_health_path_precedence() {
+        use std::path::PathBuf;
+        // No health config → off.
+        assert_eq!(resolve_health_path(None, None), None);
+        // Explicit file wins.
+        assert_eq!(
+            resolve_health_path(Some("/var/run/health"), None),
+            Some(PathBuf::from("/var/run/health"))
+        );
+        // A port with no explicit file implies the default path.
+        assert_eq!(resolve_health_path(None, Some(8080)), Some(PathBuf::from("/tmp/health")));
+        // Explicit file wins even when a port is also set.
+        assert_eq!(
+            resolve_health_path(Some("/custom"), Some(8080)),
+            Some(PathBuf::from("/custom"))
+        );
     }
 
     #[tokio::test]

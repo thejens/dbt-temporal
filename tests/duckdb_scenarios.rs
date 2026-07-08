@@ -12,6 +12,7 @@
 mod common;
 
 use common::duckdb::{Harness, raw_engine, raw_query_ok};
+use common::fault_engine::AdapterFault;
 use dbt_temporal::error::DbtTemporalError;
 
 /// Isolates "does the ADBC driver load" from the dbt path — the minimal
@@ -202,4 +203,61 @@ async fn unreachable_database_is_a_retryable_adapter_error() {
         matches!(err, DbtTemporalError::Adapter(_)),
         "expected a retryable Adapter error, got: {err:?}"
     );
+}
+
+// --- injected warehouse faults (via the fault-injecting adapter) ---
+//
+// These drive the real execute_node path with deterministic, warehouse-shaped
+// failures, verifying the retry classification without a live warehouse.
+
+/// Each transient warehouse fault must classify as a retryable `Adapter` error.
+#[tokio::test]
+async fn injected_transient_warehouse_faults_all_retry() {
+    for fault in [
+        AdapterFault::connection_failure(),    // Postgres/Redshift 08006
+        AdapterFault::deadlock(),              // 40001 serialization
+        AdapterFault::snowflake_throttled(),   // HTTP 503, no SQLSTATE
+        AdapterFault::bigquery_rate_limited(), // reason string
+        AdapterFault::azure_service_busy(),    // vendor code 40501
+    ] {
+        let harness = Harness::build(&[("good", "select 1 as id")]).await;
+        harness.faults().fail_connections(fault);
+        let err = harness.run_err("good").await;
+        assert!(
+            err.is_retryable() && matches!(err, DbtTemporalError::Adapter(_)),
+            "fault should be a retryable Adapter error, got: {err:?}"
+        );
+    }
+}
+
+/// A permanent warehouse error stays non-retryable even injected at the
+/// connection boundary — the authoritative SQLSTATE class wins.
+#[tokio::test]
+async fn injected_permanent_error_does_not_retry() {
+    let harness = Harness::build(&[("good", "select 1 as id")]).await;
+    harness
+        .faults()
+        .fail_connections(AdapterFault::permanent_undefined_table());
+    let err = harness.run_err("good").await;
+    assert!(
+        !err.is_retryable() && matches!(err, DbtTemporalError::Compilation(_)),
+        "a permanent (42P01) error must not retry, got: {err:?}"
+    );
+}
+
+/// The recovery guarantee: a model that fails against a briefly-unreachable
+/// warehouse succeeds once the warehouse is reachable again — exactly what
+/// Temporal's retry buys.
+#[tokio::test]
+async fn transient_failure_then_recovers() {
+    let harness = Harness::build(&[("good", "select 1 as id")]).await;
+    harness
+        .faults()
+        .fail_connections(AdapterFault::connection_failure());
+    assert!(
+        harness.run_err("good").await.is_retryable(),
+        "first attempt should fail retryably"
+    );
+    harness.faults().clear();
+    harness.run_ok("good").await;
 }

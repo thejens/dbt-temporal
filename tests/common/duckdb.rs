@@ -32,6 +32,8 @@ use dbt_temporal::types::{NodeExecutionResult, NodeStatus};
 use dbt_temporal::worker::initialize_project;
 use tempfile::TempDir;
 
+use super::fault_engine::{FaultHandle, FaultInjectingEngine};
+
 /// Project (and profile) name used by every harness fixture.
 pub const PROJECT: &str = "spike";
 
@@ -68,6 +70,7 @@ pub fn raw_query_ok(engine: &Arc<dyn dbt_adapter::AdapterEngine>, sql: &str) -> 
 /// A loaded DuckDB project ready to execute individual nodes against.
 pub struct Harness {
     activities: DbtActivities,
+    faults: FaultHandle,
     _project: TempDir,
     _profiles: TempDir,
     _db: TempDir,
@@ -139,9 +142,15 @@ impl Harness {
         .unwrap();
 
         let config = build_config(project.path(), profiles.path());
-        let state = initialize_project(project.path(), &config, None)
+        let mut state = initialize_project(project.path(), &config, None)
             .await
             .expect("initialize duckdb project");
+
+        // Wrap the real DuckDB engine so tests can inject warehouse faults
+        // (connection drops, throttling, deadlocks) at the adapter boundary.
+        let faults = FaultHandle::default();
+        let inner_engine = Arc::clone(&state.adapter_engine);
+        state.adapter_engine = Arc::new(FaultInjectingEngine::new(inner_engine, faults.clone()));
 
         let registry =
             ProjectRegistry::new(BTreeMap::from([(PROJECT.to_string(), Arc::new(state))]));
@@ -158,10 +167,18 @@ impl Harness {
 
         Self {
             activities,
+            faults,
             _project: project,
             _profiles: profiles,
             _db: db,
         }
+    }
+
+    /// Handle for injecting warehouse faults (connection drops, throttling,
+    /// deadlocks) so error classification and retry can be tested with
+    /// realistic, warehouse-shaped failures.
+    pub const fn faults(&self) -> &FaultHandle {
+        &self.faults
     }
 
     /// Execute one model by name, returning the node result or a classified error.

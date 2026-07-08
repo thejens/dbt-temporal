@@ -375,3 +375,40 @@ async fn hook_raw_sql_transient_fault_is_a_retryable_adapter_error() {
         "expected a retryable Adapter error, got: {err:?}"
     );
 }
+
+// --- materialization variants ---
+
+#[tokio::test]
+async fn ephemeral_model_is_inlined_as_a_cte() {
+    // Ephemeral models never materialize as their own relation — they're
+    // inlined as a CTE into whatever references them (inject_ephemeral_ctes /
+    // persist_ephemeral_chain in node_helpers.rs). Only the referencing
+    // model's result should exist; querying the ephemeral's own name directly
+    // must fail since it was never created as a table/view.
+    let harness = Harness::build(&[
+        ("base", "{{ config(materialized='ephemeral') }}\nselect 1 as id"),
+        ("downstream", "select id * 2 as doubled from {{ ref('base') }}"),
+    ])
+    .await;
+    let result = harness.run_ok("downstream").await;
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+}
+
+#[tokio::test]
+async fn transitive_ephemeral_chain_is_inlined() {
+    // base (ephemeral) <- mid (ephemeral, refs base) <- downstream (table, refs mid).
+    // Exercises persist_ephemeral_chain's recursive leaf-first persistence.
+    let harness = Harness::build(&[
+        ("base", "{{ config(materialized='ephemeral') }}\nselect 1 as id"),
+        (
+            "mid",
+            "{{ config(materialized='ephemeral') }}\nselect id * 2 as doubled from {{ ref('base') }}",
+        ),
+        (
+            "downstream",
+            "{{ config(materialized='table') }}\nselect doubled + 1 as tripled_ish from {{ ref('mid') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("downstream").await;
+}

@@ -118,6 +118,78 @@ async fn model_calling_an_undefined_macro_is_not_registered() {
 }
 
 #[tokio::test]
+async fn failing_data_test_reports_a_test_failure() {
+    // A singular test whose query returns rows = failing rows → TestFailure
+    // (non-retryable: the data won't change on retry).
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id union all select 2 as id"),
+        ("tests/all_rows_fail.sql", "select * from {{ ref('m') }}"),
+    ])
+    .await;
+    harness.run_ok("m").await;
+    let err = harness.run_err_uid("test.spike.all_rows_fail").await;
+    assert!(
+        matches!(err, DbtTemporalError::TestFailure { failures, .. } if failures == 2),
+        "expected TestFailure with 2 failing rows, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn passing_data_test_succeeds() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id"),
+        ("tests/no_negative_ids.sql", "select * from {{ ref('m') }} where id < 0"),
+    ])
+    .await;
+    harness.run_ok("m").await;
+    let result = harness
+        .run_uid("test.spike.no_negative_ids")
+        .await
+        .expect("passing test should not error");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+}
+
+#[tokio::test]
+async fn warn_severity_test_does_not_fail_the_run() {
+    // A failing test configured `severity: warn` logs a warning but the node
+    // still succeeds — the run isn't failed.
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id"),
+        (
+            "tests/warn_only.sql",
+            "{{ config(severity='warn') }}\nselect * from {{ ref('m') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("m").await;
+    let result = harness
+        .run_uid("test.spike.warn_only")
+        .await
+        .expect("warn-severity test should not error");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+}
+
+#[tokio::test]
+async fn store_failures_test_persists_rows_and_still_fails() {
+    // `store_failures` writes the failing rows to an audit schema (created on
+    // demand) and the test still fails — exercises the store-failures path.
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id union all select 2 as id"),
+        (
+            "tests/stored.sql",
+            "{{ config(store_failures=true) }}\nselect * from {{ ref('m') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("m").await;
+    let err = harness.run_err_uid("test.spike.stored").await;
+    assert!(
+        matches!(err, DbtTemporalError::TestFailure { .. }),
+        "expected TestFailure, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn unreachable_database_is_a_retryable_adapter_error() {
     // The whole point of running dbt on Temporal: a briefly-unreachable
     // warehouse must be retried, not fail the run. An unopenable DuckDB stands

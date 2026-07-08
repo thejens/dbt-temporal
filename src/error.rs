@@ -121,6 +121,147 @@ pub fn matches_error_patterns(error_message: &str, patterns: &[regex::Regex]) ->
     patterns.iter().any(|re| re.is_match(error_message))
 }
 
+/// SQLSTATE classes (first two chars) that mark a transient/retryable warehouse
+/// failure. Populated by warehouses that speak SQLSTATE — Redshift/Postgres,
+/// SQL Server/Synapse, newer Spark. See <https://en.wikipedia.org/wiki/SQLSTATE>.
+const RETRYABLE_SQLSTATE_CLASSES: &[&str] = &[
+    "08", // connection exception
+    "40", // transaction rollback — deadlock (40P01), serialization failure (40001)
+    "53", // insufficient resources
+    "57", // operator intervention — admin shutdown, cannot connect now, query canceled
+    "58", // system error (I/O)
+];
+
+/// Azure SQL Database / SQL Server transient error numbers, surfaced as ADBC
+/// `vendor_code`. From Microsoft's transient-fault list (deadlock 1205 included).
+const AZURE_SQL_TRANSIENT_VENDOR_CODES: &[i32] = &[
+    64, 233, 1205, 4060, 4221, 10053, 10054, 10060, 10928, 10929, 40143, 40197, 40501, 40613,
+    49918, 49919, 49920,
+];
+
+/// Lowercased substrings that mark a transient failure on managed warehouses
+/// that carry HTTP status + reason strings rather than SQLSTATE (BigQuery,
+/// Snowflake, Databricks, Athena), plus universal connectivity phrases. ADBC
+/// reports network problems as "IO Error". Curated to exclude permanent errors
+/// (bad SQL, missing objects, permission denials) so obvious failures don't spin.
+const TRANSIENT_MESSAGE_SIGNATURES: &[&str] = &[
+    // connectivity / IO
+    "io error",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "connection aborted",
+    "connection is closed",
+    "connection lost",
+    "could not connect",
+    "broken pipe",
+    "reset by peer",
+    "server closed the connection",
+    "network error",
+    "network is unreachable",
+    "no route to host",
+    // availability / throttling
+    "service unavailable",
+    "temporarily unavailable",
+    "temporarily_unavailable",
+    "try again",
+    "please retry",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "throttl",
+    "slow down",
+    "slowdown",
+    "backend error",
+    "backenderror",
+    "internal error",
+    "internalerror",
+    "request timeout",
+    "operation timed out",
+    "timed out",
+    "timeout",
+    // HTTP status hints — precise phrases, not bare numbers
+    "429 too many",
+    "500 internal server",
+    "502 bad gateway",
+    "503 service",
+    "504 gateway",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+];
+
+/// Decide whether a warehouse execution failure is transient (worth a Temporal
+/// retry). Pure over the fields recovered from an `AdapterError`, so it can be
+/// unit-tested with synthesized per-warehouse errors.
+///
+/// Priority: structured kind → vendor code (Azure/SQL Server) → SQLSTATE class
+/// (a real, non-`00` class is authoritative — trusted over the message text) →
+/// message signatures (managed warehouses that leave SQLSTATE unset).
+fn adapter_failure_is_transient(
+    kind_is_transient: bool,
+    sqlstate: &str,
+    vendor_code: Option<i32>,
+    message: &str,
+) -> bool {
+    if kind_is_transient {
+        return true;
+    }
+    if vendor_code.is_some_and(|code| AZURE_SQL_TRANSIENT_VENDOR_CODES.contains(&code)) {
+        return true;
+    }
+    // A real SQLSTATE class (not the "00000" placeholder DuckDB and some drivers
+    // leave unset) is authoritative — so `42P01` (undefined table) stays
+    // permanent even if the message text happens to contain a transient word.
+    if let Some(class) = sqlstate.get(..2)
+        && class != "00"
+    {
+        return RETRYABLE_SQLSTATE_CLASSES.contains(&class);
+    }
+    let lower = message.to_ascii_lowercase();
+    TRANSIENT_MESSAGE_SIGNATURES
+        .iter()
+        .any(|sig| lower.contains(sig))
+}
+
+/// Classify an error raised while executing adapter DDL/DML (a materialization
+/// macro call, a hook query) into the retry contract.
+///
+/// dbt runs warehouse statements through Jinja, so a transient failure arrives
+/// wrapped in a `minijinja::Error`; the underlying `dbt_common::AdapterError`
+/// survives in the source chain. If that adapter error looks transient
+/// (connection drop, throttling, timeout, …) this returns a retryable `Adapter`
+/// error so Temporal can heal a briefly-unreachable warehouse — otherwise a
+/// permanent `Compilation` error carrying `context`.
+pub fn classify_adapter_execution_error(
+    err: &(dyn std::error::Error + 'static),
+    context: &str,
+) -> DbtTemporalError {
+    let mut cursor: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(current) = cursor {
+        if let Some(adapter_err) = current.downcast_ref::<dbt_common::AdapterError>() {
+            let kind_is_transient = matches!(
+                adapter_err.kind(),
+                dbt_common::AdapterErrorKind::Io | dbt_common::AdapterErrorKind::Cancelled
+            );
+            if adapter_failure_is_transient(
+                kind_is_transient,
+                adapter_err.sqlstate(),
+                adapter_err.vendor_code(),
+                &adapter_err.to_string(),
+            ) {
+                return DbtTemporalError::Adapter(anyhow::anyhow!("{context}: {adapter_err}"));
+            }
+            // Found the adapter error, but it's a permanent SQL failure.
+            break;
+        }
+        cursor = current.source();
+    }
+    DbtTemporalError::Compilation(format!("{context}: {err:#}"))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -291,5 +432,146 @@ mod tests {
         let basic = format!("wrap: {chained}");
         assert!(basic.contains("dbt resolve failed"));
         assert!(!basic.contains("/path/to/file.sql"), "got: {basic}");
+    }
+
+    // --- transient-vs-permanent adapter-error classification ---
+
+    use dbt_common::{AdapterError, AdapterErrorKind};
+
+    fn adapter(
+        kind: AdapterErrorKind,
+        msg: &str,
+        sqlstate: [u8; 5],
+        vendor: Option<i32>,
+    ) -> AdapterError {
+        AdapterError::new_with_sqlstate_and_vendor_code(kind, msg.to_string(), sqlstate, vendor)
+    }
+
+    #[test]
+    fn transient_sqlstate_classes_retry() {
+        // Postgres/Redshift connection (08006/08001), deadlock (40P01),
+        // serialization (40001), insufficient resources (53300), admin
+        // shutdown (57P01), system I/O (58030) — retryable by SQLSTATE class.
+        for ss in [
+            b"08006", b"08001", b"40P01", b"40001", b"53300", b"57P01", b"58030",
+        ] {
+            let ae = adapter(AdapterErrorKind::SqlExecution, "boom", *ss, None);
+            assert!(
+                classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "sqlstate {} should retry",
+                std::str::from_utf8(ss).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn permanent_sqlstate_classes_do_not_retry() {
+        // Undefined table (42P01), syntax (42601), insufficient privilege
+        // (42501), data exception (22P02), unique violation (23505).
+        for ss in [b"42P01", b"42601", b"42501", b"22P02", b"23505"] {
+            let ae = adapter(AdapterErrorKind::SqlExecution, "bad sql", *ss, None);
+            assert!(
+                !classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "sqlstate {} should not retry",
+                std::str::from_utf8(ss).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn real_sqlstate_class_overrides_transient_message() {
+        // 42P01 whose message mentions "connection" must stay permanent — the
+        // authoritative class wins over the text.
+        let ae = adapter(
+            AdapterErrorKind::SqlExecution,
+            "connection to relation lost: relation does not exist",
+            *b"42P01",
+            None,
+        );
+        assert!(!classify_adapter_execution_error(&ae, "ctx").is_retryable());
+    }
+
+    #[test]
+    fn azure_sql_transient_vendor_codes_retry() {
+        // SQL Server / Azure SQL leave SQLSTATE generic; the error number is the
+        // signal (throttling 40501, gateway 40613, deadlock 1205, …).
+        for code in [40197, 40501, 40613, 49918, 10928, 1205] {
+            let ae = adapter(AdapterErrorKind::Driver, "SQL Server error", *b"00000", Some(code));
+            assert!(
+                classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "vendor code {code} should retry"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_warehouse_message_signatures_retry() {
+        // BigQuery reasons, Snowflake/Databricks/Athena HTTP-ish messages carry
+        // no SQLSTATE — match on the reason string.
+        for msg in [
+            "rateLimitExceeded: Exceeded rate limits for this project",
+            "backendError: An internal error occurred",
+            "503 Service Unavailable",
+            "The service is temporarily unavailable, please retry",
+            "TEMPORARILY_UNAVAILABLE: cluster is starting",
+            "ThrottlingException: Rate exceeded",
+            "connection reset by peer",
+        ] {
+            let ae = adapter(AdapterErrorKind::Driver, msg, *b"00000", None);
+            assert!(
+                classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "{msg:?} should retry"
+            );
+        }
+    }
+
+    #[test]
+    fn duckdb_io_error_retries_but_catalog_error_does_not() {
+        // DuckDB reports both as kind=Driver, sqlstate=00000 — the message
+        // discriminates. Mirrors the embedded-DuckDB integration tests.
+        let io = adapter(AdapterErrorKind::Driver, "IO Error: Cannot open file", *b"00000", None);
+        assert!(classify_adapter_execution_error(&io, "ctx").is_retryable());
+        let catalog = adapter(
+            AdapterErrorKind::Driver,
+            "Catalog Error: Table with name x does not exist",
+            *b"00000",
+            None,
+        );
+        assert!(!classify_adapter_execution_error(&catalog, "ctx").is_retryable());
+    }
+
+    #[test]
+    fn io_kind_retries_regardless_of_message() {
+        let ae = adapter(AdapterErrorKind::Io, "socket hang up", *b"00000", None);
+        assert!(classify_adapter_execution_error(&ae, "ctx").is_retryable());
+    }
+
+    #[test]
+    fn non_adapter_error_defaults_to_compilation() {
+        // No AdapterError in the chain → a genuine compile/template error.
+        let plain = std::io::Error::other("template not found");
+        let classified = classify_adapter_execution_error(&plain, "rendering");
+        assert!(!classified.is_retryable());
+        assert!(matches!(classified, DbtTemporalError::Compilation(_)));
+    }
+
+    #[test]
+    fn classifier_walks_the_source_chain() {
+        // In production the AdapterError is nested under a minijinja::Error.
+        #[derive(Debug)]
+        struct Wrapper(AdapterError);
+        impl fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "jinja macro call failed")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let inner =
+            adapter(AdapterErrorKind::Driver, "IO Error: connection reset", *b"00000", None);
+        assert!(classify_adapter_execution_error(&Wrapper(inner), "ctx").is_retryable());
     }
 }

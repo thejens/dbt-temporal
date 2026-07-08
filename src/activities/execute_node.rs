@@ -331,11 +331,18 @@ fn build_test_kwargs_map(
         .collect()
 }
 
+/// Execute a single node against its project's `WorkerState`, without a Temporal
+/// activity context — the compile → materialize → result-extract path.
+///
+/// `execute_node_outer` wraps this with cancellation, heartbeat, and error
+/// classification. It is also the entry point for integration tests that drive
+/// real nodes against an embedded engine (e.g. the DuckDB scenario harness),
+/// where standing up a Temporal `ActivityContext` would add nothing.
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 // Sequential adapter interaction with setup, execution, and result extraction.
 // Kept async so tokio::select! in execute_node_outer can poll it against
 // ctx.cancelled() and the heartbeat ticker.
-async fn execute_node_inner(
+pub async fn execute_node_inner(
     activities: &DbtActivities,
     input: NodeExecutionInput,
 ) -> Result<NodeExecutionResult, anyhow::Error> {

@@ -81,4 +81,37 @@ mod tests {
         let result = store.retrieve("/tmp/nonexistent-dbtt-artifact-file").await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn store_errors_when_base_dir_is_a_file() -> Result<()> {
+        // base_dir is a regular file, so creating the invocation subdir under
+        // it fails — exercises the create_dir_all error path.
+        let file =
+            std::env::temp_dir().join(format!("dbtt-artifact-file-{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&file, b"not a directory").await?;
+        let store = LocalArtifactStore::new(file.clone());
+
+        let result = store.store("inv", "run_results.json", b"{}").await;
+        assert!(result.is_err(), "expected create_dir_all under a file to fail");
+
+        std::fs::remove_file(&file)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_errors_when_target_path_is_a_directory() -> Result<()> {
+        // The artifact filename collides with an existing directory, so the
+        // write fails after the parent dir is created — exercises the write
+        // error path.
+        let base = std::env::temp_dir().join(format!("dbtt-artifact-{}", uuid::Uuid::new_v4()));
+        let collide = base.join("inv").join("catalog.json");
+        tokio::fs::create_dir_all(&collide).await?;
+        let store = LocalArtifactStore::new(base.clone());
+
+        let result = store.store("inv", "catalog.json", b"{}").await;
+        assert!(result.is_err(), "expected write to a directory path to fail");
+
+        std::fs::remove_dir_all(&base)?;
+        Ok(())
+    }
 }

@@ -311,6 +311,22 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_second_granularity_thresholds() {
+        // `second`-period rules exercise the smallest FreshnessPeriod arm
+        // (count * 1). 60s-old rows sit past a 30s warn but under a 90s error.
+        let criteria = FreshnessDefinition {
+            warn_after: Some(rules(30, FreshnessPeriod::second)),
+            error_after: Some(rules(90, FreshnessPeriod::second)),
+            ..Default::default()
+        };
+        let verdict = evaluate(&criteria, ts("2026-06-12T11:59:00Z"), ts("2026-06-12T12:00:00Z"));
+        assert!(
+            matches!(verdict, FreshnessVerdict::Warning(ref o) if o.status == "warn"),
+            "expected warn: {verdict:?}"
+        );
+    }
+
+    #[test]
     fn parse_timestamp_accepts_common_warehouse_formats() {
         for raw in [
             "2026-06-12T10:00:00+00:00",

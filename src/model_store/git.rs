@@ -37,6 +37,10 @@ fn parse_git_url(url: &str) -> Result<GitUrl<'_>> {
 /// URL format: `git+https://github.com/org/repo.git#branch[:subdir]`
 ///
 /// Authentication token is read from `GITHUB_TOKEN`, then `GIT_TOKEN` (first non-empty wins).
+/// The token reaches git through `GIT_CONFIG_*` env vars (a `url.<with-token>.insteadOf`
+/// rewrite) rather than the clone URL itself — an argv-embedded token is visible in the
+/// process list while git runs, and git persists the remote URL verbatim into the cloned
+/// repo's `.git/config`.
 pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
     let parsed = parse_git_url(url)?;
 
@@ -44,23 +48,24 @@ pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(&dest)
         .with_context(|| format!("creating model store dir {}", dest.display()))?;
 
-    let clone_url = build_clone_url(parsed.repo_url)?;
-
     info!(branch = parsed.branch, dest = %dest.display(), "cloning model store from git");
 
-    let output = tokio::process::Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            parsed.branch,
-            &clone_url,
-        ])
-        .arg(&dest)
-        .output()
-        .await
-        .context("running git clone")?;
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args([
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        parsed.branch,
+        parsed.repo_url,
+    ])
+    .arg(&dest);
+    if let Some((key, value)) = token_rewrite_config(parsed.repo_url)? {
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", key)
+            .env("GIT_CONFIG_VALUE_0", value);
+    }
+    let output = cmd.output().await.context("running git clone")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -97,22 +102,24 @@ fn git_token() -> Option<String> {
     None
 }
 
-/// Inject auth token into an HTTPS URL for authentication.
-fn build_clone_url(repo_url: &str) -> Result<String> {
+/// Build the `url.<with-token>.insteadOf` git-config pair that authenticates an
+/// HTTPS clone. Returns `None` when no token is set or the URL isn't HTTPS
+/// (SSH auth comes from the agent/keys, not a token).
+fn token_rewrite_config(repo_url: &str) -> Result<Option<(String, String)>> {
     let Some(token) = git_token() else {
-        return Ok(repo_url.to_string());
+        return Ok(None);
     };
 
     let parsed = url::Url::parse(repo_url).context("parsing git URL")?;
     if parsed.scheme() != "https" {
-        return Ok(repo_url.to_string());
+        return Ok(None);
     }
 
     let mut with_token = parsed;
     with_token
         .set_username(&token)
         .map_err(|()| anyhow::anyhow!("failed to set git token in URL"))?;
-    Ok(with_token.to_string())
+    Ok(Some((format!("url.{with_token}.insteadOf"), repo_url.to_string())))
 }
 
 /// Redact any git token from error output.
@@ -208,33 +215,36 @@ mod tests {
     }
 
     #[test]
-    fn build_clone_url_injects_token_for_https() {
+    fn token_rewrite_config_builds_instead_of_pair_for_https() {
         with_git_tokens(Some("my-token"), None, || {
-            let Ok(url) = build_clone_url("https://github.com/org/repo.git") else {
-                panic!("build_clone_url failed");
+            let Ok(Some((key, value))) = token_rewrite_config("https://github.com/org/repo.git")
+            else {
+                panic!("expected a rewrite pair");
             };
-            assert!(url.contains("my-token@"));
-            assert!(url.starts_with("https://"));
+            // The tokenized URL lives only in the config key; the clean URL is
+            // what git stores as remote.origin.url.
+            assert_eq!(key, "url.https://my-token@github.com/org/repo.git.insteadOf");
+            assert_eq!(value, "https://github.com/org/repo.git");
         });
     }
 
     #[test]
-    fn build_clone_url_no_token_returns_unchanged() {
+    fn token_rewrite_config_none_without_token() {
         with_git_tokens(None, None, || {
-            let Ok(url) = build_clone_url("https://github.com/org/repo.git") else {
-                panic!("build_clone_url failed");
+            let Ok(pair) = token_rewrite_config("https://github.com/org/repo.git") else {
+                panic!("token_rewrite_config failed");
             };
-            assert_eq!(url, "https://github.com/org/repo.git");
+            assert!(pair.is_none());
         });
     }
 
     #[test]
-    fn build_clone_url_non_https_passthrough() {
+    fn token_rewrite_config_none_for_non_https() {
         with_git_tokens(Some("tok"), None, || {
-            let Ok(url) = build_clone_url("ssh://git@github.com/org/repo.git") else {
-                panic!("build_clone_url failed");
+            let Ok(pair) = token_rewrite_config("ssh://git@github.com/org/repo.git") else {
+                panic!("token_rewrite_config failed");
             };
-            assert_eq!(url, "ssh://git@github.com/org/repo.git");
+            assert!(pair.is_none());
         });
     }
 

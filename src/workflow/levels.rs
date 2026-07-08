@@ -347,11 +347,7 @@ async fn execute_one_level(
 /// Fairness keys are limited to 64 bytes server-side; truncate on a char
 /// boundary rather than letting the server reject the task.
 fn truncate_fairness_key(key: &str) -> String {
-    let mut end = key.len().min(64);
-    while end > 0 && !key.is_char_boundary(end) {
-        end -= 1;
-    }
-    key[..end].to_string()
+    super::helpers::truncate_at_char_boundary(key, 64).to_string()
 }
 
 #[cfg(test)]

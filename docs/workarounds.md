@@ -14,7 +14,12 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 `ref()` calls are resolved during project parsing and baked into `Relation` objects with the startup default schema. When a per-workflow env override changes `DB_SCHEMA`, downstream models still reference the old schema in their compiled SQL (e.g. `"waffle_hut"."default_schema"."stg_customers"` instead of `"waffle_hut"."override_schema"."stg_customers"`).
 
-**Workaround:** After Jinja renders the raw SQL, we string-replace quoted occurrences of the startup default schema with the per-workflow schema in the compiled SQL. This is brittle — it assumes the schema appears as a quoted identifier and that no column or alias happens to match the schema name.
+**Workaround:** Two strategies, chosen by whether the project overrides `generate_schema_name`:
+
+- **Default macro** (the common case): after Jinja renders the raw SQL, we string-replace quoted occurrences of the startup default schema with the per-workflow schema in the compiled SQL (`patch_compiled_schema` / `compute_patched_relation`). This is brittle — it assumes the schema appears as a quoted identifier and that no column or alias happens to match the schema name — but only applies when the project's schema naming follows dbt's default `<target_schema>[_<custom>]` pattern.
+- **Custom macro**: `build_schema_rewrite_map` re-executes the project's actual `generate_schema_name` macro through the already-patched Jinja env (`env_var()` overridden, `target` patched with the per-workflow schema/database) for every distinct schema in the project, then `patch_sql_with_schema_map` replaces every distinct schema in compiled SQL using the resulting map — handling both double-quoted (PostgreSQL/Snowflake/Redshift) and backtick-quoted (BigQuery) identifiers. This matches vanilla dbt's per-run macro evaluation instead of guessing at the pattern, and replaces what used to be a hard `Configuration` error when a custom macro's output didn't follow the default suffix pattern.
+
+**Known limitation:** the custom-macro path only passes `node.name` into the macro call, not the full dbt node object — macros reading `node.config`, `node.fqn`, etc. may still need the `profiles.yml`-level approach where `target.schema` carries the per-tenant value instead.
 
 ## 3. ADBC PostgreSQL driver built from source (macOS ARM64)
 

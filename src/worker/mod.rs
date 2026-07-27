@@ -626,7 +626,7 @@ mod tests {
             __common_attr__: CommonAttributes {
                 unique_id: unique_id.to_string(),
                 name: name.to_string(),
-                path: PathBuf::from(path),
+                path: PathBuf::from(path).into(),
                 ..CommonAttributes::default()
             },
             ..DbtModel::default()
@@ -638,7 +638,7 @@ mod tests {
             __common_attr__: CommonAttributes {
                 unique_id: unique_id.to_string(),
                 name: name.to_string(),
-                path: PathBuf::from(path),
+                path: PathBuf::from(path).into(),
                 ..CommonAttributes::default()
             },
             __base_attr__: NodeBaseAttributes::default(),
@@ -651,7 +651,7 @@ mod tests {
             __common_attr__: CommonAttributes {
                 unique_id: unique_id.to_string(),
                 name: name.to_string(),
-                path: PathBuf::from(path),
+                path: PathBuf::from(path).into(),
                 ..CommonAttributes::default()
             },
             ..DbtTest::default()

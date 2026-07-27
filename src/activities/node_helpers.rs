@@ -918,7 +918,8 @@ mod tests {
 
     // NOTE: the macro-missing branch (template exists, leaf macro absent) is
     // deliberately untested — fusion's `State::lookup` recurses without bound
-    // on a missing name and overflows the stack.
+    // on a missing name and overflows the stack. Re-confirmed against the
+    // 2026-07-06 pin (`37ba42bd`); see docs/workarounds.md.
 
     #[test]
     fn render_materialization_surfaces_macro_call_errors() {

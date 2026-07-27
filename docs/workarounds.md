@@ -4,7 +4,7 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 ## 1. `ResultStore` not injectable into context builders
 
-**Issue:** [dbt-labs/dbt-fusion#1291](https://github.com/dbt-labs/dbt-fusion/issues/1291)
+**Issue:** [dbt-labs/dbt-core#14245](https://github.com/dbt-labs/dbt-core/issues/14245) (open; a draft PR was floated in review but not merged)
 
 `build_compile_and_run_base_context()` and `extend_base_context_stateful_fn()` (called inside `build_run_node_context`) each create their own `ResultStore` and inject its closures (`store_result`, `load_result`, `store_raw_result`) into the context. Callers that need to read adapter responses after materialization must use their own `ResultStore`, but the context builders overwrite its closures.
 
@@ -18,7 +18,9 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 ## 3. ADBC PostgreSQL driver built from source (macOS ARM64)
 
-**Issue:** [dbt-labs/arrow-adbc#31](https://github.com/dbt-labs/arrow-adbc/issues/31)
+**Issue:** not yet filed. (This section previously linked `dbt-labs/arrow-adbc#31`, but that
+number turned out to be an unrelated merged PR — a stale/incorrect reference, not a real
+filing. Searched `dbt-labs/arrow-adbc` for existing reports of this SIGSEGV; found none.)
 
 The CDN-shipped ADBC PostgreSQL driver is built with `-undefined dynamic_lookup`,
 which defers unresolved symbols to `dlopen` time. On macOS, OpenSSL symbols
@@ -55,11 +57,63 @@ The script:
 | **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
-## Candidate upstream issues (not yet filed)
+## Candidate upstream issues
 
 Found while building error-classification/retry tests. **Filing requires
 approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
+
+**2026-07-08 audit:** a duplicate check turned up prior filings against
+`dbt-labs/dbt-core` under the `thejens` account that predate this doc and
+were never reconciled into it:
+
+- [#14245](https://github.com/dbt-labs/dbt-core/issues/14245) `[FEAT] ResultStore` — open, matches item 1 above.
+- [#14244](https://github.com/dbt-labs/dbt-core/issues/14244) `RunConfig` missing `call()` — **closed, fixed upstream in preview.134**
+  (`dbt-labs/fs#7600`). Confirmed fixed at our pinned rev `37ba42bd`
+  (`RunConfig` now implements `fn call`) — the `NoopConfig` swap workaround in
+  `src/activities/execute_node.rs` (see `todo/upstream-dbt-fusion-api.md` item 2)
+  is dead code and should be removed.
+- [#14243](https://github.com/dbt-labs/dbt-core/issues/14243) `execute` not a Jinja global — **closed**, maintainer couldn't
+  reproduce via the CLI and closed once we confirmed it's a library-consumer-only
+  issue (`configure_compile_and_run_jinja_environment` embedders, not `dbt run`
+  itself). Our workaround (item 3 in the todo file) is still needed on our side;
+  re-filing isn't likely to land differently without a CLI-visible repro.
+  **Note:** a follow-up comment on that thread was posted from the `jens-gilion`
+  (work) account on a `thejens`-owned personal issue — an identity mixup worth
+  being aware of before commenting further on that thread.
+- `TARGET_PACKAGE_NAME` in `build_run_node_context()` (item 4 in the todo file) was
+  only ever raised as a *comment* on the now-closed
+  [#14148](https://github.com/dbt-labs/dbt-core/issues/14148), which fixed a
+  narrower case (query-comment macros) but not the general run-phase gap.
+  Confirmed still missing at `37ba42bd`.
+
+  **2026-07-08: already fixed upstream, one day after our pin — no filing
+  needed.** Built `dbt-sa-cli` from latest main (`e4c0c1ef`, 2026-07-07) and
+  tested a `var()` call through a post-hook and through the original #14148
+  query-comment repro — both succeed. `RunNodeCtx` now has a
+  `target_package_name` field (`#[serde(rename = "TARGET_PACKAGE_NAME")]`,
+  `crates/dbt-jinja-ctx/src/run.rs:132`) populated from
+  `common_attr.package_name` — the exact fix proposed in the #14148 comment
+  thread, landed without its own tracking issue. Our local workaround (the
+  manual `TARGET_PACKAGE_NAME` insertion in
+  `src/activities/execute_node.rs:652-655`) is now dead weight — remove it on
+  the next bump past `e4c0c1ef`.
+
+Also found while auditing: three older reports not previously tracked in this
+file — [#14550](https://github.com/dbt-labs/dbt-core/issues/14550) (DISPATCH_CONFIG
+TOCTOU race), [#14551](https://github.com/dbt-labs/dbt-core/issues/14551) (dbt-antlr4
+pin), [#14552](https://github.com/dbt-labs/dbt-core/issues/14552) (`..` resource path
+misresolution). **2026-07-27 status check: all three now closed as fixed.**
+`#14550` verified against latest main (`bb24b246`, 2026-07-27) — the
+`DISPATCH_CONFIG.set(...).unwrap()` panic site is gone; the two remaining call
+sites in `crates/dbt-loader/src/loader.rs` use `get_or_init` and a
+`let _ = ... .set(...)` discard, both race-safe. `#14551` verified — workspace
+`Cargo.toml` now pins `dbt-antlr4 = "1.3.6"` directly (the lexers were fixed to
+support the newer API, not reverted to the old pin; matches our own
+already-loosened `dbt-antlr4 = "1"` in this repo's `Cargo.toml`, no local
+change needed). `#14552` closed on a reporter's own repro confirmation
+("Tried repro. Its already fixed!") — not independently re-verified against
+source, but no reason to doubt a third-party repro.
 
 ### Confirmed against the current pinned rev (`37ba42bd`)
 
@@ -99,6 +153,28 @@ before filing (upstream cleanup may have already addressed some of these).
 - **`State::lookup` on a missing macro name recurses without bound and
   overflows the stack.** A genuine crash bug — highest filing priority in
   this group if still reproducible.
+
+  **2026-07-08: confirmed still reproducing, root cause pinned down, minimal
+  repro built.** Root cause: `DispatchObject::call()` →
+  `execute_template()` (`crates/dbt-jinja/minijinja/src/dispatch_object.rs`)
+  does `template_state.lookup(leaf_name, listeners).expect(...)`, but
+  `State::lookup()` (`crates/dbt-jinja/minijinja/src/vm/state.rs`) doesn't
+  check whether the macro is actually *defined* — it falls back to
+  `macro_namespace_template_resolver`, which only checks whether a
+  *template file* by that name exists. When a template exists at the
+  dispatch-convention name but doesn't define the macro, `lookup` hands back
+  a **new, equivalent `DispatchObject`** pointing at the same template.
+  Calling it repeats the same steps forever — no cycle/depth guard actually
+  fires. Reproduces with a ~15-line Rust program depending only on the
+  vendored `minijinja` crate (no CLI, no project, no adapter) against
+  latest `dbt-labs/dbt-core` main (`e4c0c1ef`, 2026-07-07). This bug is in
+  dbt-specific dispatch code grafted onto the fork — `dispatch_object.rs`
+  and `macro_namespace_template_resolver` don't exist in upstream
+  `mitsuhiko/minijinja` — so it belongs in `dbt-labs/dbt-core`, not
+  upstream minijinja. Draft body ready; still needs final go-ahead to file.
+  **2026-07-27: still open per the DISPATCH_CONFIG/antlr4/`..`-path status
+  check above** — none of the fixes that landed since 07-08 touch dispatch
+  or macro resolution, so this one still needs filing.
 - **Source freshness YAML silently drops `loaded_at_field`/`freshness` when
   not nested under `config:`** (dbt 1.10+ shape) — no parse error, just an
   ERROR-level log line. Silent data loss for a user writing the older (still

@@ -85,13 +85,35 @@ were never reconciled into it:
   only ever raised as a *comment* on the now-closed
   [#14148](https://github.com/dbt-labs/dbt-core/issues/14148), which fixed a
   narrower case (query-comment macros) but not the general run-phase gap.
-  Confirmed still missing at `37ba42bd` (`grep TARGET_PACKAGE_NAME` on
-  `run_node_context.rs` finds nothing) — still a candidate, needs its own issue.
+  Confirmed still missing at `37ba42bd`.
 
-Also found while auditing: three older, still-open reports not previously tracked in
-this file — [#14550](https://github.com/dbt-labs/dbt-core/issues/14550) (DISPATCH_CONFIG
-TOCTOU race), [#14551](https://github.com/dbt-labs/dbt-core/issues/14551) (dbt-antlr4 pin),
-[#14552](https://github.com/dbt-labs/dbt-core/issues/14552) (`..` resource path misresolution).
+  **2026-07-08: already fixed upstream, one day after our pin — no filing
+  needed.** Built `dbt-sa-cli` from latest main (`e4c0c1ef`, 2026-07-07) and
+  tested a `var()` call through a post-hook and through the original #14148
+  query-comment repro — both succeed. `RunNodeCtx` now has a
+  `target_package_name` field (`#[serde(rename = "TARGET_PACKAGE_NAME")]`,
+  `crates/dbt-jinja-ctx/src/run.rs:132`) populated from
+  `common_attr.package_name` — the exact fix proposed in the #14148 comment
+  thread, landed without its own tracking issue. Our local workaround (the
+  manual `TARGET_PACKAGE_NAME` insertion in
+  `src/activities/execute_node.rs:652-655`) is now dead weight — remove it on
+  the next bump past `e4c0c1ef`.
+
+Also found while auditing: three older reports not previously tracked in this
+file — [#14550](https://github.com/dbt-labs/dbt-core/issues/14550) (DISPATCH_CONFIG
+TOCTOU race), [#14551](https://github.com/dbt-labs/dbt-core/issues/14551) (dbt-antlr4
+pin), [#14552](https://github.com/dbt-labs/dbt-core/issues/14552) (`..` resource path
+misresolution). **2026-07-27 status check: all three now closed as fixed.**
+`#14550` verified against latest main (`bb24b246`, 2026-07-27) — the
+`DISPATCH_CONFIG.set(...).unwrap()` panic site is gone; the two remaining call
+sites in `crates/dbt-loader/src/loader.rs` use `get_or_init` and a
+`let _ = ... .set(...)` discard, both race-safe. `#14551` verified — workspace
+`Cargo.toml` now pins `dbt-antlr4 = "1.3.6"` directly (the lexers were fixed to
+support the newer API, not reverted to the old pin; matches our own
+already-loosened `dbt-antlr4 = "1"` in this repo's `Cargo.toml`, no local
+change needed). `#14552` closed on a reporter's own repro confirmation
+("Tried repro. Its already fixed!") — not independently re-verified against
+source, but no reason to doubt a third-party repro.
 
 ### Confirmed against the current pinned rev (`37ba42bd`)
 
@@ -131,6 +153,28 @@ before filing (upstream cleanup may have already addressed some of these).
 - **`State::lookup` on a missing macro name recurses without bound and
   overflows the stack.** A genuine crash bug — highest filing priority in
   this group if still reproducible.
+
+  **2026-07-08: confirmed still reproducing, root cause pinned down, minimal
+  repro built.** Root cause: `DispatchObject::call()` →
+  `execute_template()` (`crates/dbt-jinja/minijinja/src/dispatch_object.rs`)
+  does `template_state.lookup(leaf_name, listeners).expect(...)`, but
+  `State::lookup()` (`crates/dbt-jinja/minijinja/src/vm/state.rs`) doesn't
+  check whether the macro is actually *defined* — it falls back to
+  `macro_namespace_template_resolver`, which only checks whether a
+  *template file* by that name exists. When a template exists at the
+  dispatch-convention name but doesn't define the macro, `lookup` hands back
+  a **new, equivalent `DispatchObject`** pointing at the same template.
+  Calling it repeats the same steps forever — no cycle/depth guard actually
+  fires. Reproduces with a ~15-line Rust program depending only on the
+  vendored `minijinja` crate (no CLI, no project, no adapter) against
+  latest `dbt-labs/dbt-core` main (`e4c0c1ef`, 2026-07-07). This bug is in
+  dbt-specific dispatch code grafted onto the fork — `dispatch_object.rs`
+  and `macro_namespace_template_resolver` don't exist in upstream
+  `mitsuhiko/minijinja` — so it belongs in `dbt-labs/dbt-core`, not
+  upstream minijinja. Draft body ready; still needs final go-ahead to file.
+  **2026-07-27: still open per the DISPATCH_CONFIG/antlr4/`..`-path status
+  check above** — none of the fixes that landed since 07-08 touch dispatch
+  or macro resolution, so this one still needs filing.
 - **Source freshness YAML silently drops `loaded_at_field`/`freshness` when
   not nested under `config:`** (dbt 1.10+ shape) — no parse error, just an
   ERROR-level log line. Silent data loss for a user writing the older (still

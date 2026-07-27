@@ -486,7 +486,23 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
             .map(|(id, _)| id.clone())
             .collect(),
         priority: None,
+        on_error: model_on_error(node),
     })
+}
+
+/// Read a model's `on_error` config ("continue" or "skip_children"), if set.
+/// Only `DbtModel` carries this field — every other resource type gets `None`.
+fn model_on_error(
+    node: &dyn dbt_schemas::schemas::nodes::InternalDbtNodeAttributes,
+) -> Option<String> {
+    use dbt_schemas::schemas::common::OnError;
+    use dbt_schemas::schemas::nodes::DbtModel;
+
+    let model = node.as_any().downcast_ref::<DbtModel>()?;
+    match model.deprecated_config.on_error.as_ref()? {
+        OnError::Continue => Some("continue".to_string()),
+        OnError::SkipChildren => Some("skip_children".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -867,5 +883,88 @@ mod tests {
             info.depends_on
                 .contains(&"model.shop.stg_customers".to_string())
         );
+    }
+
+    #[test]
+    fn build_node_info_extracts_on_error_continue() {
+        use std::sync::Arc;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::common::OnError;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
+        use dbt_schemas::schemas::project::ModelConfig;
+
+        let mut nodes = Nodes::default();
+        nodes.models.insert(
+            "model.shop.flaky".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: CommonAttributes {
+                    unique_id: "model.shop.flaky".to_string(),
+                    name: "flaky".to_string(),
+                    package_name: "shop".to_string(),
+                    ..CommonAttributes::default()
+                },
+                deprecated_config: ModelConfig {
+                    on_error: Some(OnError::Continue),
+                    ..ModelConfig::default()
+                },
+                ..DbtModel::default()
+            }),
+        );
+
+        let info = build_node_info(&nodes, "model.shop.flaky").expect("flaky is in the registry");
+        assert_eq!(info.on_error.as_deref(), Some("continue"));
+    }
+
+    #[test]
+    fn build_node_info_on_error_is_none_when_unset() {
+        use std::sync::Arc;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
+
+        let mut nodes = Nodes::default();
+        nodes.models.insert(
+            "model.shop.plain".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: CommonAttributes {
+                    unique_id: "model.shop.plain".to_string(),
+                    name: "plain".to_string(),
+                    package_name: "shop".to_string(),
+                    ..CommonAttributes::default()
+                },
+                ..DbtModel::default()
+            }),
+        );
+
+        let info = build_node_info(&nodes, "model.shop.plain").expect("plain is in the registry");
+        assert_eq!(info.on_error, None);
+    }
+
+    #[test]
+    fn build_node_info_on_error_is_none_for_non_model_nodes() {
+        use std::sync::Arc;
+
+        use dbt_schemas::schemas::Nodes;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtTest};
+
+        let mut nodes = Nodes::default();
+        nodes.tests.insert(
+            "test.shop.not_null_id".to_string(),
+            Arc::new(DbtTest {
+                __common_attr__: CommonAttributes {
+                    unique_id: "test.shop.not_null_id".to_string(),
+                    name: "not_null_id".to_string(),
+                    package_name: "shop".to_string(),
+                    ..CommonAttributes::default()
+                },
+                ..DbtTest::default()
+            }),
+        );
+
+        let info =
+            build_node_info(&nodes, "test.shop.not_null_id").expect("test is in the registry");
+        assert_eq!(info.resource_type, "NODE_TYPE_TEST");
+        assert_eq!(info.on_error, None);
     }
 }

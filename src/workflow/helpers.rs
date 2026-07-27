@@ -291,16 +291,36 @@ pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<St
     })
 }
 
-/// True if `unique_id` has any upstream dependency in `failed_nodes`. Used by
-/// the per-level scheduler to skip a node whose upstream model failed.
+/// True if `unique_id` has any upstream dependency in `failed_nodes` whose
+/// failure isn't exempted by `on_error: continue`. Used by the per-level
+/// scheduler to skip a node whose upstream model failed.
+///
+/// Mirrors dbt-core's `model_should_continue_on_error`: a failed dependency
+/// only blocks downstream nodes when it *doesn't* carry `on_error: continue`.
+/// Only models can set this — a failed test/seed/snapshot always blocks.
+/// `--fail-fast` isn't threaded through here because the caller
+/// (`execute_one_level`) already short-circuits the whole level before this
+/// runs whenever `fail_fast` and a prior failure coincide, so `failed_nodes`
+/// is guaranteed empty in the one case where fail-fast should override this
+/// exemption.
 pub fn is_blocked_by_failed_upstream(
     plan: &ExecutionPlan,
     unique_id: &str,
     failed_nodes: &std::collections::BTreeSet<String>,
 ) -> bool {
-    plan.nodes
-        .get(unique_id)
-        .is_some_and(|info| info.depends_on.iter().any(|dep| failed_nodes.contains(dep)))
+    plan.nodes.get(unique_id).is_some_and(|info| {
+        info.depends_on
+            .iter()
+            .any(|dep| failed_nodes.contains(dep) && !dep_continues_on_error(plan, dep))
+    })
+}
+
+/// True when `dep`'s failure shouldn't propagate to its dependents — it's a
+/// model configured with `on_error: continue`.
+fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
+    plan.nodes.get(dep_unique_id).is_some_and(|info| {
+        info.resource_type == "NODE_TYPE_MODEL" && info.on_error.as_deref() == Some("continue")
+    })
 }
 
 /// Classify the result status from an activity completion. The level scheduler
@@ -457,6 +477,7 @@ mod tests {
                     package_name: "waffle".to_string(),
                     depends_on: deps.iter().map(|d| format!("model.waffle.{d}")).collect(),
                     priority: None,
+                    on_error: None,
                 },
             );
         }
@@ -1042,6 +1063,72 @@ mod tests {
         // An id that isn't in the plan can't be blocked — the level loop will
         // simply skip it. Returning false here keeps the contract coherent.
         assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.nope", &failed));
+    }
+
+    /// Patch a `test_plan` node's `resource_type`/`on_error` in place — `test_plan`
+    /// hardcodes every node as a plain model with no `on_error`, so tests that need
+    /// a specific combination mutate the built plan directly.
+    fn set_on_error(
+        plan: &mut ExecutionPlan,
+        unique_id: &str,
+        resource_type: &str,
+        on_error: Option<&str>,
+    ) {
+        let info = plan.nodes.get_mut(unique_id).unwrap();
+        info.resource_type = resource_type.to_string();
+        info.on_error = on_error.map(ToString::to_string);
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_false_when_failed_dep_continues_on_error() {
+        let mut plan =
+            test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
+        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_true_when_only_one_of_two_failed_deps_continues_on_error() {
+        let mut plan = test_plan(
+            vec![vec!["a", "b", "c"]],
+            &[
+                ("a", None, vec![]),
+                ("b", None, vec![]),
+                ("c", None, vec!["a", "b"]),
+            ],
+        );
+        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        // b has no on_error override — its failure should still block c.
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        failed.insert("model.waffle.b".to_string());
+        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.c", &failed));
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_true_when_failed_dep_has_skip_children() {
+        // Only `on_error: continue` is exempted — `skip_children` isn't handled
+        // by our scheduler (dbt-core itself only wires up `continue` today).
+        let mut plan =
+            test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
+        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("skip_children"));
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_true_when_failed_dep_is_not_a_model() {
+        // on_error: continue only exempts models — a failed non-model dependency
+        // (e.g. a seed) always blocks, even if on_error happened to be set.
+        let mut plan =
+            test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
+        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_SEED", Some("continue"));
+        let mut failed = std::collections::BTreeSet::new();
+        failed.insert("model.waffle.a".to_string());
+        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
     }
 
     // --- classify_result_status ---

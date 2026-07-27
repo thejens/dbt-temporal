@@ -90,13 +90,14 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    let mut base_context = dbt_jinja_utils::phases::build_compile_and_run_base_context(
+    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
         None, // defer_nodes: not using deferred state
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
+        None,
     );
 
     // Our ResultStore — registered both in context and as globals.

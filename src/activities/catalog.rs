@@ -127,13 +127,14 @@ fn fetch_columns<'a>(
         .get_macro_namespace_registry()
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
-    let mut ctx = dbt_jinja_utils::phases::build_compile_and_run_base_context(
+    let mut ctx = dbt_jinja_utils::phases::build_operation_context_btreemap(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
         None,
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
+        None,
     );
 
     let columns_expr = jinja_env

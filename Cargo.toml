@@ -41,26 +41,26 @@ temporalio-macros = "0.5.0"
 temporalio-workflow = "0.5.0"
 
 # dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-07-06)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
 # FsError/ErrorCode: dbt's own transient/permanent error taxonomy. Some Jinja
 # adapter functions (e.g. run_query) wrap the underlying AdapterError in an
 # FsError, discarding it as a downcastable source but keeping its ErrorCode —
 # the retry classifier reads that field directly for those paths.
-dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
+dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
 # layer inserts a default so dbt-fusion's adapter code doesn't panic.
-dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "37ba42bd64371e49a717fdd7bf481a7739a41e14" }
+dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
 dbt-yaml = "0.9.5"
 
 # Standard
@@ -160,3 +160,13 @@ arrow-string = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d
 
 # ring build.rs workaround (same as dbt-fusion)
 ring = { git = "https://github.com/sdf-labs/ring.git", rev = "3c35ce0b7e1bd9fe83180b19eda21d302e0b5006" }
+
+# Forked datafusion (sdf/50) and sqlparser (sdf/0.58.0), re-introduced by dbt-fusion
+# at the bb24b246 rev (previously on plain crates-io releases as of 37ba42bd).
+# Only datafusion-common/datafusion-expr/sqlparser are actually pulled into our
+# dependency graph — upstream's own patch table also lists the umbrella
+# `datafusion` and `datafusion-catalog` crates, but cargo reports those two as
+# unused patches here (we don't depend on them directly or transitively).
+datafusion-common = { git = "https://github.com/sdf-labs/datafusion", rev = "c0627e28fdd64ad1e33e3e8f3d6515c7ecb886ed" }
+datafusion-expr = { git = "https://github.com/sdf-labs/datafusion", rev = "c0627e28fdd64ad1e33e3e8f3d6515c7ecb886ed" }
+sqlparser = { git = "https://github.com/sdf-labs/datafusion-sqlparser-rs", rev = "36843ce564b129a0e0a15b58997d8c132b7ce6d4" }

@@ -113,8 +113,8 @@ mod tests {
         raw_code: Option<&str>,
     ) -> CommonAttributes {
         CommonAttributes {
-            original_file_path: PathBuf::from(original_file_path),
-            path: PathBuf::from(path),
+            original_file_path: PathBuf::from(original_file_path).into(),
+            path: PathBuf::from(path).into(),
             raw_code: raw_code.map(String::from),
             ..Default::default()
         }

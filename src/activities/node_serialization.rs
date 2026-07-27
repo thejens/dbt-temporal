@@ -227,7 +227,7 @@ mod tests {
 
         let mut nodes = dbt_schemas::schemas::Nodes::default();
         let mut seed = DbtSeed::default();
-        seed.__common_attr__.original_file_path = PathBuf::from("seeds/raw.csv");
+        seed.__common_attr__.original_file_path = PathBuf::from("seeds/raw.csv").into();
         nodes
             .seeds
             .insert("seed.shop.raw".to_string(), Arc::new(seed));
@@ -253,7 +253,7 @@ mod tests {
         // with a file-not-found, which we wrap with `reading seed CSV` context.
         let mut nodes = dbt_schemas::schemas::Nodes::default();
         let mut seed = DbtSeed::default();
-        seed.__common_attr__.original_file_path = PathBuf::from("seeds/missing.csv");
+        seed.__common_attr__.original_file_path = PathBuf::from("seeds/missing.csv").into();
         nodes
             .seeds
             .insert("seed.shop.missing".to_string(), Arc::new(seed));
@@ -281,7 +281,7 @@ mod tests {
 
         let mut nodes = dbt_schemas::schemas::Nodes::default();
         let mut seed = DbtSeed::default();
-        seed.__common_attr__.original_file_path = PathBuf::from("seeds/pipe.csv");
+        seed.__common_attr__.original_file_path = PathBuf::from("seeds/pipe.csv").into();
         seed.__seed_attr__.delimiter = Some("|".to_string());
         nodes
             .seeds

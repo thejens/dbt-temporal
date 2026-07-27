@@ -273,9 +273,6 @@ impl AdapterEngine for FaultInjectingEngine {
     fn is_replay(&self) -> bool {
         self.inner.is_replay()
     }
-    fn generation(&self) -> u64 {
-        self.inner.generation()
-    }
     fn physical_backend(&self) -> Option<Backend> {
         self.inner.physical_backend()
     }

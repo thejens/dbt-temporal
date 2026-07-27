@@ -489,13 +489,14 @@ pub async fn execute_node_inner(
     };
 
     // Build the base context for compile+run phase.
-    let mut base_context = dbt_jinja_utils::phases::build_compile_and_run_base_context(
+    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
         defer_nodes.as_ref(),
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
+        None,
     );
 
     // Override store_result/load_result/store_raw_result with our own ResultStore so we can

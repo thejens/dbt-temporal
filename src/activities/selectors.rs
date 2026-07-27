@@ -432,7 +432,7 @@ mod tests {
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             package_name: package.to_string(),
-            original_file_path: PathBuf::from(path),
+            original_file_path: PathBuf::from(path).into(),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
             fqn: std::iter::once(package.to_string())
                 .chain(fqn_extra.iter().map(|s| (*s).to_string()))

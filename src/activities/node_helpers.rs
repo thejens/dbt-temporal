@@ -504,7 +504,7 @@ mod tests {
         let common = CommonAttributes {
             unique_id: format!("model.shop.{name}"),
             name: name.to_string(),
-            original_file_path: std::path::PathBuf::from(&rel),
+            original_file_path: std::path::PathBuf::from(&rel).into(),
             ..CommonAttributes::default()
         };
         let base = NodeBaseAttributes {
@@ -580,7 +580,7 @@ mod tests {
         let common = CommonAttributes {
             unique_id: "model.shop.missing".to_string(),
             name: "missing".to_string(),
-            original_file_path: std::path::PathBuf::from("models/missing.sql"),
+            original_file_path: std::path::PathBuf::from("models/missing.sql").into(),
             ..CommonAttributes::default()
         };
         let base = NodeBaseAttributes {

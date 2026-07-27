@@ -114,6 +114,11 @@ pub struct NodeInfo {
     /// depth. Only set when priority scheduling is enabled on the worker.
     #[serde(default)]
     pub priority: Option<u32>,
+    /// The model's `on_error` config ("continue" or "skip_children"), if set.
+    /// Only models can set this; `None` for every other resource type and for
+    /// models that don't override the default (propagate failure downstream).
+    #[serde(default)]
+    pub on_error: Option<String>,
 }
 
 /// Input to the execute_node activity.

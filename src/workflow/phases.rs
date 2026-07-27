@@ -557,6 +557,7 @@ mod tests {
                         package_name: "shop".to_string(),
                         depends_on: vec![],
                         priority: None,
+                        on_error: None,
                     },
                 ),
                 (
@@ -569,6 +570,7 @@ mod tests {
                         package_name: "shop".to_string(),
                         depends_on: vec!["model.shop.customers".to_string()],
                         priority: None,
+                        on_error: None,
                     },
                 ),
             ]),

@@ -98,7 +98,20 @@ async fn build_project_registry(
         if projects.contains_key(&name) {
             anyhow::bail!("duplicate project name '{}' (from {})", name, project_dir.display());
         }
-        info!(project = %name, dir = %project_dir.display(), "loaded project");
+        let dir_name = project_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        info!(project = %name, dir = %project_dir.display(), directory = dir_name, "loaded project");
+        if !dir_name.is_empty() && name != dir_name {
+            tracing::warn!(
+                project_name = %name,
+                directory = %dir_name,
+                "dbt_project.yml name '{}' differs from directory '{}' — \
+                 workflows must use '{}' as the project key",
+                name, dir_name, name
+            );
+        }
         projects.insert(name, Arc::new(state));
     }
 
@@ -461,12 +474,12 @@ pub async fn initialize_project(
             .macros
             .macros
             .contains_key(&format!("macro.{project_name}.generate_database_name"));
-    if has_custom_schema_name_macro && uses_env_vars {
-        tracing::warn!(
+    if has_custom_schema_name_macro {
+        info!(
             project = %project_name,
             "project overrides generate_schema_name or generate_database_name — \
-             per-workflow env overrides may not correctly patch `this.schema`/`this.database` \
-             context variables (the `target` global IS correct)"
+             per-workflow env overrides will re-execute the macro at activity time \
+             (env_var() reads and target.schema both reflect the workflow env)"
         );
     }
 

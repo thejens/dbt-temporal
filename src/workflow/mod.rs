@@ -26,8 +26,9 @@ use self::helpers::{
 };
 use self::levels::execute_levels;
 use self::phases::{
-    plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks,
-    run_pre_run_hooks, store_run_artifacts, upsert_terminal_status, write_command_memo,
+    build_list_output, plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start,
+    run_post_hooks, run_pre_run_hooks, store_run_artifacts, upsert_terminal_status,
+    write_command_memo,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -99,6 +100,15 @@ impl DbtRunWorkflow {
             s.status.total_levels = plan.levels.len();
             s.status.phase = "pre_run_hooks".to_string();
         });
+
+        // list: return the selected node set without executing any SQL.
+        if input.command == "list" {
+            let out = build_list_output(&plan, elapsed_secs(start, ctx.workflow_time()));
+            upsert_terminal_status(ctx, &plan, "passed")?;
+            ctx.set_current_details("list".to_string());
+            return Ok(out);
+        }
+
         let project_config = resolve_project_config(ctx, &input, &plan).await?;
         let hooks = project_config.hooks;
         let retry_config = project_config.retry;

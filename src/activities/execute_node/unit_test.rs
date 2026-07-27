@@ -607,15 +607,11 @@ fn split_leading_with(sql: &str) -> Option<(&str, bool, &str)> {
         let trimmed = rest.trim_start();
         idx += rest.len() - trimmed.len();
         if trimmed.starts_with("--") {
-            match sql[idx..].find('\n') {
-                Some(nl) => idx += nl + 1,
-                None => return None,
-            }
+            let nl = sql[idx..].find('\n')?;
+            idx += nl + 1;
         } else if trimmed.starts_with("/*") {
-            match sql[idx..].find("*/") {
-                Some(end) => idx += end + 2,
-                None => return None,
-            }
+            let end = sql[idx..].find("*/")?;
+            idx += end + 2;
         } else {
             break;
         }

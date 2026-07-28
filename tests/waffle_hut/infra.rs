@@ -86,6 +86,13 @@ ON CONFLICT DO NOTHING;
 // All tests share a single Temporal dev server and a single Postgres
 // testcontainer. Each test gets a unique task queue for isolation.
 
+/// History event count after which the dev server suggests continue-as-new.
+///
+/// Sized to fall inside a waffle_hut run rather than beyond it: a five-model
+/// build produces on the order of a hundred events, so this trips partway
+/// through and leaves at least one level for the successor.
+pub const SUGGEST_CONTINUE_AFTER_EVENTS: u32 = 40;
+
 pub struct SharedInfra {
     pub temporal_addr: String,
     pub pg_host: String,
@@ -175,6 +182,17 @@ pub fn shared_infra() -> &'static SharedInfra {
                         "DbtStatus=Keyword".to_string(),
                         "--search-attribute".to_string(),
                         "env=Keyword".to_string(),
+                        // Make continue-as-new reachable in a test-sized run.
+                        // The server sets `continue_as_new_suggested` once a
+                        // history passes this many events; the default (4096)
+                        // is far beyond anything this fixture produces.
+                        //
+                        // Only runs with `write_artifacts` enabled can act on
+                        // the suggestion — there is nowhere else to spill state
+                        // — so this changes behaviour for the artifact tests
+                        // alone and leaves the rest of the suite untouched.
+                        "--dynamic-config-value".to_string(),
+                        format!("history.historyCountSuggestContinueAsNew={SUGGEST_CONTINUE_AFTER_EVENTS}"),
                     ])
                     .build();
                 let temporal_server = config

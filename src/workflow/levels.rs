@@ -106,7 +106,11 @@ pub async fn execute_levels(
         // Stop *between* levels only: a level's activities are already
         // scheduled and awaited as a unit, and abandoning them mid-flight
         // would lose results the history has already recorded.
-        if should_continue_as_new(level_idx, resume.can_continue, ctx.continue_as_new_suggested()) {
+        if should_continue_as_new(
+            level_idx - resume.start_level,
+            resume.can_continue,
+            ctx.continue_as_new_suggested(),
+        ) {
             continue_at_level = Some(level_idx);
             break;
         }
@@ -181,10 +185,17 @@ impl ResumePoint {
 /// as history approaches its limits — rather than a node count we would have to
 /// keep in step with event-per-node cost.
 ///
-/// Never fires on the first level: a run that is already near the limit before
-/// executing anything would continue forever without making progress.
-const fn should_continue_as_new(level_idx: usize, can_continue: bool, suggested: bool) -> bool {
-    can_continue && level_idx > 0 && suggested
+/// Every segment must execute at least one level before handing off, so the
+/// count is of levels done *in this segment* rather than the absolute level
+/// index. A resumed segment starts at a non-zero index, and gating on that
+/// index would let a run that is already over the threshold on arrival continue
+/// forever without ever executing anything.
+const fn should_continue_as_new(
+    levels_done_this_segment: usize,
+    can_continue: bool,
+    suggested: bool,
+) -> bool {
+    can_continue && levels_done_this_segment > 0 && suggested
 }
 
 #[allow(clippy::too_many_lines)]
@@ -448,7 +459,9 @@ mod tests {
     }
 
     /// A run already over the threshold before executing anything would
-    /// otherwise continue forever without making progress.
+    /// otherwise continue forever without making progress. This holds for a
+    /// *resumed* segment too, which starts at a non-zero absolute level — the
+    /// count is per-segment for exactly that reason.
     #[test]
     fn never_continues_before_the_first_level_completes() {
         assert!(!should_continue_as_new(0, true, true));

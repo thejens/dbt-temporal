@@ -521,6 +521,7 @@ mod tests {
             invocation_id: "inv".to_string(),
             input: crate::types::DbtRunInput {
                 project: None,
+                indirect_selection: None,
                 command: "build".to_string(),
                 select: None,
                 exclude: None,

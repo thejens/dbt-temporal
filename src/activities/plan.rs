@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo};
 use crate::worker_state::WorkerState;
@@ -12,6 +12,7 @@ use super::DbtActivities;
 use super::dag::{
     build_dependency_map, inject_test_gates, inject_unit_test_gates, topological_levels,
 };
+use super::indirect::{IndirectSelection, expand_indirect_selection};
 use super::selectors::apply_selectors;
 
 const MANIFEST_INLINE_THRESHOLD: usize = 3 * 1024 * 1024; // 3 MB
@@ -184,6 +185,22 @@ fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
     }
 }
 
+/// Parse the workflow's `indirect_selection`, defaulting to dbt's `eager`.
+///
+/// A typo is rejected rather than silently falling back — picking the wrong
+/// mode changes which tests run, which is exactly the kind of difference that
+/// goes unnoticed in a green run.
+fn parse_indirect_selection(raw: Option<&str>) -> Result<IndirectSelection, anyhow::Error> {
+    raw.map_or_else(
+        || Ok(IndirectSelection::default()),
+        |value| {
+            value
+                .parse::<IndirectSelection>()
+                .map_err(|e| anyhow::anyhow!(e))
+        },
+    )
+}
+
 /// Tag an artifact-store read/write as retryable.
 ///
 /// The planner's own failures are permanent (bad selector, missing project),
@@ -209,6 +226,10 @@ pub async fn plan_project_inner(
         .map_or_else(|| uuid::Uuid::new_v4().to_string(), |we| we.run_id.clone());
 
     let selected_ids = select_command_node_ids(state, &input)?;
+    // The command's own node-type filter bounds what indirect selection may
+    // add later: `run` never executes tests, so it must never gain any.
+    let command_eligible: std::collections::BTreeSet<String> =
+        selected_ids.iter().cloned().collect();
 
     // state: selectors compare against a previous manifest, loaded up front so
     // a missing state_manifest_ref fails with a clear error instead of
@@ -251,6 +272,33 @@ pub async fn plan_project_inner(
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes matched after applying selectors");
     }
+
+    // Pull in the tests hanging off what the selector matched. dbt does this
+    // after selection, not as part of it — without it `--select my_model` runs
+    // the model and silently skips every test on it.
+    //
+    // Only applies when a selector narrowed the run: an unfiltered `build`
+    // already contains every test.
+    let selected_ids = if input.select.is_some() || input.exclude.is_some() {
+        let mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
+        let before = selected_ids.len();
+        let expanded = expand_indirect_selection(
+            selected_ids,
+            &state.resolver_state.nodes,
+            &command_eligible,
+            mode,
+        );
+        if expanded.len() > before {
+            info!(
+                added = expanded.len() - before,
+                mode = ?mode,
+                "indirect selection added tests for the selected nodes"
+            );
+        }
+        expanded
+    } else {
+        selected_ids
+    };
 
     // Retry-from-failure: narrow the selection to nodes that did not succeed
     // in a previous run. Skipped nodes are included because they were blocked

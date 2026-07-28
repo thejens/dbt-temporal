@@ -131,10 +131,36 @@ An unevaluable method contributes an empty match set. Alone that surfaces as
 Both produce a green run with the wrong node set, so the planner fails fast
 instead.
 
-## `--indirect-selection` and `selectors.yml`
+## `indirect_selection`
 
-Neither is supported. dbt's `--indirect-selection` modes (`eager`, `cautious`,
-`buildable`, `empty`) govern how tests are pulled in alongside selected models;
-dbt-temporal always behaves as `eager` and additionally injects its own test
-gates (see the `architecture-invariants` notes). Named selectors from
-`selectors.yml` are not read — pass the expanded selector string instead.
+Supported, and matching dbt's semantics. When `select` or `exclude` narrows a
+run, the tests hanging off the selected nodes are pulled in afterwards — the
+selector never names them.
+
+| mode | a test is included when… |
+|---|---|
+| `eager` (default) | any of its parents is selected |
+| `cautious` | every parent is selected |
+| `buildable` | every parent is selected or is an ancestor of the selection |
+| `empty` | never — tests must be named explicitly |
+
+```json
+{"command": "build", "select": "my_model", "indirect_selection": "cautious"}
+```
+
+An unrecognised value is rejected at plan time rather than silently falling
+back, because the mode changes which tests run.
+
+Indirect selection only adds tests and unit tests — it never pulls in a model
+you did not select. A unit test is judged by the model it tests, not by the
+nodes named in its fixtures.
+
+**Behavior change:** before this was implemented dbt-temporal effectively
+behaved as `empty`, so `build --select my_model` ran the model and skipped its
+tests. The default is now `eager`, matching dbt, and such a run executes more
+nodes than it used to. Pass `"indirect_selection": "empty"` for the old
+behavior.
+
+## `selectors.yml`
+
+Named selectors are not read — pass the expanded selector string instead.

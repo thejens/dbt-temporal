@@ -5,6 +5,7 @@ mod catalog;
 pub mod dag;
 pub mod execute_node;
 pub mod heartbeat;
+pub mod indirect;
 pub mod node_helpers;
 pub mod node_serialization;
 pub mod node_telemetry;

@@ -20,6 +20,11 @@ pub struct DbtRunInput {
     pub select: Option<String>,
     /// --exclude filter
     pub exclude: Option<String>,
+    /// `--indirect-selection`: how far to pull in tests hanging off the
+    /// selected nodes. `eager` (dbt's default), `cautious`, `buildable`, or
+    /// `empty`. Only meaningful alongside `select`/`exclude`.
+    #[serde(default)]
+    pub indirect_selection: Option<String>,
     /// --vars overrides
     #[serde(default)]
     pub vars: BTreeMap<String, serde_json::Value>,
@@ -457,6 +462,7 @@ mod tests {
     fn dbt_run_input_json_round_trip() -> anyhow::Result<()> {
         let input = DbtRunInput {
             project: Some("waffle".into()),
+            indirect_selection: None,
             command: "run".into(),
             select: Some("+stg_customers".into()),
             exclude: None,
@@ -529,6 +535,7 @@ mod tests {
     fn command_memo_from_dbt_run_input() {
         let input = DbtRunInput {
             project: Some("proj".into()),
+            indirect_selection: None,
             command: "build".into(),
             select: Some("tag:nightly".into()),
             exclude: Some("test_*".into()),

@@ -239,7 +239,37 @@ volumes:
 
 Two things can change: **the worker binary** and **the dbt model files**.
 
-**Binary changes**: rebuild the Docker image and roll out as normal.
+**Binary changes**: rebuild the Docker image and roll out as normal — but see
+the determinism note below if the change touches `src/workflow/`.
+
+### Workflow changes and in-flight runs
+
+A Temporal workflow is replayed against its recorded history. `dbt_run` carries
+no `patched()` / `deprecate_patch()` version markers, so any change to the
+*shape* of the workflow — the order of activities, adding or removing a phase,
+what gets scheduled per level — makes an in-flight run fail on replay with a
+non-determinism error once it lands on a worker running the new binary. Changes
+confined to activity bodies (`src/activities/`) are safe: activities are not
+replayed.
+
+Two ways to stay safe:
+
+1. **Set `TEMPORAL_DEPLOYMENT_NAME`** (recommended). This enables Temporal's
+   worker deployment versioning, and dbt-temporal declares `Pinned` behavior:
+   an in-flight run finishes on the worker version that started it, and only
+   new runs pick up the new version. A dbt run is finite, so pinned executions
+   drain on their own — no manual coordination.
+
+2. **Drain before deploying.** Without a deployment name the worker is
+   unversioned, so any live run can be picked up by a new-version worker. Stop
+   starting new runs, wait for in-flight ones to finish, then roll out:
+
+   ```bash
+   temporal workflow list --query 'WorkflowType="dbt_run" AND ExecutionStatus="Running"'
+   ```
+
+   A wide `build` can run for hours, so option 1 is usually the better answer
+   for anything but a hand-managed deployment.
 
 **Model file changes** — two strategies:
 

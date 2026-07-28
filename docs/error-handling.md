@@ -76,8 +76,36 @@ resolves the config, so it necessarily runs under the built-in default.
 
 Each node costs roughly three history events, plus one per retry and per memo
 upsert. Temporal warns around 10,240 events and hard-fails at 51,200, so a wide
-`build` over a large project can hit the ceiling mid-DAG. At each level boundary
-the workflow checks Temporal's own `continue_as_new_suggested` signal and logs a
-warning naming the current history length when it trips. The run is not split
-automatically — narrow it with `--select`, or split the project across
-workflows.
+`build` over a large project can hit the ceiling mid-DAG.
+
+The workflow handles this itself. At each level boundary it checks Temporal's
+own `continue_as_new_suggested` signal, and when it trips it spills the run's
+state and restarts with a fresh history. The run keeps one identity across
+every segment: the same `invocation_id`, one artifact set, continuous progress
+numbering in the log, and a single `run_results.json` at the end.
+
+What carries across a continuation:
+
+- the **plan** — a continuation never re-plans, so the node set cannot shift
+  mid-run;
+- results, log lines and per-node status accumulated so far;
+- the failed-node set, so downstream skipping keeps working;
+- `effective_env` including anything `pre_run` hooks injected, and any hook
+  errors collected.
+
+`pre_run` and `on-run-start` hooks run **once** for the logical run, in the
+first segment — a continuation does not re-fire their side effects.
+`on-run-end` and the post-run hooks run once, in the final segment.
+
+Continuation is only possible when artifact storage is configured
+(`ARTIFACT_STORE` + `WRITE_ARTIFACTS`): the state is too large to ride in the
+workflow input, which would land back in the history it is trying to escape.
+Without a store the run simply continues and accepts the history growth rather
+than failing — so a very large run on a worker without artifact storage can
+still hit the server limit. Configure a store if you build projects at that
+scale.
+
+Every segment executes at least one level before it may hand off. A run that
+arrives already over the threshold would otherwise continue forever without
+making progress — and since a resumed segment starts partway through the plan,
+that guard counts levels done *in the current segment*, not the level index.

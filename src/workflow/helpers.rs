@@ -673,6 +673,7 @@ mod tests {
         let input = DbtRunInput {
             project: None,
             indirect_selection: None,
+            resume_from: None,
             command: "build".into(),
             select: None,
             exclude: None,
@@ -700,6 +701,7 @@ mod tests {
         let input = DbtRunInput {
             project: Some("waffle".into()),
             indirect_selection: None,
+            resume_from: None,
             command: "compile".into(),
             select: Some("+stg_customers".into()),
             exclude: None,
@@ -734,6 +736,7 @@ mod tests {
         let input = DbtRunInput {
             project: None,
             indirect_selection: None,
+            resume_from: None,
             command: "run".into(),
             select: None,
             exclude: None,

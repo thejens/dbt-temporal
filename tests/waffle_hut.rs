@@ -25,6 +25,7 @@ mod waffle_hut {
 
     mod artifacts;
     mod basic;
+    mod continue_as_new;
     mod env_isolation;
     mod env_vars;
     mod failure;

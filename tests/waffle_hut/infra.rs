@@ -86,6 +86,14 @@ ON CONFLICT DO NOTHING;
 // All tests share a single Temporal dev server and a single Postgres
 // testcontainer. Each test gets a unique task queue for isolation.
 
+/// History event count after which the dev server suggests continue-as-new.
+///
+/// Deliberately far below anything a real run would use: the point is to reach
+/// the handover inside a five-model fixture, not to model a realistic budget.
+/// Every segment still executes at least one level, so a low value costs extra
+/// segments rather than progress.
+pub const SUGGEST_CONTINUE_AFTER_EVENTS: u32 = 10;
+
 pub struct SharedInfra {
     pub temporal_addr: String,
     pub pg_host: String,
@@ -175,6 +183,21 @@ pub fn shared_infra() -> &'static SharedInfra {
                         "DbtStatus=Keyword".to_string(),
                         "--search-attribute".to_string(),
                         "env=Keyword".to_string(),
+                        // Make continue-as-new reachable in a test-sized run.
+                        // The server sets `continue_as_new_suggested` once a
+                        // history passes this many events; the default (4096)
+                        // is far beyond anything this fixture produces.
+                        //
+                        // Only runs with `write_artifacts` enabled can act on
+                        // the suggestion — there is nowhere else to spill state
+                        // — so this changes behaviour for the artifact tests
+                        // alone and leaves the rest of the suite untouched.
+                        //
+                        // The key must match the server's setting name exactly;
+                        // an unrecognised key is ignored without complaint, and
+                        // the only symptom is a run that never hands over.
+                        "--dynamic-config-value".to_string(),
+                        format!("limit.historyCount.suggestContinueAsNew={SUGGEST_CONTINUE_AFTER_EVENTS}"),
                     ])
                     .build();
                 let temporal_server = config
@@ -493,6 +516,7 @@ pub fn make_input(
     DbtRunInput {
         project: None,
         indirect_selection: None,
+        resume_from: None,
         command: command.to_string(),
         select: select.map(String::from),
         exclude: exclude.map(String::from),
@@ -518,6 +542,7 @@ pub fn make_input_with_env(
     DbtRunInput {
         project: project.map(String::from),
         indirect_selection: None,
+        resume_from: None,
         command: command.to_string(),
         select: None,
         exclude: None,
@@ -773,7 +798,6 @@ pub async fn run_dbt_workflow_expect_failure(
         .await
         .context("starting workflow")?;
 
-    let run_id = handle.run_id().unwrap_or_default().to_string();
     let result = handle.get_result(WorkflowGetResultOptions::default()).await;
 
     match &result {
@@ -782,7 +806,11 @@ pub async fn run_dbt_workflow_expect_failure(
         Err(other) => anyhow::bail!("expected workflow to fail, got: {other:?}"),
     }
 
-    let desc = describe_workflow(client, &workflow_id, &run_id).await?;
+    // Describe the *latest* run rather than the one that started: a run that
+    // continued as new leaves its predecessor's memo frozen at the handover,
+    // showing later nodes still `Pending`. An empty run id resolves to the end
+    // of the chain, which is where the finished run's status lives.
+    let desc = describe_workflow(client, &workflow_id, "").await?;
     let memo = desc
         .workflow_execution_info
         .as_ref()

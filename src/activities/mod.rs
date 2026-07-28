@@ -13,6 +13,7 @@ pub mod plan;
 pub mod project_hooks;
 pub mod render_env;
 pub mod retry;
+pub mod segment_state;
 pub mod selectors;
 pub mod store_artifacts;
 
@@ -29,8 +30,9 @@ use crate::config::{
 };
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionInput, NodeExecutionResult, ProjectHooksInput,
-    ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
+    DbtRunInput, ExecutionPlan, LoadSegmentStateInput, NodeExecutionInput, NodeExecutionResult,
+    ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig, RunSegmentState,
+    SaveSegmentStateInput, StoreArtifactsInput, StoreArtifactsOutput,
 };
 
 /// Shared state for all dbt activities, replacing the old `app_data()` DI pattern.
@@ -114,6 +116,31 @@ impl DbtActivities {
     ) -> Result<ResolvedProjectConfig, ActivityError> {
         crate::hooks::resolve_config_impl(&self.registry, input)
             .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
+    }
+
+    /// Spill run state so a continue-as-new segment can hand off. Permanent on
+    /// failure except for the object-store write, which tags itself retryable.
+    #[activity(name = "save_segment_state")]
+    pub async fn save_segment_state(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: SaveSegmentStateInput,
+    ) -> Result<String, ActivityError> {
+        segment_state::save_segment_state_inner(&self, input)
+            .await
+            .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))
+    }
+
+    /// Restore the previous segment's state after continue-as-new.
+    #[activity(name = "load_segment_state")]
+    pub async fn load_segment_state(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: LoadSegmentStateInput,
+    ) -> Result<RunSegmentState, ActivityError> {
+        segment_state::load_segment_state_inner(&self, input)
+            .await
+            .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))
     }
 
     #[activity(name = "run_project_hooks")]

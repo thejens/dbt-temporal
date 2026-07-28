@@ -320,6 +320,7 @@ pub fn make_input(
     DbtRunInput {
         project: None,
         indirect_selection: None,
+        resume_from: None,
         command: command.to_string(),
         select: select.map(String::from),
         exclude: exclude.map(String::from),

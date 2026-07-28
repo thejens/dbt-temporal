@@ -522,6 +522,7 @@ mod tests {
             input: crate::types::DbtRunInput {
                 project: None,
                 indirect_selection: None,
+                resume_from: None,
                 command: "build".to_string(),
                 select: None,
                 exclude: None,

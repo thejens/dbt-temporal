@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::hooks::HooksConfig;
+use super::hooks::{HookError, HooksConfig};
 
 fn default_command() -> String {
     "build".to_string()
@@ -69,6 +69,75 @@ pub struct DbtRunInput {
     /// `defer_manifest_ref`.
     #[serde(default)]
     pub state_manifest_ref: Option<String>,
+    /// Set only by continue-as-new, never by a caller. Points at the state the
+    /// previous segment of this run spilled to the artifact store.
+    ///
+    /// A dbt run can outgrow Temporal's per-workflow history limit (~51k
+    /// events; roughly three per node plus retries and memo writes). When the
+    /// server signals `continue_as_new_suggested`, the level loop stops at the
+    /// next boundary and the run restarts from here with a fresh history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_from: Option<RunResumeState>,
+}
+
+/// Where a continued run picks up.
+///
+/// Deliberately small: it travels in the continuation's workflow input, which
+/// lands in the new run's history. The bulky part (plan, accumulated results)
+/// lives in the artifact store behind `state_ref`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResumeState {
+    /// The original run's invocation id, so artifacts and search attributes
+    /// stay keyed to one logical run across every segment.
+    pub invocation_id: String,
+    /// Artifact-store path holding the previous segment's `RunSegmentState`.
+    pub state_ref: String,
+    /// Index of the first level the continued run should execute.
+    pub next_level: usize,
+    /// 1 for the first continuation, incrementing after that. Reported in the
+    /// run log so a multi-segment run is legible in the Temporal UI.
+    pub segment: u32,
+}
+
+/// Input to `save_segment_state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSegmentStateInput {
+    pub invocation_id: String,
+    pub state: RunSegmentState,
+}
+
+/// Input to `load_segment_state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadSegmentStateInput {
+    pub state_ref: String,
+}
+
+/// Everything a run segment hands to its successor.
+///
+/// Stored as JSON in the artifact store rather than passed inline: the plan
+/// alone can reach the manifest-inlining threshold, and accumulated results
+/// grow with every node executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSegmentState {
+    /// The plan, carried forward so a continuation never re-plans. Re-planning
+    /// could otherwise pick up a different node set mid-run.
+    pub plan: ExecutionPlan,
+    pub all_results: Vec<NodeExecutionResult>,
+    pub log_lines: Vec<String>,
+    pub node_status: NodeStatusTree,
+    pub failed_nodes: Vec<String>,
+    pub had_failure: bool,
+    /// Resolved after pre_run hooks ran, so the continuation inherits any
+    /// `extra_env` they injected without re-running them.
+    pub effective_env: BTreeMap<String, String>,
+    pub hook_errors: Vec<HookError>,
+    /// Node count across the whole run, not just this segment — the progress
+    /// lines stay continuous across a continuation.
+    pub total_nodes: usize,
+    /// Nodes already counted in the progress line numbering.
+    pub node_counter: usize,
+    /// First level the successor should execute.
+    pub next_level: usize,
 }
 
 /// Output of the plan_project activity.
@@ -311,7 +380,7 @@ pub struct DbtRunOutput {
     pub log_path: Option<String>,
     /// Errors from lifecycle hooks that used `on_error: warn`.
     #[serde(default)]
-    pub hook_errors: Vec<super::hooks::HookError>,
+    pub hook_errors: Vec<HookError>,
 }
 
 // --- Memo types (stored in Temporal workflow memo for observability) ---
@@ -463,6 +532,7 @@ mod tests {
         let input = DbtRunInput {
             project: Some("waffle".into()),
             indirect_selection: None,
+            resume_from: None,
             command: "run".into(),
             select: Some("+stg_customers".into()),
             exclude: None,
@@ -536,6 +606,7 @@ mod tests {
         let input = DbtRunInput {
             project: Some("proj".into()),
             indirect_selection: None,
+            resume_from: None,
             command: "build".into(),
             select: Some("tag:nightly".into()),
             exclude: Some("test_*".into()),

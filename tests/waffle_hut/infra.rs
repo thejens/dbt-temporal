@@ -798,7 +798,6 @@ pub async fn run_dbt_workflow_expect_failure(
         .await
         .context("starting workflow")?;
 
-    let run_id = handle.run_id().unwrap_or_default().to_string();
     let result = handle.get_result(WorkflowGetResultOptions::default()).await;
 
     match &result {
@@ -807,7 +806,11 @@ pub async fn run_dbt_workflow_expect_failure(
         Err(other) => anyhow::bail!("expected workflow to fail, got: {other:?}"),
     }
 
-    let desc = describe_workflow(client, &workflow_id, &run_id).await?;
+    // Describe the *latest* run rather than the one that started: a run that
+    // continued as new leaves its predecessor's memo frozen at the handover,
+    // showing later nodes still `Pending`. An empty run id resolves to the end
+    // of the chain, which is where the finished run's status lives.
+    let desc = describe_workflow(client, &workflow_id, "").await?;
     let memo = desc
         .workflow_execution_info
         .as_ref()

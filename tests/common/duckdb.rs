@@ -223,6 +223,25 @@ impl Harness {
             .expect("project registered")
     }
 
+    /// Read one value back out of the warehouse, rendered as a string.
+    ///
+    /// For assertions that a node produced the *right data*, not merely that it
+    /// reported success — a materialization can succeed on SQL that quietly
+    /// computed the wrong thing.
+    pub fn query_scalar(&self, sql: &str) -> String {
+        let cts = CancellationTokenSource::new();
+        let engine = &self.state().adapter_engine;
+        let mut conn = engine
+            .new_connection(None, None)
+            .expect("open duckdb connection");
+        let batch = engine
+            .execute(None, conn.as_mut(), &QueryCtx::new("assert"), sql, cts.token())
+            .unwrap_or_else(|e| panic!("query failed: {sql}: {e:?}"));
+        assert!(batch.num_rows() > 0, "query returned no rows: {sql}");
+        arrow_cast::display::array_value_to_string(batch.column(0), 0)
+            .expect("rendering the first column")
+    }
+
     /// Execute one model by name, returning the node result or a classified error.
     pub async fn run(&self, model: &str) -> Result<NodeExecutionResult, anyhow::Error> {
         self.run_uid(&format!("model.{PROJECT}.{model}")).await

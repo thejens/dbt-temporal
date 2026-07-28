@@ -105,7 +105,7 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 
 All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
 
-dbt Core v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres and BigQuery accept, but DuckDB has no equivalent override and will fail on the DDL.
+dbt Core v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres, Snowflake, BigQuery and Databricks accept. Adapters without it (DuckDB, for one) need a project-level `<adapter>__scalar_function_sql` override, the same dispatch hook dbt uses everywhere else.
 
 Exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
 

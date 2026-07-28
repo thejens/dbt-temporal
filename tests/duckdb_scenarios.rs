@@ -467,21 +467,17 @@ async fn full_refresh_rebuilds_an_existing_incremental_model() {
 
 // --- dbt Core v2 function nodes ---
 
-/// Functions are scheduled and dispatched like any other node — the whole
-/// dbt-temporal path (plan → materialization lookup → render → warehouse)
-/// works. What DuckDB lacks is the SQL: `default__scalar_function_create`
-/// emits `CREATE OR REPLACE FUNCTION … RETURNS …`, which DuckDB does not
-/// accept (it uses `CREATE MACRO`), and dbt-fusion ships no
-/// `duckdb__scalar_function_sql` override.
+/// A DuckDB project with one function and a model that calls it.
 ///
-/// This pins that boundary: reaching a *warehouse syntax* error proves
-/// everything upstream of the adapter worked. Successful creation is covered
-/// against Postgres in `tests/waffle_hut/basic.rs`.
-#[tokio::test]
-async fn function_nodes_reach_the_warehouse_even_where_the_adapter_lacks_the_syntax() {
-    let harness = Harness::build_files(&[
-        ("models/m.sql", "select 1 as id"),
-        ("functions/add_one.sql", "select x + 1\n"),
+/// DuckDB has no `CREATE FUNCTION`, so the project supplies the
+/// `duckdb__scalar_function_sql` override dbt-fusion does not ship — the same
+/// adapter-dispatch hook a real DuckDB user would write. It emits
+/// `CREATE MACRO`, which means the function body has to arrive through
+/// `model.compiled_code`: an empty body yields `AS ()` and a parse error rather
+/// than a silently wrong result.
+fn function_project() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("functions/add_one.sql", "x + 1\n"),
         (
             "functions/schema.yml",
             "version: 2\n\
@@ -493,8 +489,27 @@ async fn function_nodes_reach_the_warehouse_even_where_the_adapter_lacks_the_syn
              \x20     - name: x\n\
              \x20       data_type: int\n",
         ),
-    ])
-    .await;
+        (
+            "macros/duckdb_functions.sql",
+            "{% macro duckdb__scalar_function_sql(target_relation) %}\n\
+             \x20   {%- set names = [] -%}\n\
+             \x20   {%- for arg in model.arguments -%}{%- do names.append(arg.name) -%}{%- endfor -%}\n\
+             \x20   CREATE OR REPLACE MACRO {{ target_relation.identifier }} ({{ names | join(', ') }})\n\
+             \x20   AS ({{ model.compiled_code }})\n\
+             {% endmacro %}\n",
+        ),
+        ("models/uses_fn.sql", "select add_one(41) as answer"),
+    ]
+}
+
+/// The regression this guards: `model.compiled_code` is not a value we can put
+/// in the context — the `model` object reads it off disk, from a path that
+/// nests under the package name. Writing compiled SQL anywhere else leaves the
+/// attribute empty, and only the materializations that use it (function DDL,
+/// not the model ones) notice.
+#[tokio::test]
+async fn function_bodies_reach_the_warehouse_through_model_compiled_code() {
+    let harness = Harness::build_files(&function_project()).await;
 
     // The planner schedules it.
     let input: dbt_temporal::types::DbtRunInput =
@@ -506,11 +521,18 @@ async fn function_nodes_reach_the_warehouse_even_where_the_adapter_lacks_the_syn
         "build must schedule function nodes, got {planned:?}"
     );
 
-    // And execution gets as far as the warehouse rejecting DuckDB-invalid DDL.
-    let err = harness.run_err_uid("function.spike.add_one").await;
-    let msg = err.to_string();
-    assert!(
-        msg.contains("RETURNS"),
-        "should fail on the adapter's function DDL, not before it: {msg}"
+    let created = harness
+        .run_uid("function.spike.add_one")
+        .await
+        .expect("creating the function should succeed");
+    assert_eq!(created.status, dbt_temporal::types::NodeStatus::Success, "{created:?}");
+
+    // The proof that the body survived: a model calling the function computes
+    // 41 + 1. A missing body could not produce this.
+    harness.run_ok("uses_fn").await;
+    assert_eq!(
+        harness.query_scalar("select answer from uses_fn"),
+        "42",
+        "the function body must have been compiled into the macro"
     );
 }

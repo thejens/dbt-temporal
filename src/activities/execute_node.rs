@@ -161,6 +161,23 @@ fn inject_result_store(context: &mut BTreeMap<String, minijinja::Value>, store: 
     );
 }
 
+/// Where dbt-fusion looks for a node's compiled SQL.
+///
+/// `model.compiled_code` is not a value we can set — the `model` object in the
+/// node context is a `LazyModelWrapper` that reads this file on every access.
+/// Materializations that go through the attribute rather than the top-level
+/// `compiled_code` variable (function DDL is one) therefore render an empty
+/// body unless the file is exactly here. The layout is fusion's
+/// (`out_dir/compiled/<package>/<original_file_path>`, with per-resource-type
+/// quirks for snapshots and unit tests), so ask fusion rather than rebuild it.
+fn compiled_sql_path(
+    node: &dyn dbt_schemas::schemas::nodes::InternalDbtNode,
+    in_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    node.get_node_path_abs(dbt_schemas::schemas::nodes::NodePathKind::Compiled, in_dir, out_dir)
+}
+
 /// Per-activity scratch space for one node execution.
 ///
 /// Activities must never share `target/`: dbt-fusion writes compiled SQL and
@@ -179,8 +196,7 @@ struct ActivityWorkspace {
 impl ActivityWorkspace {
     fn new(
         state: &crate::worker_state::WorkerState,
-        node_path: &std::path::Path,
-        rt: NodeType,
+        node: &dyn dbt_schemas::schemas::nodes::InternalDbtNode,
         invocation_id: &str,
     ) -> Result<Self, anyhow::Error> {
         let temp_dir = tempfile::tempdir().context("creating temp dir for activity")?;
@@ -190,14 +206,15 @@ impl ActivityWorkspace {
         std::fs::create_dir_all(&ephemeral_dir)
             .with_context(|| format!("creating ephemeral dir {}", ephemeral_dir.display()))?;
 
+        let node_path = node.common().path.clone();
         let cache_key = node_path.to_string_lossy().to_string();
         write_cached_sql(
             &state.compiled_sql_cache,
             &cache_key,
-            &out_dir.join("compiled").join(node_path),
+            &compiled_sql_path(node, &state.io_args.in_dir, &out_dir),
         )?;
-        if rt == NodeType::Snapshot {
-            write_cached_sql(&state.snapshot_sql_cache, &cache_key, &out_dir.join(node_path))?;
+        if node.resource_type() == NodeType::Snapshot {
+            write_cached_sql(&state.snapshot_sql_cache, &cache_key, &out_dir.join(&node_path))?;
         }
 
         Ok(Self {
@@ -505,7 +522,7 @@ pub async fn execute_node_inner(
     let sql_header = get_sql_header(&state.resolver_state.nodes, unique_id, rt);
 
     let node_path = common.path.to_string_lossy().to_string();
-    let workspace = ActivityWorkspace::new(state, &common.path, rt, &input.invocation_id)?;
+    let workspace = ActivityWorkspace::new(state, node, &input.invocation_id)?;
     // Destructure so the TempDir guard stays owned by this scope — dropping
     // `workspace` early would delete the directory `io_args` points at.
     let ActivityWorkspace {
@@ -751,7 +768,7 @@ pub async fn execute_node_inner(
 
             // Write compiled SQL to the temp dir so model.compiled_code / model.compiled_sql
             // resolve correctly when accessed by the materialization template.
-            let dest = io_args.out_dir.join("compiled").join(&common.path);
+            let dest = compiled_sql_path(node, &io_args.in_dir, &io_args.out_dir);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     DbtTemporalError::Configuration(format!(

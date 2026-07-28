@@ -377,6 +377,35 @@ async fn test_dbt_test() -> Result<()> {
                 assert_eq!(r.status, NodeStatus::Success, "{} should pass", r.unique_id);
             }
 
+            // dbt Core v2 function nodes: `build` must schedule them and the
+            // scalar UDF must actually be created in the warehouse. This is the
+            // end-to-end check that the whole function path works against a
+            // real adapter — DuckDB has no CREATE FUNCTION support, so it
+            // cannot cover this.
+            let function_results: Vec<_> = build
+                .output
+                .node_results
+                .iter()
+                .filter(|r| r.unique_id.starts_with("function."))
+                .collect();
+            assert_eq!(
+                function_results.len(),
+                1,
+                "build should schedule the project's function, got {:?}",
+                build
+                    .output
+                    .node_results
+                    .iter()
+                    .map(|r| &r.unique_id)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                function_results[0].status,
+                NodeStatus::Success,
+                "{} should build: {:?}",
+                function_results[0].unique_id,
+                function_results[0].message
+            );
             Ok(())
         })
         .await;

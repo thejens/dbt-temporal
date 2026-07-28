@@ -156,10 +156,13 @@ fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'
 ///
 /// dbt Core v2 resolves exposures, metrics, saved queries and semantic models
 /// into the same node graph as models, but dbt-temporal has no execution path
-/// for them. (Functions *are* executed — see `command_includes_node_type`.) Silently dropping them makes a run look complete
-/// when part of the project was never built, so say so once per plan. Only
-/// graph-building commands warn — the single-resource commands (`run`, `test`,
-/// `seed`, …) legitimately ignore everything outside their own type.
+/// for them. Silently dropping them makes a run look complete when part of the
+/// project was never built, so say so once per plan. Only graph-building
+/// commands warn — the single-resource commands (`run`, `test`, `seed`, …)
+/// legitimately ignore everything outside their own type.
+///
+/// Functions are absent from this list because they *are* executed — see
+/// `command_includes_node_type`.
 fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
     if !matches!(command, "build" | "list") {
         return;

@@ -98,19 +98,46 @@ async fn full_refresh_is_visible_under_both_spellings() {
 }
 
 /// Wrapping `flags` must not hide the keys the worker computed, nor the
-/// `flags.get(...)` method adapter macros call.
+/// `flags.get(...)` method adapter macros call. The `get()` of a key that is
+/// *not* overridden has to reach the wrapped object, not stop at the overlay.
 #[tokio::test]
 async fn overlaying_flags_preserves_the_rest_of_the_object() {
     let compiled = compiled_with(
         "other_flags",
         "select {% if flags.INTROSPECT %}1{% else %}0{% endif %} as introspect, \
-         {% if flags.get('full_refresh') %}1{% else %}0{% endif %} as via_get",
+         {% if flags.get('full_refresh') %}1{% else %}0{% endif %} as via_get, \
+         {% if flags.get('INTROSPECT') %}1{% else %}0{% endif %} as delegated_get",
         serde_json::json!({}),
         true,
     )
     .await;
     assert!(compiled.contains("1 as introspect"), "untouched flag survives: {compiled}");
     assert!(compiled.contains("1 as via_get"), "get() sees the override: {compiled}");
+    assert!(
+        compiled.contains("1 as delegated_get"),
+        "get() of a non-overridden key must delegate to the wrapped flags: {compiled}"
+    );
+}
+
+/// The per-workflow `env_var()` override has to reach templates, not just the
+/// profile — parallel workflows rely on it for isolation, and it is replaced
+/// per activity rather than via process env.
+#[tokio::test]
+async fn workflow_env_overrides_reach_env_var_in_model_sql() {
+    let harness =
+        Harness::build(&[("uses_env", "select '{{ env_var('RUN_LABEL', 'unset') }}' as label")])
+            .await;
+
+    let overridden = harness
+        .run_uid_with_env(
+            &format!("model.{}.uses_env", common::duckdb::PROJECT),
+            &std::collections::BTreeMap::from([("RUN_LABEL".to_string(), "nightly".to_string())]),
+        )
+        .await
+        .expect("model should succeed")
+        .compiled_code
+        .expect("compiled sql");
+    assert!(overridden.contains("'nightly' as label"), "env override applied: {overridden}");
 }
 
 // The natural end-to-end case — build an incremental model, then rebuild it

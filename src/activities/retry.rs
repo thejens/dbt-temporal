@@ -143,6 +143,30 @@ mod tests {
         );
     }
 
+    /// `classify` is what every activity boundary actually calls; the pieces
+    /// below it are tested individually, this covers them wired together.
+    #[test]
+    fn classify_maps_retryability_onto_the_activity_error() {
+        let retryable =
+            classify(anyhow::anyhow!("connection reset"), &[], Unclassified::RetryAsAdapter);
+        let rendered = format!("{retryable:?}");
+        assert!(
+            rendered.contains("non_retryable: false"),
+            "transient failure should stay retryable: {rendered}"
+        );
+
+        let permanent = classify(
+            DbtTemporalError::Compilation("bad ref".to_string()).into(),
+            &[],
+            Unclassified::RetryAsAdapter,
+        );
+        let rendered = format!("{permanent:?}");
+        assert!(
+            rendered.contains("non_retryable: true"),
+            "compilation failure must not retry: {rendered}"
+        );
+    }
+
     #[test]
     fn user_patterns_demote_retryable_errors_only() {
         let patterns = crate::error::compile_error_patterns(&["quota exceeded".to_string()]);

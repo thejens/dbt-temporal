@@ -42,6 +42,16 @@ pub struct LevelExecutionOutcome {
     pub had_failure: bool,
     pub was_cancelled: bool,
     pub total_nodes: usize,
+    /// Nodes numbered so far, so progress lines stay continuous if the run
+    /// continues as new.
+    pub node_counter: usize,
+    /// Set when the loop stopped early because Temporal signalled that the
+    /// history is getting large. Holds the level the successor should start
+    /// from; `None` means the run finished every level.
+    pub continue_at_level: Option<usize>,
+    /// Nodes that failed, carried across a continuation so downstream skipping
+    /// keeps working in the next segment.
+    pub failed_nodes: BTreeSet<String>,
 }
 
 /// Mutable accumulators + read-only references for one level's processing.
@@ -78,19 +88,28 @@ pub async fn execute_levels(
     retry_config: &RetryConfig,
     timeouts: &TimeoutConfig,
     effective_env: &BTreeMap<String, String>,
+    resume: ResumePoint,
 ) -> Result<LevelExecutionOutcome, WorkflowTermination> {
-    let mut node_status = build_node_status_tree(plan);
+    let mut node_status = resume.node_status;
     upsert_node_status(ctx, &node_status)?;
 
     let total_nodes: usize = plan.levels.iter().map(Vec::len).sum();
-    let mut log_lines = build_log_header(plan);
-    let mut all_results: Vec<NodeExecutionResult> = Vec::new();
-    let mut failed_nodes: BTreeSet<String> = BTreeSet::new();
-    let mut had_failure = false;
+    let mut log_lines = resume.log_lines;
+    let mut all_results = resume.all_results;
+    let mut failed_nodes = resume.failed_nodes;
+    let mut had_failure = resume.had_failure;
     let mut was_cancelled = false;
-    let mut node_counter = 0usize;
+    let mut node_counter = resume.node_counter;
+    let mut continue_at_level = None;
 
-    for (level_idx, level) in plan.levels.iter().enumerate() {
+    for (level_idx, level) in plan.levels.iter().enumerate().skip(resume.start_level) {
+        // Stop *between* levels only: a level's activities are already
+        // scheduled and awaited as a unit, and abandoning them mid-flight
+        // would lose results the history has already recorded.
+        if should_continue_as_new(level_idx, resume.can_continue, ctx.continue_as_new_suggested()) {
+            continue_at_level = Some(level_idx);
+            break;
+        }
         let mut state = LevelState {
             plan,
             input,
@@ -116,7 +135,56 @@ pub async fn execute_levels(
         had_failure,
         was_cancelled,
         total_nodes,
+        node_counter,
+        continue_at_level,
+        failed_nodes,
     })
+}
+
+/// Where the level loop starts and what it starts with.
+///
+/// A fresh run passes `ResumePoint::fresh`; a continued one rebuilds this from
+/// the state its predecessor spilled.
+pub struct ResumePoint {
+    pub start_level: usize,
+    pub log_lines: Vec<String>,
+    pub all_results: Vec<NodeExecutionResult>,
+    pub node_status: NodeStatusTree,
+    pub failed_nodes: BTreeSet<String>,
+    pub had_failure: bool,
+    pub node_counter: usize,
+    /// Whether continuing as new is possible at all. False when the worker has
+    /// no artifact store to spill state to, in which case the run pushes on and
+    /// accepts the history growth rather than failing.
+    pub can_continue: bool,
+}
+
+impl ResumePoint {
+    /// Starting state for a run that has not continued.
+    pub fn fresh(plan: &ExecutionPlan, can_continue: bool) -> Self {
+        Self {
+            start_level: 0,
+            log_lines: build_log_header(plan),
+            all_results: Vec::new(),
+            node_status: build_node_status_tree(plan),
+            failed_nodes: BTreeSet::new(),
+            had_failure: false,
+            node_counter: 0,
+            can_continue,
+        }
+    }
+}
+
+/// Whether to hand the rest of the run to a fresh execution.
+///
+/// Driven by Temporal's own `continue_as_new_suggested`, which the server sets
+/// as history approaches its limits — rather than a node count we would have to
+/// keep in step with event-per-node cost.
+///
+/// Never fires on the first level: a run that is already near the limit before
+/// executing anything would continue forever without making progress.
+const fn should_continue_as_new(level_idx: usize, can_continue: bool, suggested: bool) -> bool {
+    can_continue && level_idx > 0 && suggested
 }
 
 #[allow(clippy::too_many_lines)]
@@ -348,40 +416,7 @@ async fn execute_one_level(
         s.status.tally(state.node_status);
     });
 
-    warn_if_history_is_growing_large(ctx, level_idx, state.plan.levels.len());
-
     Ok(())
-}
-
-/// Surface an oversized workflow history before the server rejects it.
-///
-/// Every node costs roughly three history events (schedule / start / complete),
-/// plus one per retry and per memo upsert. Temporal warns around 10,240 events
-/// and hard-fails at 51,200, so a wide `build` over a large project can walk
-/// into the ceiling with no warning — the run dies mid-DAG and the failure
-/// looks like a Temporal problem rather than a sizing one.
-///
-/// This only reports. Continue-as-new is the real fix but is not safe to apply
-/// blindly here: the level loop carries `all_results` and `log_lines` forward
-/// for `store_artifacts` and `on-run-end`, so a continued run would need those
-/// handed over as input or spilled to the artifact store first.
-fn warn_if_history_is_growing_large(
-    ctx: &WorkflowContext<DbtRunWorkflow>,
-    level_idx: usize,
-    total_levels: usize,
-) {
-    // Replay re-runs this loop; logging then would duplicate every warning.
-    if ctx.is_replaying() || !ctx.continue_as_new_suggested() {
-        return;
-    }
-    tracing::warn!(
-        history_length = ctx.history_length(),
-        completed_levels = level_idx + 1,
-        total_levels,
-        "workflow history is large enough that Temporal suggests continue-as-new; \
-         this run may hit the server's history limit before finishing. Narrow the \
-         run with --select, or split the project across workflows"
-    );
 }
 
 /// Fairness keys are limited to 64 bytes server-side; truncate on a char
@@ -392,7 +427,33 @@ fn truncate_fairness_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_fairness_key;
+    use super::{should_continue_as_new, truncate_fairness_key};
+
+    // --- continue-as-new policy ---
+
+    #[test]
+    fn continues_only_when_the_server_suggests_it() {
+        assert!(should_continue_as_new(3, true, true));
+        assert!(
+            !should_continue_as_new(3, true, false),
+            "never continue while history is comfortable"
+        );
+    }
+
+    /// Without an artifact store there is nowhere to spill state, so the run
+    /// pushes on and accepts the history growth rather than failing.
+    #[test]
+    fn never_continues_without_somewhere_to_spill_state() {
+        assert!(!should_continue_as_new(3, false, true));
+    }
+
+    /// A run already over the threshold before executing anything would
+    /// otherwise continue forever without making progress.
+    #[test]
+    fn never_continues_before_the_first_level_completes() {
+        assert!(!should_continue_as_new(0, true, true));
+        assert!(should_continue_as_new(1, true, true));
+    }
 
     #[test]
     fn fairness_key_short_passes_through() {

@@ -24,9 +24,9 @@ use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
 use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
-    HooksConfig, NodeExecutionResult, NodeStatus, ProjectHookPhase, ProjectHooksInput,
-    ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
-    TimeoutConfig,
+    HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus, ProjectHookPhase,
+    ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig, RunSegmentState,
+    SaveSegmentStateInput, StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -122,6 +122,48 @@ pub fn build_project_hooks_input(
         vars: input.vars.clone(),
         full_refresh: input.full_refresh,
     }
+}
+
+/// Spill run state for a continue-as-new handover, returning its store path.
+pub async fn save_segment_state(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    invocation_id: &str,
+    state: RunSegmentState,
+) -> Result<String, WorkflowTermination> {
+    ctx.start_activity(
+        DbtActivities::save_segment_state,
+        SaveSegmentStateInput {
+            invocation_id: invocation_id.to_string(),
+            state,
+        },
+        ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
+    )
+    .await
+    .map_err(|e| {
+        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+            "save_segment_state activity failed: {e:#}"
+        )))
+    })
+}
+
+/// Restore the state the previous segment spilled.
+pub async fn load_segment_state(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    state_ref: &str,
+) -> Result<RunSegmentState, WorkflowTermination> {
+    ctx.start_activity(
+        DbtActivities::load_segment_state,
+        LoadSegmentStateInput {
+            state_ref: state_ref.to_string(),
+        },
+        ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
+    )
+    .await
+    .map_err(|e| {
+        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+            "load_segment_state activity failed: {e:#}"
+        )))
+    })
 }
 
 /// Build the input for `store_artifacts` from the plan + run accumulators.
@@ -542,6 +584,7 @@ mod tests {
         DbtRunInput {
             project: Some("shop".to_string()),
             indirect_selection: None,
+            resume_from: None,
             command: "build".to_string(),
             select: None,
             exclude: None,

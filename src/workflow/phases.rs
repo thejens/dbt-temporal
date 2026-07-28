@@ -1120,4 +1120,112 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&payloads[0].1.data).unwrap();
         assert_eq!(val, serde_json::json!("failed"));
     }
+
+    // --- project hook activity options ---
+
+    /// Without an explicit policy Temporal retries an activity indefinitely, so
+    /// an opted-in hook must carry the project's bounded one — otherwise
+    /// enabling retries would turn a failing warehouse into an endless loop.
+    #[test]
+    fn an_opted_in_phase_gets_the_projects_bounded_retry_policy() {
+        let retry = RetryConfig {
+            max_attempts: 7,
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let timeouts = TimeoutConfig::default();
+        let opts = hook_activity_options(
+            ProjectHookPhase::OnRunStart,
+            HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry,
+            },
+        );
+        let policy = opts
+            .retry_policy
+            .expect("an opted-in phase must bound its retries");
+        assert_eq!(policy.maximum_attempts, 7);
+    }
+
+    /// The phase that did not opt in reports every failure as non-retryable, so
+    /// it needs no policy — and must not silently acquire one.
+    #[test]
+    fn a_phase_that_did_not_opt_in_gets_no_retry_policy() {
+        let retry = RetryConfig {
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let timeouts = TimeoutConfig::default();
+        let opts = hook_activity_options(
+            ProjectHookPhase::OnRunEnd,
+            HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry,
+            },
+        );
+        assert!(opts.retry_policy.is_none(), "on_run_end did not opt in");
+    }
+
+    /// Timeouts apply either way — opting in changes retries, not deadlines.
+    #[test]
+    fn hook_timeouts_apply_regardless_of_the_opt_in() {
+        let timeouts = TimeoutConfig {
+            hook_secs: 111,
+            hook_heartbeat_secs: 60,
+            ..TimeoutConfig::default()
+        };
+        for on in [true, false] {
+            let retry = RetryConfig {
+                project_hooks: crate::types::ProjectHookRetry {
+                    on_run_start: on,
+                    on_run_end: on,
+                },
+                ..RetryConfig::default()
+            };
+            let opts = hook_activity_options(
+                ProjectHookPhase::OnRunStart,
+                HookPolicy {
+                    timeouts: &timeouts,
+                    retry: &retry,
+                },
+            );
+            assert_eq!(opts.heartbeat_timeout, Some(Duration::from_mins(1)));
+        }
+    }
+
+    /// The input carries the resolved decision, so the activity does not have
+    /// to re-read config on every attempt — and each phase carries its own.
+    #[test]
+    fn the_hooks_input_carries_the_resolved_opt_in_per_phase() {
+        let retry = RetryConfig {
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let plan = empty_plan();
+        let input = empty_input();
+        let env = BTreeMap::new();
+
+        let start = build_project_hooks_input(
+            ProjectHookPhase::OnRunStart,
+            &plan,
+            &input,
+            &env,
+            &[],
+            &retry,
+        );
+        assert!(start.retry_on_error);
+
+        let end =
+            build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &[], &retry);
+        assert!(!end.retry_on_error);
+    }
 }

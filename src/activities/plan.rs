@@ -127,6 +127,15 @@ fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
     }
 }
 
+/// Tag an artifact-store read/write as retryable.
+///
+/// The planner's own failures are permanent (bad selector, missing project),
+/// but its object-store round-trips fail transiently like any network call and
+/// must not sink the run on a single 5xx.
+fn artifact_io_error(e: anyhow::Error) -> anyhow::Error {
+    crate::error::DbtTemporalError::ArtifactStore(e).into()
+}
+
 /// Plan activity inner logic — called from DbtActivities::plan_project.
 #[allow(clippy::too_many_lines)]
 pub async fn plan_project_inner(
@@ -160,10 +169,9 @@ pub async fn plan_project_inner(
                  (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
             )
         })?;
-        let bytes = artifact_store
-            .retrieve(manifest_ref)
-            .await
-            .with_context(|| format!("loading state manifest from {manifest_ref}"))?;
+        let bytes = artifact_store.retrieve(manifest_ref).await.map_err(|e| {
+            artifact_io_error(e.context(format!("loading state manifest from {manifest_ref}")))
+        })?;
         let manifest: serde_json::Value =
             serde_json::from_slice(&bytes).context("parsing state manifest JSON")?;
         Some(super::selectors::StateSelector::from_previous_manifest(
@@ -197,10 +205,9 @@ pub async fn plan_project_inner(
                  (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
             )
         })?;
-        let bytes = artifact_store
-            .retrieve(retry_ref)
-            .await
-            .with_context(|| format!("loading previous run_results from {retry_ref}"))?;
+        let bytes = artifact_store.retrieve(retry_ref).await.map_err(|e| {
+            artifact_io_error(e.context(format!("loading previous run_results from {retry_ref}")))
+        })?;
         let retry_ids = parse_retry_node_ids(&bytes)?;
         let filtered: Vec<String> = selected_ids
             .into_iter()
@@ -271,7 +278,8 @@ pub async fn plan_project_inner(
             })?;
             let path = artifact_store
                 .store(&invocation_id, "manifest.json", manifest_json.as_bytes())
-                .await?;
+                .await
+                .map_err(|e| artifact_io_error(e.context("storing manifest.json")))?;
             (None, Some(path))
         }
     } else {

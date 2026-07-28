@@ -18,12 +18,12 @@ use schema_patch::{
 };
 use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use temporalio_sdk::error::ApplicationFailure;
+
 use tracing::{info, warn};
 use yml_to_value::yml_value_to_minijinja_with_jinja;
 
 use crate::error::DbtTemporalError;
-use crate::project_registry::ProjectRegistry;
+
 use crate::types::{NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
 
 use super::DbtActivities;
@@ -33,6 +33,7 @@ use super::node_helpers::{
     render_materialization,
 };
 use super::node_serialization::{build_agate_table, get_node_config_yml, get_sql_header};
+use super::retry;
 
 /// Execute node activity — outer wrapper that handles errors, cancellation,
 /// and periodic heartbeating.
@@ -62,9 +63,12 @@ pub async fn execute_node_outer(
                     // {:#} prints the whole context chain; the top context
                     // alone routinely hides the actionable cause.
                     tracing::error!(node = %unique_id, error = %format!("{e:#}"), "activity failed");
-                    let dbt_err = downcast_or_wrap_as_adapter(e);
-                    let patterns = registry_non_retryable_patterns(&activities.registry, &project);
-                    Err(classify_for_temporal(&dbt_err, patterns.as_deref().unwrap_or(&[])))
+                    let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
+                    Err(retry::classify(
+                        e,
+                        patterns.as_deref().unwrap_or(&[]),
+                        retry::Unclassified::RetryAsAdapter,
+                    ))
                 }
             }
         }
@@ -78,77 +82,6 @@ pub async fn execute_node_outer(
         // dies. Loses the select! race to the two real branches above.
         never = heartbeat::heartbeat_loop(&ctx) => match never {},
     }
-}
-
-/// Whether to surface an error to Temporal as retryable or not.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RetryDecision {
-    /// Retry within the activity's retry policy.
-    Retry,
-    /// Skip the policy — the error is permanent.
-    NoRetry,
-}
-
-/// Decide whether a `DbtTemporalError` should be surfaced to Temporal as retryable.
-///
-/// Adapter errors are retryable by default unless the user-supplied pattern
-/// list matches the error's display string. All other variants — Compilation,
-/// Configuration, ProjectNotFound, TestFailure — are permanent.
-pub fn decide_retry(
-    err: &DbtTemporalError,
-    non_retryable_patterns: &[regex::Regex],
-) -> RetryDecision {
-    if !err.is_retryable() {
-        return RetryDecision::NoRetry;
-    }
-    if non_retryable_patterns.is_empty() {
-        return RetryDecision::Retry;
-    }
-    let msg = err.to_string();
-    if crate::error::matches_error_patterns(&msg, non_retryable_patterns) {
-        tracing::info!(
-            error = %msg,
-            "adapter error matched non-retryable pattern, suppressing retry"
-        );
-        RetryDecision::NoRetry
-    } else {
-        RetryDecision::Retry
-    }
-}
-
-/// Wrap an `anyhow::Error` as an `ActivityError` whose retry classification
-/// follows from `decide_retry`.
-fn classify_for_temporal(
-    dbt_err: &DbtTemporalError,
-    non_retryable_patterns: &[regex::Regex],
-) -> ActivityError {
-    let source = anyhow::anyhow!("{dbt_err}");
-    match decide_retry(dbt_err, non_retryable_patterns) {
-        RetryDecision::Retry => ActivityError::application(ApplicationFailure::new(source)),
-        RetryDecision::NoRetry => {
-            ActivityError::application(ApplicationFailure::non_retryable(source))
-        }
-    }
-}
-
-/// Try to recover the original `DbtTemporalError` from an `anyhow::Error`,
-/// falling back to wrapping the error as `Adapter` (the retryable default).
-fn downcast_or_wrap_as_adapter(err: anyhow::Error) -> DbtTemporalError {
-    match err.downcast::<DbtTemporalError>() {
-        Ok(d) => d,
-        Err(other) => DbtTemporalError::Adapter(other),
-    }
-}
-
-/// Look up the user-configured non-retryable patterns for a project. Returns
-/// `None` when the project isn't registered (during tests or shutdown) so the
-/// caller can fall back to "all adapter errors retry".
-fn registry_non_retryable_patterns(
-    registry: &Arc<ProjectRegistry>,
-    project: &str,
-) -> Option<Vec<regex::Regex>> {
-    let state = registry.get(Some(project)).ok()?;
-    Some(state.non_retryable_error_patterns.clone())
 }
 
 /// Patch refs in compiled SQL when a per-workflow env override changed the
@@ -1112,7 +1045,12 @@ fn build_success_message(
 mod tests {
     use super::*;
 
+    use crate::activities::retry::{
+        RetryDecision, Unclassified, decide_retry, downcast_or_default,
+        registry_non_retryable_patterns, to_activity_error,
+    };
     use crate::error::compile_error_patterns;
+    use crate::project_registry::ProjectRegistry;
 
     // --- decide_retry ---
 
@@ -1173,7 +1111,7 @@ mod tests {
     fn downcast_or_wrap_recovers_dbt_temporal_error_variant() {
         let original = DbtTemporalError::Compilation("bad ref".into());
         let any: anyhow::Error = anyhow::anyhow!(original);
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         // Compilation must survive the round-trip — without this, retry
         // classification would silently demote Compilation to Adapter (retryable).
         assert!(matches!(recovered, DbtTemporalError::Compilation(_)));
@@ -1187,14 +1125,14 @@ mod tests {
             failures: 1,
         };
         let any: anyhow::Error = anyhow::anyhow!(original);
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         assert!(matches!(recovered, DbtTemporalError::TestFailure { .. }));
     }
 
     #[test]
     fn downcast_or_wrap_falls_back_to_adapter_for_plain_anyhow() {
         let any: anyhow::Error = anyhow::anyhow!("a plain error not from us");
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         // Adapter is the retryable default — keeps us out of false positives
         // for transient warehouse issues that don't carry our typed variant.
         assert!(matches!(recovered, DbtTemporalError::Adapter(_)));
@@ -1476,7 +1414,7 @@ mod tests {
     #[test]
     fn classify_for_temporal_marks_retryable_adapter_error() {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection timeout"));
-        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        let activity_err = to_activity_error(&err, &empty_patterns());
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if !af.is_non_retryable())
         );
@@ -1485,7 +1423,7 @@ mod tests {
     #[test]
     fn classify_for_temporal_marks_compilation_as_non_retryable() {
         let err = DbtTemporalError::Compilation("bad ref".into());
-        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        let activity_err = to_activity_error(&err, &empty_patterns());
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
         );
@@ -1495,7 +1433,7 @@ mod tests {
     fn classify_for_temporal_promotes_pattern_match_to_non_retryable() {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("permission denied for table foo"));
         let patterns = compile_error_patterns(&["permission denied".to_string()]);
-        let activity_err = classify_for_temporal(&err, &patterns);
+        let activity_err = to_activity_error(&err, &patterns);
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
         );

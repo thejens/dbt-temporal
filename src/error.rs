@@ -4,7 +4,7 @@ use std::fmt;
 ///
 /// The variant determines retry behavior:
 /// - `Compilation` / `Configuration` / `ProjectNotFound` → non-retryable
-/// - `Adapter` → retryable (transient warehouse errors)
+/// - `Adapter` / `ArtifactStore` → retryable (transient I/O)
 #[derive(Debug)]
 pub enum DbtTemporalError {
     /// Bad SQL, missing ref, Jinja render failure.
@@ -13,6 +13,11 @@ pub enum DbtTemporalError {
     Configuration(String),
     /// Transient warehouse error (connection timeout, rate limit).
     Adapter(anyhow::Error),
+    /// Transient artifact-store I/O failure — an object-store 5xx, a throttle,
+    /// a dropped connection while reading or writing run artifacts. Distinct
+    /// from `Adapter` because it says nothing about the warehouse, but shares
+    /// its retryability: the same call usually succeeds on a later attempt.
+    ArtifactStore(anyhow::Error),
     /// Worker doesn't have the requested project loaded.
     ProjectNotFound(String),
     /// A dbt test query returned failing rows — non-retryable (data won't change on retry).
@@ -35,8 +40,11 @@ pub enum DbtTemporalError {
 
 impl DbtTemporalError {
     /// Whether this error is retryable by Temporal.
+    ///
+    /// Keep `workflow::helpers::build_retry_policy`'s `non_retryable_error_types`
+    /// in sync with this.
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Adapter(_))
+        matches!(self, Self::Adapter(_) | Self::ArtifactStore(_))
     }
 }
 
@@ -48,6 +56,7 @@ impl fmt::Display for DbtTemporalError {
             // Alternate format prints the full anyhow context chain — the top
             // context alone ("parsing X") routinely hides the actionable cause.
             Self::Adapter(err) => write!(f, "adapter error: {err:#}"),
+            Self::ArtifactStore(err) => write!(f, "artifact store error: {err:#}"),
             Self::ProjectNotFound(msg) => write!(f, "project not found: {msg}"),
             Self::TestFailure {
                 unique_id,
@@ -75,7 +84,7 @@ impl fmt::Display for DbtTemporalError {
 impl std::error::Error for DbtTemporalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Adapter(err) => Some(err.as_ref()),
+            Self::Adapter(err) | Self::ArtifactStore(err) => Some(err.as_ref()),
             Self::Compilation(_)
             | Self::Configuration(_)
             | Self::ProjectNotFound(_)

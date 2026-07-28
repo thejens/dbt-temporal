@@ -336,20 +336,8 @@ async fn continue_run_as_new(
     hook_errors: &[crate::types::HookError],
     next_level: usize,
 ) -> WorkflowResult<DbtRunOutput> {
-    let segment = input.resume_from.as_ref().map_or(1, |r| r.segment + 1);
-    let state = RunSegmentState {
-        plan: plan.clone(),
-        all_results: levels.all_results.clone(),
-        log_lines: levels.log_lines.clone(),
-        node_status: levels.node_status.clone(),
-        failed_nodes: levels.failed_nodes.iter().cloned().collect(),
-        had_failure: levels.had_failure,
-        effective_env: effective_env.clone(),
-        hook_errors: hook_errors.to_vec(),
-        total_nodes: levels.total_nodes,
-        node_counter: levels.node_counter,
-        next_level,
-    };
+    let segment = next_segment_number(input.resume_from.as_ref());
+    let state = build_segment_state(plan, levels, effective_env, hook_errors, next_level);
 
     let state_ref = save_segment_state(ctx, &plan.invocation_id, state).await?;
 
@@ -377,6 +365,41 @@ async fn continue_run_as_new(
         .expect_err("continue_as_new always returns Err"))
 }
 
+/// Segment number for the continuation this run is about to start.
+///
+/// Segments are 1-based from the first continuation, so a run that never
+/// continues has no segment number at all.
+fn next_segment_number(resume: Option<&RunResumeState>) -> u32 {
+    resume.map_or(1, |r| r.segment + 1)
+}
+
+/// Snapshot everything the successor needs.
+///
+/// Split out from `continue_run_as_new` so the handover contents can be tested
+/// without a live workflow context — a field forgotten here silently loses run
+/// state across a continuation.
+fn build_segment_state(
+    plan: &ExecutionPlan,
+    levels: &levels::LevelExecutionOutcome,
+    effective_env: &BTreeMap<String, String>,
+    hook_errors: &[crate::types::HookError],
+    next_level: usize,
+) -> RunSegmentState {
+    RunSegmentState {
+        plan: plan.clone(),
+        all_results: levels.all_results.clone(),
+        log_lines: levels.log_lines.clone(),
+        node_status: levels.node_status.clone(),
+        failed_nodes: levels.failed_nodes.iter().cloned().collect(),
+        had_failure: levels.had_failure,
+        effective_env: effective_env.clone(),
+        hook_errors: hook_errors.to_vec(),
+        total_nodes: levels.total_nodes,
+        node_counter: levels.node_counter,
+        next_level,
+    }
+}
+
 /// Append the CLI-style run summary (pass/error/skip tallies) to the run log.
 fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) {
     let count_status = |s: NodeStatus| levels.all_results.iter().filter(|r| r.status == s).count();
@@ -386,6 +409,119 @@ fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) 
     levels
         .log_lines
         .extend(build_summary_lines(levels.total_nodes, elapsed, pass, error, skip));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod continuation_tests {
+    use super::*;
+    use crate::types::{NodeStatus, NodeStatusTree};
+    use std::collections::BTreeSet;
+
+    fn plan() -> ExecutionPlan {
+        ExecutionPlan {
+            project: "p".to_string(),
+            levels: vec![vec!["model.p.a".to_string()], vec!["model.p.b".to_string()]],
+            nodes: BTreeMap::new(),
+            manifest_json: None,
+            manifest_ref: None,
+            invocation_id: "inv".to_string(),
+            search_attributes: BTreeMap::new(),
+            write_artifacts: true,
+            has_on_run_start: false,
+            has_on_run_end: false,
+            priority_scheduling: false,
+        }
+    }
+
+    fn outcome() -> levels::LevelExecutionOutcome {
+        levels::LevelExecutionOutcome {
+            log_lines: vec!["1 of 2 START model.p.a".to_string()],
+            all_results: vec![],
+            node_status: NodeStatusTree {
+                nodes: BTreeMap::from([("model.p.a".to_string(), NodeStatus::Success)]),
+            },
+            had_failure: true,
+            was_cancelled: false,
+            total_nodes: 2,
+            node_counter: 1,
+            continue_at_level: Some(1),
+            failed_nodes: BTreeSet::from(["model.p.bad".to_string()]),
+        }
+    }
+
+    #[test]
+    fn segments_number_from_one_and_increment() {
+        assert_eq!(next_segment_number(None), 1, "first continuation is segment 1");
+        assert_eq!(
+            next_segment_number(Some(&RunResumeState {
+                invocation_id: "inv".to_string(),
+                state_ref: "ref".to_string(),
+                next_level: 4,
+                segment: 3,
+            })),
+            4
+        );
+    }
+
+    /// A field missed here silently loses run state across a continuation, so
+    /// assert on each one the successor actually reads.
+    #[test]
+    fn segment_state_captures_everything_the_successor_needs() {
+        let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
+        let hook_errors = vec![crate::types::HookError {
+            hook_workflow_type: "notify".to_string(),
+            event: "pre_run".to_string(),
+            error: "flaky".to_string(),
+        }];
+
+        let state = build_segment_state(&plan(), &outcome(), &env, &hook_errors, 1);
+
+        assert_eq!(state.next_level, 1);
+        assert_eq!(state.plan.levels.len(), 2, "plan carried, not re-planned");
+        assert_eq!(state.log_lines.len(), 1);
+        assert_eq!(state.node_status.nodes.len(), 1);
+        assert!(state.had_failure, "failure state must not reset");
+        assert_eq!(state.failed_nodes, vec!["model.p.bad".to_string()]);
+        assert_eq!(state.effective_env.get("K").map(String::as_str), Some("v"));
+        assert_eq!(state.hook_errors.len(), 1);
+        assert_eq!(state.total_nodes, 2);
+        assert_eq!(state.node_counter, 1, "progress numbering stays continuous");
+    }
+
+    #[test]
+    fn a_fresh_run_starts_at_level_zero_with_empty_accumulators() {
+        let point = build_resume_point(&plan(), None, true);
+        assert_eq!(point.start_level, 0);
+        assert!(point.all_results.is_empty());
+        assert!(!point.had_failure);
+        assert_eq!(point.node_counter, 0);
+        assert!(point.can_continue);
+    }
+
+    #[test]
+    fn a_resumed_run_picks_up_where_its_predecessor_stopped() {
+        let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
+        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1);
+
+        let point = build_resume_point(&plan(), Some(state), true);
+
+        assert_eq!(point.start_level, 1, "skips the levels already executed");
+        assert_eq!(point.node_counter, 1);
+        assert!(point.had_failure, "carries the failure flag forward");
+        assert!(
+            point.failed_nodes.contains("model.p.bad"),
+            "downstream skipping depends on this"
+        );
+        assert_eq!(point.log_lines.len(), 1);
+    }
+
+    /// Without an artifact store there is nowhere to spill, so a resumed point
+    /// must not advertise that it can continue again.
+    #[test]
+    fn resume_point_propagates_the_can_continue_gate() {
+        assert!(!build_resume_point(&plan(), None, false).can_continue);
+    }
 }
 
 #[cfg(test)]

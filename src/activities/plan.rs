@@ -154,9 +154,9 @@ fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'
 
 /// Warn about resource types this planner never schedules.
 ///
-/// dbt Core v2 resolves functions, exposures, metrics, saved queries and
-/// semantic models into the same node graph as models, but dbt-temporal has no
-/// execution path for them. Silently dropping them makes a run look complete
+/// dbt Core v2 resolves exposures, metrics, saved queries and semantic models
+/// into the same node graph as models, but dbt-temporal has no execution path
+/// for them. (Functions *are* executed — see `command_includes_node_type`.) Silently dropping them makes a run look complete
 /// when part of the project was never built, so say so once per plan. Only
 /// graph-building commands warn — the single-resource commands (`run`, `test`,
 /// `seed`, …) legitimately ignore everything outside their own type.
@@ -166,7 +166,6 @@ fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
     }
     let nodes = &state.resolver_state.nodes;
     let unsupported: Vec<(&str, usize)> = [
-        ("functions", nodes.functions.len()),
         ("exposures", nodes.exposures.len()),
         ("metrics", nodes.metrics.len()),
         ("saved_queries", nodes.saved_queries.len()),
@@ -528,10 +527,13 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
                 | NodeType::Seed
                 | NodeType::Snapshot
                 | NodeType::UnitTest
+                | NodeType::Function
         ),
         // Unit tests are hard-excluded from compile, matching dbt-core: their
         // SQL is assembled at execution time from fixtures + warehouse probes.
-        "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
+        "compile" => {
+            matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot | NodeType::Function)
+        }
         // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
         "test" => matches!(rt, NodeType::Test),
         // seed / snapshot mirror the single-resource dbt commands of the same
@@ -547,6 +549,7 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
                 | NodeType::Seed
                 | NodeType::Snapshot
                 | NodeType::UnitTest
+                | NodeType::Function
         ),
         _ => false,
     }
@@ -707,6 +710,20 @@ mod tests {
         assert!(!command_includes_node_type("test", NodeType::Snapshot));
     }
 
+    /// Functions are dbt Core v2 nodes with a real materialization, so the
+    /// graph-building commands schedule them like any other buildable node.
+    #[test]
+    fn graph_commands_schedule_functions() {
+        for command in ["build", "compile", "list"] {
+            assert!(
+                command_includes_node_type(command, NodeType::Function),
+                "{command} should schedule functions"
+            );
+        }
+        // `run` is models-only, matching dbt.
+        assert!(!command_includes_node_type("run", NodeType::Function));
+    }
+
     #[test]
     fn seed_command_includes_only_seeds() {
         assert!(command_includes_node_type("seed", NodeType::Seed));
@@ -725,13 +742,13 @@ mod tests {
 
     /// Resource types with no execution path must stay out of every command's
     /// plan — they are reported via `warn_unsupported_resource_types` instead.
+    /// Functions are deliberately absent: they *are* executed.
     #[test]
     fn no_command_schedules_unsupported_resource_types() {
         for command in [
             "run", "build", "compile", "test", "seed", "snapshot", "list",
         ] {
             for rt in [
-                NodeType::Function,
                 NodeType::Exposure,
                 NodeType::Metric,
                 NodeType::SavedQuery,

@@ -105,7 +105,9 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 
 All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
 
-Functions, exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
+dbt Core v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres and BigQuery accept, but DuckDB has no equivalent override and will fail on the DDL.
+
+Exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
 
 `vars` and `full_refresh` apply per workflow: `vars` layer over the project's own (CLI-vars precedence, so a key you don't pass keeps its `dbt_project.yml` value), and `full_refresh` surfaces as `flags.FULL_REFRESH` / `flags.full_refresh`, which is what dbt's `should_full_refresh()` and `is_incremental()` read. One limit is worth knowing: the worker parses each project **once at startup**, so `var()` calls evaluated during parsing — inside `{{ config(...) }}` blocks or `dbt_project.yml` — keep their startup value. Only render-time `var()` (model bodies, macros, hooks) reflects the workflow's vars. The planner warns and names the nodes when it spots a run's vars inside a `config()` block. The same startup-parse constraint is why `config(schema=env_var(...))` is rejected outright.
 

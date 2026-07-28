@@ -250,9 +250,17 @@ fn select_materialization_name(rt: NodeType, base_materialized: &str) -> String 
 /// before materialization. Tests and operations don't get a schema-create
 /// pass — they only read. Unit tests qualify because the `unit`
 /// materialization creates a temp table in the target schema to probe column
-/// types, and may run before anything else has created that schema.
+/// types, and may run before anything else has created that schema. Functions
+/// are created *in* a schema like any other relation.
 const fn is_create_schema_eligible(rt: NodeType) -> bool {
-    matches!(rt, NodeType::Model | NodeType::Seed | NodeType::Snapshot | NodeType::UnitTest)
+    matches!(
+        rt,
+        NodeType::Model
+            | NodeType::Seed
+            | NodeType::Snapshot
+            | NodeType::UnitTest
+            | NodeType::Function
+    )
 }
 
 /// True if this test node persists failing rows to the warehouse
@@ -277,7 +285,12 @@ const fn expects_adapter_response(rt: NodeType, materialization: &str) -> bool {
         // Ephemeral models never execute against the warehouse — they're
         // inlined as CTEs in their downstream consumer's SQL.
         NodeType::Model => !matches!(materialization.as_bytes(), b"ephemeral"),
-        NodeType::Seed | NodeType::Snapshot | NodeType::Test | NodeType::UnitTest => true,
+        NodeType::Seed
+        | NodeType::Snapshot
+        | NodeType::Test
+        | NodeType::UnitTest
+        // A function issues CREATE OR REPLACE FUNCTION through statement('main').
+        | NodeType::Function => true,
         _ => false,
     }
 }

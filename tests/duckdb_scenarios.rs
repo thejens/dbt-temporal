@@ -464,3 +464,53 @@ async fn full_refresh_rebuilds_an_existing_incremental_model() {
         "full refresh must take the rebuild branch, got: {refreshed}"
     );
 }
+
+// --- dbt Core v2 function nodes ---
+
+/// Functions are scheduled and dispatched like any other node — the whole
+/// dbt-temporal path (plan → materialization lookup → render → warehouse)
+/// works. What DuckDB lacks is the SQL: `default__scalar_function_create`
+/// emits `CREATE OR REPLACE FUNCTION … RETURNS …`, which DuckDB does not
+/// accept (it uses `CREATE MACRO`), and dbt-fusion ships no
+/// `duckdb__scalar_function_sql` override.
+///
+/// This pins that boundary: reaching a *warehouse syntax* error proves
+/// everything upstream of the adapter worked. Successful creation is covered
+/// against Postgres in `tests/waffle_hut/basic.rs`.
+#[tokio::test]
+async fn function_nodes_reach_the_warehouse_even_where_the_adapter_lacks_the_syntax() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id"),
+        ("functions/add_one.sql", "select x + 1\n"),
+        (
+            "functions/schema.yml",
+            "version: 2\n\
+             functions:\n\
+             \x20 - name: add_one\n\
+             \x20   returns:\n\
+             \x20     data_type: int\n\
+             \x20   arguments:\n\
+             \x20     - name: x\n\
+             \x20       data_type: int\n",
+        ),
+    ])
+    .await;
+
+    // The planner schedules it.
+    let input: dbt_temporal::types::DbtRunInput =
+        serde_json::from_value(serde_json::json!({ "command": "build" })).unwrap();
+    let planned =
+        dbt_temporal::activities::plan::select_command_node_ids(harness.state(), &input).unwrap();
+    assert!(
+        planned.iter().any(|id| id == "function.spike.add_one"),
+        "build must schedule function nodes, got {planned:?}"
+    );
+
+    // And execution gets as far as the warehouse rejecting DuckDB-invalid DDL.
+    let err = harness.run_err_uid("function.spike.add_one").await;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("RETURNS"),
+        "should fail on the adapter's function DDL, not before it: {msg}"
+    );
+}

@@ -192,8 +192,12 @@ pub fn shared_infra() -> &'static SharedInfra {
                         // the suggestion — there is nowhere else to spill state
                         // — so this changes behaviour for the artifact tests
                         // alone and leaves the rest of the suite untouched.
+                        //
+                        // The key must match the server's setting name exactly;
+                        // an unrecognised key is ignored without complaint, and
+                        // the only symptom is a run that never hands over.
                         "--dynamic-config-value".to_string(),
-                        format!("history.historyCountSuggestContinueAsNew={SUGGEST_CONTINUE_AFTER_EVENTS}"),
+                        format!("limit.historyCount.suggestContinueAsNew={SUGGEST_CONTINUE_AFTER_EVENTS}"),
                     ])
                     .build();
                 let temporal_server = config

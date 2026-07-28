@@ -226,6 +226,10 @@ pub async fn plan_project_inner(
         .map_or_else(|| uuid::Uuid::new_v4().to_string(), |we| we.run_id.clone());
 
     let selected_ids = select_command_node_ids(state, &input)?;
+    // The command's own node-type filter bounds what indirect selection may
+    // add later: `run` never executes tests, so it must never gain any.
+    let command_eligible: std::collections::BTreeSet<String> =
+        selected_ids.iter().cloned().collect();
 
     // state: selectors compare against a previous manifest, loaded up front so
     // a missing state_manifest_ref fails with a clear error instead of
@@ -278,7 +282,12 @@ pub async fn plan_project_inner(
     let selected_ids = if input.select.is_some() || input.exclude.is_some() {
         let mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
         let before = selected_ids.len();
-        let expanded = expand_indirect_selection(selected_ids, &state.resolver_state.nodes, mode);
+        let expanded = expand_indirect_selection(
+            selected_ids,
+            &state.resolver_state.nodes,
+            &command_eligible,
+            mode,
+        );
         if expanded.len() > before {
             info!(
                 added = expanded.len() - before,

@@ -45,12 +45,23 @@ async fn project() -> Harness {
 
 /// Run selection the way the planner does, then expand for `mode`.
 fn selected_with(harness: &Harness, select: &str, mode: IndirectSelection) -> Vec<String> {
+    selected_for_command(harness, "build", select, mode)
+}
+
+/// Same, for an arbitrary command — the command bounds what may be added.
+fn selected_for_command(
+    harness: &Harness,
+    command: &str,
+    select: &str,
+    mode: IndirectSelection,
+) -> Vec<String> {
     let input: DbtRunInput =
-        serde_json::from_value(serde_json::json!({ "command": "build" })).unwrap();
+        serde_json::from_value(serde_json::json!({ "command": command })).unwrap();
     let all = select_command_node_ids(harness.state(), &input).unwrap();
+    let eligible: std::collections::BTreeSet<String> = all.iter().cloned().collect();
     let nodes = &harness.state().resolver_state.nodes;
     let direct = apply_selectors(all, nodes, Some(select), None, None).unwrap();
-    expand_indirect_selection(direct, nodes, mode)
+    expand_indirect_selection(direct, nodes, &eligible, mode)
 }
 
 fn has_test_on(ids: &[String], needle: &str) -> bool {
@@ -129,10 +140,27 @@ async fn expanding_a_full_selection_adds_nothing() {
         serde_json::from_value(serde_json::json!({ "command": "build" })).unwrap();
     let all = select_command_node_ids(harness.state(), &input).unwrap();
 
+    let eligible: std::collections::BTreeSet<String> = all.iter().cloned().collect();
     let expanded = expand_indirect_selection(
         all.clone(),
         &harness.state().resolver_state.nodes,
+        &eligible,
         IndirectSelection::Eager,
     );
     assert_eq!(expanded.len(), all.len(), "no duplicates: {expanded:?}");
+}
+
+/// Regression: indirect selection must respect the command's node-type filter.
+/// `dbt run` executes models only, so `run --select a` must not gain `a`'s
+/// tests just because they depend on it.
+#[tokio::test]
+async fn run_command_gains_no_tests_even_under_eager() {
+    let harness = project().await;
+    let ids = selected_for_command(&harness, "run", "a", IndirectSelection::Eager);
+
+    assert_eq!(
+        ids,
+        vec!["model.spike.a".to_string()],
+        "run is models-only, so eager must add nothing: {ids:?}"
+    );
 }

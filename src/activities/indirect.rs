@@ -62,11 +62,16 @@ impl FromStr for IndirectSelection {
 /// Returns the expanded selection. Order is the caller's order followed by any
 /// newly-added tests, so the planner's node ordering stays stable.
 ///
-/// Only tests and unit tests are ever added — indirect selection never pulls in
+/// `eligible` is the set the *command* allows — indirect selection may only add
+/// nodes already in it. Without that bound `dbt run --select my_model` would
+/// pull in tests, which `run` does not execute at all.
+///
+/// Only tests and unit tests are ever added; indirect selection never pulls in
 /// a model the user did not ask for.
 pub fn expand_indirect_selection(
     selected: Vec<String>,
     nodes: &Nodes,
+    eligible: &BTreeSet<String>,
     mode: IndirectSelection,
 ) -> Vec<String> {
     if mode == IndirectSelection::Empty || selected.is_empty() {
@@ -92,7 +97,7 @@ pub fn expand_indirect_selection(
 
     let mut added = Vec::new();
     for candidate in dependents_of(&selected_set, &reverse) {
-        if selected_set.contains(&candidate) {
+        if selected_set.contains(&candidate) || !eligible.contains(&candidate) {
             continue;
         }
         let Some(parents) = test_parents(nodes, &candidate) else {
@@ -201,10 +206,19 @@ mod tests {
     fn empty_mode_and_empty_selection_are_no_ops() {
         let nodes = Nodes::default();
         let selected = vec!["model.p.a".to_string()];
+        let eligible = BTreeSet::new();
         assert_eq!(
-            expand_indirect_selection(selected.clone(), &nodes, IndirectSelection::Empty),
+            expand_indirect_selection(
+                selected.clone(),
+                &nodes,
+                &eligible,
+                IndirectSelection::Empty
+            ),
             selected
         );
-        assert!(expand_indirect_selection(vec![], &nodes, IndirectSelection::Eager).is_empty());
+        assert!(
+            expand_indirect_selection(vec![], &nodes, &eligible, IndirectSelection::Eager)
+                .is_empty()
+        );
     }
 }

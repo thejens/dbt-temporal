@@ -96,6 +96,8 @@ pub fn prepare_render_env(
         (Arc::clone(&state.adapter_engine), None, None)
     };
 
+    discard_stale_relation_cache(engine.as_ref());
+
     let adapter_impl = dbt_adapter::AdapterImpl::new(engine, None);
     let adapter = Arc::new(dbt_adapter::Adapter::new(
         Arc::new(adapter_impl),
@@ -132,6 +134,31 @@ pub fn prepare_render_env(
         env_database,
         _rebuild_guard: rebuild_guard,
     })
+}
+
+/// Drop the engine's relation cache before rendering.
+///
+/// dbt-fusion's relation cache is built for the CLI's one-shot lifetime: the
+/// first existence check lists the whole schema and marks it **complete**, and
+/// nothing writes back to it when a materialization then creates or drops a
+/// relation (the bundled macros have no `cache_added` / `cache_dropped` calls).
+/// For the CLI that is fine — the process exits and the next invocation starts
+/// empty.
+///
+/// A dbt-temporal worker outlives the run and shares one engine across every
+/// workflow, so that cache goes stale the moment the first node materializes.
+/// The failure is not a cache miss — a miss would fall back to the warehouse.
+/// It is worse: `get_relation` sees "schema cached and complete, relation not
+/// in it" and reports the relation *definitively absent*. The materialization
+/// then skips dropping the existing relation and fails renaming its temp table
+/// over the top ("another entry with this name already exists"), so the second
+/// run of any model against a still-live worker breaks.
+///
+/// Clearing per activity costs one schema listing per node instead of one per
+/// worker lifetime. That is the price of correctness here, and it restores the
+/// per-invocation freshness the cache was designed around.
+fn discard_stale_relation_cache(engine: &dyn dbt_adapter::AdapterEngine) {
+    engine.relation_cache().clear();
 }
 
 /// Replace `env_var()` with one that consults this workflow's overrides first.

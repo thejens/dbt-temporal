@@ -672,6 +672,7 @@ mod tests {
     fn effective_env_carries_input_env_through() {
         let input = DbtRunInput {
             project: None,
+            indirect_selection: None,
             command: "build".into(),
             select: None,
             exclude: None,
@@ -698,6 +699,7 @@ mod tests {
         // command, so the field must round-trip the input verbatim.
         let input = DbtRunInput {
             project: Some("waffle".into()),
+            indirect_selection: None,
             command: "compile".into(),
             select: Some("+stg_customers".into()),
             exclude: None,
@@ -731,6 +733,7 @@ mod tests {
         // so an explicit `_` in input.env must be replaced, not preserved.
         let input = DbtRunInput {
             project: None,
+            indirect_selection: None,
             command: "run".into(),
             select: None,
             exclude: None,

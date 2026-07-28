@@ -541,6 +541,7 @@ mod tests {
     fn empty_input() -> DbtRunInput {
         DbtRunInput {
             project: Some("shop".to_string()),
+            indirect_selection: None,
             command: "build".to_string(),
             select: None,
             exclude: None,

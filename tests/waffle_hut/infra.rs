@@ -492,6 +492,7 @@ pub fn make_input(
 ) -> DbtRunInput {
     DbtRunInput {
         project: None,
+        indirect_selection: None,
         command: command.to_string(),
         select: select.map(String::from),
         exclude: exclude.map(String::from),
@@ -516,6 +517,7 @@ pub fn make_input_with_env(
 ) -> DbtRunInput {
     DbtRunInput {
         project: project.map(String::from),
+        indirect_selection: None,
         command: command.to_string(),
         select: None,
         exclude: None,

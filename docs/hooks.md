@@ -91,6 +91,9 @@ retry:
   max_attempts: 5
   non_retryable_errors:
     - "permission denied"
+  project_hooks:          # dbt_project.yml on-run-start / on-run-end
+    on_run_start: true    # opt in to retrying transient warehouse errors
+    on_run_end: false     # default — see docs/error-handling.md
 
 hooks:
   pre_run:

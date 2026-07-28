@@ -19,15 +19,37 @@ use tracing::info;
 
 use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
 
+use crate::error::DbtTemporalError;
+
 use super::DbtActivities;
 use super::heartbeat;
 use super::node_helpers::json_to_minijinja;
 use super::render_env;
+use super::retry::{self, RetryDecision};
+
+/// Whether a failed hook should be handed back to Temporal as retryable.
+///
+/// Two gates, both of which must pass. `retry_on_error` is the project author's
+/// opt-in for this phase — hook SQL is only safe to re-run if it is idempotent,
+/// which this crate cannot determine. The second gate is the same
+/// classification nodes use, so even an opted-in hook retries only on the
+/// genuinely transient variants; bad SQL is permanent on the first attempt.
+fn hook_retry_decision(
+    err: &DbtTemporalError,
+    retry_on_error: bool,
+    non_retryable_patterns: &[regex::Regex],
+) -> RetryDecision {
+    if !retry_on_error {
+        return RetryDecision::NoRetry;
+    }
+    retry::decide_retry(err, non_retryable_patterns)
+}
 
 /// Outer wrapper — handles the `Result` translation, cancellation, and heartbeating.
 ///
-/// All errors are mapped to `NonRetryable` because hook side effects (DDL, logging)
-/// are not safe to retry on transient errors. Cancellation is honoured so a
+/// Hook errors are non-retryable unless the project opted this phase in via
+/// `retry.project_hooks` — re-running a hook repeats its side effects, and only
+/// the author knows whether that is safe. Cancellation is honoured so a
 /// workflow termination does not leave hook SQL running on a doomed worker.
 pub async fn run_project_hooks_outer(
     activities: &DbtActivities,
@@ -35,9 +57,32 @@ pub async fn run_project_hooks_outer(
     input: ProjectHooksInput,
 ) -> Result<(), ActivityError> {
     let phase = input.phase;
+    let retry_on_error = input.retry_on_error;
+    let project = input.project.clone();
     tokio::select! {
         result = run_project_hooks_inner(activities, input) => {
-            result.map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
+            result.map_err(|e| {
+                let patterns =
+                    retry::registry_non_retryable_patterns(&activities.registry, &project);
+                // An untyped hook failure is a template or SQL problem, not a
+                // blip, so it stays permanent even when retry is enabled.
+                let dbt_err = retry::downcast_or_default(e, retry::Unclassified::Permanent);
+                match hook_retry_decision(
+                    &dbt_err,
+                    retry_on_error,
+                    patterns.as_deref().unwrap_or(&[]),
+                ) {
+                    RetryDecision::Retry => {
+                        info!(phase = %phase, error = %dbt_err, "hook failed, retrying");
+                        ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(
+                            "{dbt_err}"
+                        )))
+                    }
+                    RetryDecision::NoRetry => ActivityError::application(
+                        ApplicationFailure::non_retryable(anyhow::anyhow!("{dbt_err}")),
+                    ),
+                }
+            })
         }
         () = ctx.cancelled() => {
             info!(phase = %phase, "project hooks cancelled");
@@ -517,5 +562,61 @@ pass={{ ns.pass }} error={{ ns.error }}",
             .render(&ctx, &[])?;
         assert_eq!(s, "7");
         Ok(())
+    }
+
+    // --- hook retry policy ---
+
+    use crate::activities::project_hooks::hook_retry_decision;
+    use crate::activities::retry::RetryDecision;
+    use crate::error::DbtTemporalError;
+    use crate::types::{ProjectHookPhase, ProjectHookRetry};
+
+    fn transient() -> DbtTemporalError {
+        DbtTemporalError::Adapter(anyhow::anyhow!("connection reset by peer"))
+    }
+
+    /// The default. A hook that appends audit rows must not be re-run behind
+    /// the author's back, so opting in is required even for a transient error.
+    #[test]
+    fn a_hook_that_did_not_opt_in_never_retries() {
+        assert_eq!(hook_retry_decision(&transient(), false, &[]), RetryDecision::NoRetry);
+    }
+
+    #[test]
+    fn an_opted_in_hook_retries_a_transient_warehouse_error() {
+        assert_eq!(hook_retry_decision(&transient(), true, &[]), RetryDecision::Retry);
+    }
+
+    /// Opting in must not turn bad SQL into a retry loop — only the transient
+    /// variants are eligible, exactly as for nodes.
+    #[test]
+    fn opting_in_does_not_make_permanent_failures_retry() {
+        let permanent = DbtTemporalError::Compilation("syntax error at or near".to_string());
+        assert_eq!(hook_retry_decision(&permanent, true, &[]), RetryDecision::NoRetry);
+    }
+
+    /// The project's own `non_retryable_errors` patterns still apply on top of
+    /// the opt-in, so an author can enable retries broadly and carve out the
+    /// messages they know are permanent.
+    #[test]
+    fn non_retryable_patterns_still_win_over_the_opt_in() {
+        let patterns =
+            crate::error::compile_error_patterns(&["connection (reset|refused)".to_string()]);
+        assert_eq!(hook_retry_decision(&transient(), true, &patterns), RetryDecision::NoRetry);
+    }
+
+    /// Per-phase, because idempotency differs between setup and teardown SQL.
+    #[test]
+    fn each_phase_opts_in_independently() {
+        let start_only = ProjectHookRetry {
+            on_run_start: true,
+            on_run_end: false,
+        };
+        assert!(start_only.allows(ProjectHookPhase::OnRunStart));
+        assert!(!start_only.allows(ProjectHookPhase::OnRunEnd));
+
+        let neither = ProjectHookRetry::default();
+        assert!(!neither.allows(ProjectHookPhase::OnRunStart));
+        assert!(!neither.allows(ProjectHookPhase::OnRunEnd));
     }
 }

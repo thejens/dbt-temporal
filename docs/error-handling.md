@@ -37,6 +37,24 @@ retry:
 
 All fields are optional and default to the values shown above (except `non_retryable_errors` which defaults to empty). The `non_retryable_errors` patterns are matched against the full adapter error message — if any pattern matches, the error is treated as non-retryable regardless of its type.
 
+### Project hook retries
+
+`on-run-start` and `on-run-end` do **not** retry by default. Retrying a hook re-runs its SQL, and whether that is safe depends entirely on what the hook does — dbt-temporal cannot tell an idempotent `create schema if not exists` from an `insert into audit_log`. So it is opt-in, per phase:
+
+```yaml
+retry:
+  max_attempts: 3
+  project_hooks:
+    on_run_start: true    # setup SQL, safe to repeat
+    on_run_end: false     # appends audit rows — leave off
+```
+
+Both default to `false`. The split is per phase because the two usually differ: `on-run-start` tends to be idempotent setup (schemas, grants, session settings), while `on-run-end` tends to append run records, where a retry after a partial failure double-writes.
+
+Opting in does **not** make every failure retry. The same classification nodes use still applies, so only the transient variants are eligible — a hook with bad SQL fails on its first attempt either way. The `max_attempts`, backoff and `non_retryable_errors` settings above apply to opted-in hooks too, so they share the project's retry budget rather than getting an unbounded one.
+
+If a hook is not idempotent and you want it to survive transient warehouse failures, make the hook itself safe to repeat (guard with `if not exists`, key inserts on `invocation_id`) before enabling this.
+
 ## `on_error: continue`
 
 A model configured with `{{ config(on_error='continue') }}` (or `on_error: continue` in `dbt_project.yml`/schema config) that fails still reports `Error`, but its failure doesn't block downstream nodes from running — they execute as if the failing model had never been in the graph. This mirrors dbt-core's own scheduling: only models can set it (a failed test/seed/snapshot always blocks its dependents), and `fail_fast` overrides it — if the workflow (or a `set_fail_fast` update) has fail-fast enabled, any failure still halts the remaining levels regardless of `on_error`.

@@ -278,6 +278,11 @@ pub struct ProjectHooksInput {
     /// Mirrors `DbtRunInput.full_refresh`, exposed to hooks as `flags.FULL_REFRESH`.
     #[serde(default)]
     pub full_refresh: bool,
+    /// Whether this phase may retry on a transient warehouse error, from
+    /// `retry.project_hooks` in `dbt_temporal.yml`. Resolved in the workflow so
+    /// the activity does not have to re-read config on every attempt.
+    #[serde(default)]
+    pub retry_on_error: bool,
 }
 
 /// Result of executing a single node.

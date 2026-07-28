@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::workflow::{DbtRunInput, DbtRunOutput, ExecutionPlan};
+use super::workflow::{DbtRunInput, DbtRunOutput, ExecutionPlan, ProjectHookPhase};
 
 /// Lifecycle event for a user-defined hook in `dbt_temporal.yml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,42 @@ pub struct RetryConfig {
     /// A match promotes the error to non-retryable.
     #[serde(default)]
     pub non_retryable_errors: Vec<String>,
+    /// Which `dbt_project.yml` hooks may retry. Off for both by default.
+    #[serde(default)]
+    pub project_hooks: ProjectHookRetry,
+}
+
+/// Whether `on-run-start` / `on-run-end` may be retried on a transient
+/// warehouse error.
+///
+/// Off by default, and deliberately per-phase rather than one switch: a hook is
+/// only safe to re-run if it is idempotent, and that is a property of the SQL
+/// the project author wrote, which this crate cannot inspect. `on-run-start`
+/// hooks are typically setup (`create schema if not exists`, grants) and safe;
+/// `on-run-end` hooks typically append audit rows, where a retry after a
+/// partial failure double-writes. Only the author knows which they have, so
+/// they choose.
+///
+/// Enabling this never makes a *permanent* failure retry — bad SQL still fails
+/// on the first attempt. It only lets the retryable error variants through, the
+/// same classification nodes already use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectHookRetry {
+    #[serde(default)]
+    pub on_run_start: bool,
+    #[serde(default)]
+    pub on_run_end: bool,
+}
+
+impl ProjectHookRetry {
+    /// Whether the given phase is allowed to retry.
+    #[must_use]
+    pub const fn allows(&self, phase: ProjectHookPhase) -> bool {
+        match phase {
+            ProjectHookPhase::OnRunStart => self.on_run_start,
+            ProjectHookPhase::OnRunEnd => self.on_run_end,
+        }
+    }
 }
 
 const fn default_max_attempts() -> u32 {
@@ -76,6 +112,7 @@ impl Default for RetryConfig {
             backoff_coefficient: default_backoff_coefficient(),
             max_interval_secs: default_max_interval_secs(),
             non_retryable_errors: Vec::new(),
+            project_hooks: ProjectHookRetry::default(),
         }
     }
 }
@@ -335,6 +372,7 @@ mod tests {
             backoff_coefficient: 1.5,
             max_interval_secs: 120,
             non_retryable_errors: vec!["access denied".into(), "relation .* does not exist".into()],
+            project_hooks: ProjectHookRetry::default(),
         };
         let json = serde_json::to_string(&rc)?;
         let back: RetryConfig = serde_json::from_str(&json)?;

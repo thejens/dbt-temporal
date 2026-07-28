@@ -700,6 +700,40 @@ mod tests {
         assert_eq!(resolved.retry.max_attempts, RetryConfig::default().max_attempts);
     }
 
+    /// Hook retries are opt-in per phase, and absent config means off — a
+    /// project that never heard of the setting keeps today's behaviour.
+    #[test]
+    fn load_project_config_reads_per_phase_hook_retry() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("dbtt-hooks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("dbt_temporal.yml"),
+            "retry:\n  max_attempts: 5\n  project_hooks:\n    on_run_start: true\n",
+        )?;
+
+        let (_, retry, _) = load_project_config(&dir)?;
+        assert_eq!(retry.max_attempts, 5);
+        assert!(retry.project_hooks.on_run_start, "explicitly enabled");
+        assert!(!retry.project_hooks.on_run_end, "unset means off, not inherited");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn load_project_config_defaults_hook_retry_off() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("dbtt-hooks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("dbt_temporal.yml"), "retry:\n  max_attempts: 2\n")?;
+
+        let (_, retry, _) = load_project_config(&dir)?;
+        assert!(!retry.project_hooks.on_run_start);
+        assert!(!retry.project_hooks.on_run_end);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
     #[test]
     fn load_project_config_missing_file_returns_defaults() -> anyhow::Result<()> {
         let dir = std::env::temp_dir().join(format!("dbtt-hooks-{}", uuid::Uuid::new_v4()));

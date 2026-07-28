@@ -62,16 +62,17 @@ async fn test_run_continues_as_new_and_still_completes() -> Result<()> {
             // than finished. If it completed outright, the threshold no longer
             // falls inside this fixture and everything below proves nothing.
             let first = describe_workflow(&mut client, &run.workflow_id, &run.run_id).await?;
-            let status = first
-                .workflow_execution_info
-                .as_ref()
-                .map_or(0, |i| i.status);
+            let info = first.workflow_execution_info.as_ref();
+            let status = info.map_or(0, |i| i.status);
+            let history_length = info.map_or(0, |i| i.history_length);
             assert_eq!(
                 status,
                 WorkflowExecutionStatus::ContinuedAsNew as i32,
                 "the first execution should have continued as new (status {status}); \
-                 if this fixture no longer outgrows SUGGEST_CONTINUE_AFTER_EVENTS, \
-                 raise the fixture or lower the threshold rather than deleting this"
+                 it produced {history_length} history events against a threshold of \
+                 {SUGGEST_CONTINUE_AFTER_EVENTS}. A count above the threshold means the \
+                 server never applied the dynamic config; below it means the fixture no \
+                 longer outgrows it"
             );
 
             // Everything below is the point: a continued run is still one run.

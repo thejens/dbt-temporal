@@ -88,10 +88,11 @@ ON CONFLICT DO NOTHING;
 
 /// History event count after which the dev server suggests continue-as-new.
 ///
-/// Sized to fall inside a waffle_hut run rather than beyond it: a five-model
-/// build produces on the order of a hundred events, so this trips partway
-/// through and leaves at least one level for the successor.
-pub const SUGGEST_CONTINUE_AFTER_EVENTS: u32 = 40;
+/// Deliberately far below anything a real run would use: the point is to reach
+/// the handover inside a five-model fixture, not to model a realistic budget.
+/// Every segment still executes at least one level, so a low value costs extra
+/// segments rather than progress.
+pub const SUGGEST_CONTINUE_AFTER_EVENTS: u32 = 10;
 
 pub struct SharedInfra {
     pub temporal_addr: String,

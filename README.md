@@ -103,7 +103,9 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 }'
 ```
 
-All fields are optional. `command` defaults to `build`; `run`, `compile`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
+All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
+
+Functions, exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
 
 Additional inputs: `defer_manifest_ref` (defer unbuilt refs to a previous manifest, `--defer --state` equivalent), `event_time_start`/`event_time_end` (microbatch window), `retry_from` — point it at a previous run's `run_results.json` artifact to re-run only the nodes that did not succeed (the `dbt retry` equivalent; start it with the same `select`/`exclude` as the original run) — and `state_manifest_ref`, which enables `state:modified` / `state:new` select methods against a previous `manifest.json` artifact (the `--state` equivalent; slim CI pattern: `"select": "state:modified+", "state_manifest_ref": "<prod manifest>"`, often combined with `defer_manifest_ref` pointing at the same manifest).
 

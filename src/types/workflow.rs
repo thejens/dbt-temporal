@@ -12,7 +12,8 @@ fn default_command() -> String {
 pub struct DbtRunInput {
     /// Project name or path. Optional if only one project is loaded.
     pub project: Option<String>,
-    /// dbt command: "run", "build", "test", "compile", or "list" (default: "build")
+    /// dbt command: "run", "build", "test", "seed", "snapshot", "compile",
+    /// "list", or "source-freshness" (default: "build")
     #[serde(default = "default_command")]
     pub command: String,
     /// --select filter

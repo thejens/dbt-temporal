@@ -86,10 +86,45 @@ pub fn select_command_node_ids(
         );
     }
 
+    warn_unsupported_resource_types(state, input.command.as_str());
+
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes found for command '{}'", input.command);
     }
     Ok(selected_ids)
+}
+
+/// Warn about resource types this planner never schedules.
+///
+/// dbt Core v2 resolves functions, exposures, metrics, saved queries and
+/// semantic models into the same node graph as models, but dbt-temporal has no
+/// execution path for them. Silently dropping them makes a run look complete
+/// when part of the project was never built, so say so once per plan. Only
+/// graph-building commands warn — the single-resource commands (`run`, `test`,
+/// `seed`, …) legitimately ignore everything outside their own type.
+fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
+    if !matches!(command, "build" | "list") {
+        return;
+    }
+    let nodes = &state.resolver_state.nodes;
+    let unsupported: Vec<(&str, usize)> = [
+        ("functions", nodes.functions.len()),
+        ("exposures", nodes.exposures.len()),
+        ("metrics", nodes.metrics.len()),
+        ("saved_queries", nodes.saved_queries.len()),
+        ("semantic_models", nodes.semantic_models.len()),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .collect();
+
+    if !unsupported.is_empty() {
+        warn!(
+            resources = ?unsupported,
+            "project defines resource types dbt-temporal does not execute — \
+             they are excluded from the plan and will not be built"
+        );
+    }
 }
 
 /// Plan activity inner logic — called from DbtActivities::plan_project.
@@ -386,6 +421,10 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
         "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
         // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
         "test" => matches!(rt, NodeType::Test),
+        // seed / snapshot mirror the single-resource dbt commands of the same
+        // name. Both assume the rest of the graph is already in place.
+        "seed" => matches!(rt, NodeType::Seed),
+        "snapshot" => matches!(rt, NodeType::Snapshot),
         // list selects the full graph (same as build) — the workflow returns node metadata
         // without executing; no SQL is compiled or sent to the warehouse.
         "list" => matches!(
@@ -553,6 +592,45 @@ mod tests {
         assert!(!command_includes_node_type("test", NodeType::Model));
         assert!(!command_includes_node_type("test", NodeType::Seed));
         assert!(!command_includes_node_type("test", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn seed_command_includes_only_seeds() {
+        assert!(command_includes_node_type("seed", NodeType::Seed));
+        assert!(!command_includes_node_type("seed", NodeType::Model));
+        assert!(!command_includes_node_type("seed", NodeType::Test));
+        assert!(!command_includes_node_type("seed", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn snapshot_command_includes_only_snapshots() {
+        assert!(command_includes_node_type("snapshot", NodeType::Snapshot));
+        assert!(!command_includes_node_type("snapshot", NodeType::Model));
+        assert!(!command_includes_node_type("snapshot", NodeType::Test));
+        assert!(!command_includes_node_type("snapshot", NodeType::Seed));
+    }
+
+    /// Resource types with no execution path must stay out of every command's
+    /// plan — they are reported via `warn_unsupported_resource_types` instead.
+    #[test]
+    fn no_command_schedules_unsupported_resource_types() {
+        for command in [
+            "run", "build", "compile", "test", "seed", "snapshot", "list",
+        ] {
+            for rt in [
+                NodeType::Function,
+                NodeType::Exposure,
+                NodeType::Metric,
+                NodeType::SavedQuery,
+                NodeType::SemanticModel,
+                NodeType::Analysis,
+            ] {
+                assert!(
+                    !command_includes_node_type(command, rt),
+                    "{command} should not schedule {rt:?}"
+                );
+            }
+        }
     }
 
     #[test]

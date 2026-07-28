@@ -242,15 +242,54 @@ impl Harness {
         unique_id: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<NodeExecutionResult, anyhow::Error> {
+        self.run_uid_with_overrides(unique_id, env, &serde_json::Map::new(), false)
+            .await
+    }
+
+    /// Like [`run_uid`](Self::run_uid), with the full set of per-workflow
+    /// overrides — `env`, `--vars` and `--full-refresh`.
+    pub async fn run_uid_with_overrides(
+        &self,
+        unique_id: &str,
+        env: &BTreeMap<String, String>,
+        vars: &serde_json::Map<String, serde_json::Value>,
+        full_refresh: bool,
+    ) -> Result<NodeExecutionResult, anyhow::Error> {
         let input = serde_json::from_value(serde_json::json!({
             "unique_id": unique_id,
             "invocation_id": uuid::Uuid::new_v4().to_string(),
             "project": PROJECT,
             "command": "build",
             "env": env,
+            "vars": vars,
+            "full_refresh": full_refresh,
         }))
         .unwrap();
         execute_node_inner(&self.activities, input).await
+    }
+
+    /// Run one model with `--vars` / `--full-refresh` applied, asserting success.
+    pub async fn run_ok_with_overrides(
+        &self,
+        model: &str,
+        vars: serde_json::Value,
+        full_refresh: bool,
+    ) -> NodeExecutionResult {
+        let vars = vars
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+        let result = self
+            .run_uid_with_overrides(
+                &format!("model.{PROJECT}.{model}"),
+                &BTreeMap::new(),
+                &vars,
+                full_refresh,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("model {model} should succeed: {e:#}"));
+        assert_eq!(result.status, NodeStatus::Success, "{result:?}");
+        result
     }
 
     /// Execute a node by full unique id, expecting failure, returning the

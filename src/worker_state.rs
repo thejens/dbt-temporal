@@ -9,7 +9,7 @@ use dbt_jinja_utils::jinja_environment::JinjaEnv;
 use dbt_schemas::materialization_resolver::MaterializationResolver;
 use dbt_schemas::state::ResolverState;
 
-use crate::types::{HooksConfig, RetryConfig};
+use crate::types::{HooksConfig, RetryConfig, TimeoutConfig};
 
 /// Holds the parsed dbt project state, shared across all activities on a worker.
 ///
@@ -32,6 +32,8 @@ pub struct WorkerState {
     pub default_hooks: HooksConfig,
     /// Default retry policy loaded from dbt_temporal.yml.
     pub default_retry: RetryConfig,
+    /// Activity timeouts loaded from dbt_temporal.yml.
+    pub default_timeouts: TimeoutConfig,
     /// Pre-compiled regexes for `default_retry.non_retryable_errors`.
     /// Compiled once at startup so each adapter error doesn't re-compile (and
     /// re-warn about) the patterns.

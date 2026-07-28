@@ -19,7 +19,7 @@ use temporalio_sdk::{
     SyncWorkflowContext, WorkflowContext, WorkflowContextView, WorkflowResult, WorkflowTermination,
 };
 
-use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus, RunStatusSnapshot};
+use crate::types::{DbtRunInput, DbtRunOutput, NodeStatus, RunStatusSnapshot, TimeoutConfig};
 
 use self::helpers::{
     build_effective_env, build_summary_lines, elapsed_secs, format_final_details, upsert_memo_state,
@@ -84,7 +84,8 @@ impl DbtRunWorkflow {
     #[run(name = "dbt_run")]
     #[allow(
         clippy::needless_pass_by_ref_mut, // Required by the #[run] macro.
-        clippy::future_not_send           // WorkflowContext uses Rc internally.
+        clippy::future_not_send,          // WorkflowContext uses Rc internally.
+        clippy::too_many_lines            // A flat list of run phases reads better than nested helpers.
     )]
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<DbtRunOutput> {
         // Deterministic workflow time — the workflow's docstring forbids
@@ -94,7 +95,9 @@ impl DbtRunWorkflow {
 
         write_command_memo(ctx, &input)?;
         ctx.state_mut(|s| s.status.phase = "planning".to_string());
-        let plan = plan_and_announce(ctx, &input).await?;
+        // Timeouts come from dbt_temporal.yml, but planning happens before that is
+        // resolved — use the built-in default for the plan activity itself.
+        let plan = plan_and_announce(ctx, &input, TimeoutConfig::default().plan_secs).await?;
         ctx.state_mut(|s| {
             s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
             s.status.total_levels = plan.levels.len();
@@ -112,6 +115,7 @@ impl DbtRunWorkflow {
         let project_config = resolve_project_config(ctx, &input, &plan).await?;
         let hooks = project_config.hooks;
         let retry_config = project_config.retry;
+        let timeouts = project_config.timeouts;
 
         // Effective env: workflow input env (with `_` set to the serialised
         // input), extended by pre_run hook extra_env. Used in NodeExecutionInput
@@ -136,10 +140,11 @@ impl DbtRunWorkflow {
             return Ok(out);
         }
 
-        run_on_run_start(ctx, &input, &plan, &effective_env).await?;
+        run_on_run_start(ctx, &input, &plan, &effective_env, &timeouts).await?;
 
         ctx.state_mut(|s| s.status.phase = "executing".to_string());
-        let mut levels = execute_levels(ctx, &input, &plan, &retry_config, &effective_env).await?;
+        let mut levels =
+            execute_levels(ctx, &input, &plan, &retry_config, &timeouts, &effective_env).await?;
         ctx.state_mut(|s| {
             s.status.phase = "finalizing".to_string();
             s.status.tally(&levels.node_status);
@@ -158,10 +163,19 @@ impl DbtRunWorkflow {
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
         let (artifacts, log_path) =
-            store_run_artifacts(ctx, &plan, &levels.all_results, &levels.log_lines).await?;
+            store_run_artifacts(ctx, &plan, &levels.all_results, &levels.log_lines, &timeouts)
+                .await?;
 
-        run_on_run_end(ctx, &input, &plan, &effective_env, &levels.all_results, &mut hook_errors)
-            .await;
+        run_on_run_end(
+            ctx,
+            &input,
+            &plan,
+            &effective_env,
+            &levels.all_results,
+            &mut hook_errors,
+            &timeouts,
+        )
+        .await;
 
         let mut output = DbtRunOutput {
             invocation_id: plan.invocation_id.clone(),
@@ -228,102 +242,103 @@ fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) 
 
 #[cfg(test)]
 mod tests {
-    /// Workflow code must be deterministic — env var reads break Temporal replay.
+    /// Sources of non-determinism that break Temporal history replay, as they
+    /// appear in source. Suffix-matched, so both `std::env::var` and a bare
+    /// `env::var` after `use std::env` are caught.
+    const FORBIDDEN_IN_WORKFLOW: &[(&str, &str)] = &[
+        ("env::var", "read env vars — move the read into an activity"),
+        ("env::set_var", "mutate the process environment"),
+        ("SystemTime::now", "read the wall clock — use ctx.workflow_time()"),
+        ("Instant::now", "read the wall clock — use ctx.workflow_time()"),
+        ("Utc::now", "read the wall clock — use ctx.workflow_time()"),
+        ("Uuid::new_v4", "generate randomness — derive ids from the plan or input"),
+        ("thread_rng", "generate randomness — derive ids from the plan or input"),
+    ];
+
+    /// Workflow code must be deterministic — replay re-executes it against a
+    /// recorded history, so anything that can differ between the original run
+    /// and the replay corrupts the workflow.
     ///
-    /// This test scans the workflow module source files for `std::env::var` calls.
-    /// If someone adds an env var read to workflow code, this test will fail and
-    /// remind them to move it into an activity.
+    /// Scans `src/workflow/*.rs` for the patterns above. Test modules are
+    /// exempt (they are never replayed) and by convention sit at the end of
+    /// each file, so the scan stops at the first `#[cfg(test)]`.
     #[test]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn workflow_code_does_not_read_env_vars() {
+    fn workflow_code_is_deterministic() {
         let workflow_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workflow");
 
+        let mut checked = 0;
         for entry in std::fs::read_dir(&workflow_dir).expect("read src/workflow") {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "rs") {
-                let contents = std::fs::read_to_string(&path).expect("read file");
-                let filename = path.file_name().unwrap().to_string_lossy();
-
-                // Skip #[cfg(test)] blocks — test code is not replayed.
-                let non_test_content = strip_cfg_test_blocks(&contents);
-
-                assert!(
-                    !non_test_content.contains("std::env::var"),
-                    "src/workflow/{filename} contains `std::env::var` outside #[cfg(test)]. \
-                     Workflow code must be deterministic — move env var reads into an activity."
-                );
-                assert!(
-                    !non_test_content.contains("std::env::set_var"),
-                    "src/workflow/{filename} contains `std::env::set_var` outside #[cfg(test)]. \
-                     Workflow code must never mutate process environment."
-                );
-            }
-        }
-    }
-
-    /// Strip `#[cfg(test)] mod tests { ... }` blocks from source, leaving only
-    /// production code for the determinism scan.
-    fn strip_cfg_test_blocks(source: &str) -> String {
-        // Simple heuristic: find `#[cfg(test)]` and skip until matching closing brace.
-        let mut result = String::new();
-        let mut chars = source.chars();
-        let mut buf = String::new();
-
-        while let Some(c) = chars.next() {
-            buf.push(c);
-
-            // Detect #[cfg(test)]
-            if buf.ends_with("#[cfg(test)]") {
-                // Remove the #[cfg(test)] from result
-                let prefix_len = buf.len() - "#[cfg(test)]".len();
-                result.push_str(&buf[..prefix_len]);
-                buf.clear();
-
-                // Skip until we find the opening brace, then skip the balanced block.
-                let mut depth = 0u32;
-                for c in chars.by_ref() {
-                    if c == '{' {
-                        depth += 1;
-                    } else if c == '}' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                }
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
                 continue;
             }
+            let contents = std::fs::read_to_string(&path).expect("read file");
+            let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+            let production = executable_code(production_code(&contents));
+            checked += 1;
 
-            // Flush buffer periodically to avoid unbounded growth.
-            if buf.len() > 128 {
-                let keep = "#[cfg(test)]".len();
-                let mut flush = buf.len() - keep;
-                // Ensure we split on a char boundary.
-                while flush > 0 && !buf.is_char_boundary(flush) {
-                    flush -= 1;
-                }
-                result.push_str(&buf[..flush]);
-                buf = buf[flush..].to_string();
+            for (pattern, why) in FORBIDDEN_IN_WORKFLOW {
+                assert!(
+                    !production.contains(pattern),
+                    "src/workflow/{filename} contains `{pattern}` outside #[cfg(test)]. \
+                     Workflow code must not {why}."
+                );
             }
         }
-        result.push_str(&buf);
-        result
+        assert!(checked > 0, "determinism scan found no files — did the module move?");
+    }
+
+    /// The part of a source file that gets replayed: everything before the
+    /// first `#[cfg(test)]`.
+    fn production_code(source: &str) -> &str {
+        source
+            .find("#[cfg(test)]")
+            .map_or(source, |cut| &source[..cut])
+    }
+
+    /// Drop comment lines. Prose explaining *why* a forbidden API is avoided
+    /// ("use ctx.workflow_time() instead of Instant::now()") is exactly the
+    /// documentation this rule wants, and must not trip the scan.
+    fn executable_code(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn strip_cfg_test_blocks_works() {
-        let input = r#"
-fn real_code() { std::env::var("X"); }
-#[cfg(test)]
-mod tests {
-    fn test_code() { std::env::var("Y"); }
-}
-fn more_real() {}
-"#;
-        let stripped = strip_cfg_test_blocks(input);
-        assert!(stripped.contains("std::env::var(\"X\")"));
-        assert!(!stripped.contains("std::env::var(\"Y\")"));
-        assert!(stripped.contains("more_real"));
+    fn production_code_stops_at_the_test_module() {
+        let input = "fn real() { env::var(\"X\"); }\n\
+                     #[cfg(test)]\n\
+                     mod tests { fn t() { env::var(\"Y\"); } }\n";
+        let production = production_code(input);
+        assert!(production.contains("env::var(\"X\")"));
+        assert!(!production.contains("env::var(\"Y\")"));
+    }
+
+    #[test]
+    fn production_code_returns_everything_when_there_is_no_test_module() {
+        let input = "fn only_real() {}\n";
+        assert_eq!(production_code(input), input);
+    }
+
+    /// The scan is suffix-based, so an unqualified `env::var` is caught too —
+    /// the previous version only looked for the `std::`-prefixed spelling.
+    #[test]
+    fn scan_catches_unqualified_spellings() {
+        let code = executable_code(production_code("use std::env;\nfn f() { env::var(\"X\"); }\n"));
+        assert!(
+            FORBIDDEN_IN_WORKFLOW
+                .iter()
+                .any(|(pattern, _)| code.contains(pattern))
+        );
+    }
+
+    #[test]
+    fn scan_ignores_forbidden_apis_named_in_comments() {
+        let code = executable_code("/// Prefer workflow_time() over Instant::now().\nfn f() {}\n");
+        assert!(!code.contains("Instant::now"), "comment should be stripped: {code}");
     }
 }

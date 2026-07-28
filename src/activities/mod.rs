@@ -10,6 +10,7 @@ pub mod node_serialization;
 pub mod node_telemetry;
 pub mod plan;
 pub mod project_hooks;
+pub mod render_env;
 pub mod retry;
 pub mod selectors;
 pub mod store_artifacts;

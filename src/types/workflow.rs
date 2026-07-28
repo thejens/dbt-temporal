@@ -148,6 +148,13 @@ pub struct NodeExecutionInput {
     /// Mirrors `DbtRunInput.event_time_end`.
     #[serde(default)]
     pub event_time_end: Option<String>,
+    /// Mirrors `DbtRunInput.vars`. Applied to render-time `var()` lookups.
+    #[serde(default)]
+    pub vars: BTreeMap<String, serde_json::Value>,
+    /// Mirrors `DbtRunInput.full_refresh`. Surfaces as `flags.FULL_REFRESH`,
+    /// which dbt's incremental materialization branches on.
+    #[serde(default)]
+    pub full_refresh: bool,
 }
 
 /// Phase of a `dbt_project.yml` lifecycle hook.
@@ -191,6 +198,12 @@ pub struct ProjectHooksInput {
     /// Node results for `on_run_end` (empty for `on_run_start`).
     #[serde(default)]
     pub node_results: Vec<NodeExecutionResult>,
+    /// Mirrors `DbtRunInput.vars` — hooks read `var()` like any other template.
+    #[serde(default)]
+    pub vars: BTreeMap<String, serde_json::Value>,
+    /// Mirrors `DbtRunInput.full_refresh`, exposed to hooks as `flags.FULL_REFRESH`.
+    #[serde(default)]
+    pub full_refresh: bool,
 }
 
 /// Result of executing a single node.
@@ -431,6 +444,8 @@ pub struct ResolveConfigInput {
 pub struct ResolvedProjectConfig {
     pub hooks: HooksConfig,
     pub retry: super::hooks::RetryConfig,
+    #[serde(default)]
+    pub timeouts: super::hooks::TimeoutConfig,
 }
 
 #[cfg(test)]
@@ -571,6 +586,7 @@ mod tests {
     fn resolved_project_config_round_trip() -> anyhow::Result<()> {
         use super::super::hooks::RetryConfig;
         let config = ResolvedProjectConfig {
+            timeouts: crate::types::TimeoutConfig::default(),
             hooks: HooksConfig::default(),
             retry: RetryConfig::default(),
         };

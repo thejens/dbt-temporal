@@ -17,12 +17,12 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use temporalio_sdk::error::ApplicationFailure;
 use tracing::info;
 
-use crate::error::DbtTemporalError;
 use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
 
 use super::DbtActivities;
 use super::heartbeat;
-use super::node_helpers::{json_to_minijinja, patch_target_global};
+use super::node_helpers::json_to_minijinja;
+use super::render_env;
 
 /// Outer wrapper — handles the `Result` translation, cancellation, and heartbeating.
 ///
@@ -68,74 +68,22 @@ pub async fn run_project_hooks_inner(
         "running project hooks"
     );
 
-    // ── Jinja env setup (mirrors execute_node_inner) ────────────────────
-    let mut jinja_env = (*state.jinja_env).clone();
-
-    // Per-workflow env_var() override.
-    if !input.env.is_empty() {
-        let env_overrides = Arc::new(input.env.clone());
-        jinja_env.env.add_func_func("env_var", move |state, args| {
-            let map = Arc::clone(&env_overrides);
-            let lookup = move |key: &str| -> Option<minijinja::Value> {
-                // Value::from(&str) uses minijinja's inline SmallStr where it fits,
-                // avoiding the second alloc that Value::from(String) would do.
-                map.get(key).map(|v| minijinja::Value::from(v.as_str()))
-            };
-            dbt_jinja_utils::env_var(false, Some(&lookup), state, args)
-        });
-    }
-
-    // Use per-workflow adapter engine if env overrides require it.
-    // _rebuild_guard keeps the RebuildResult alive for the duration of the activity.
-    #[allow(unused_assignments, clippy::collection_is_never_read)]
-    let mut _rebuild_guard = None;
-    let adapter_engine = if !input.env.is_empty() && state.profile_uses_env_vars {
-        let result = crate::worker::rebuild_adapter_engine_with_env(
-            state,
-            input.target.as_deref(),
-            &input.env,
-        )
-        .map_err(|e| {
-            DbtTemporalError::Configuration(format!(
-                "rebuilding adapter engine for {}: {e:#}",
-                input.phase
-            ))
-        })?;
-        let engine = Arc::clone(&result.engine);
-        // Patch target/env globals so hooks see the per-workflow schema/database.
-        patch_target_global(
-            &mut jinja_env,
-            &result.schema,
-            &result.database,
-            input.target.as_deref(),
-        );
-        _rebuild_guard = Some(result);
-        engine
-    } else {
-        Arc::clone(&state.adapter_engine)
-    };
-
-    let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
-    let adapter = Arc::new(dbt_adapter::Adapter::new(
-        Arc::new(adapter_impl),
-        None,
-        state.cancellation_source.token(),
-    ));
-
-    // Configure the Jinja env: registers adapter/api/dialect as globals,
-    // sets undefined behavior to lenient.
-    dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(
-        &mut jinja_env,
-        Arc::clone(&adapter),
-    );
-
-    // Set execute=true as a Jinja GLOBAL so cross-template macros (e.g. run_query
-    // dispatched from package macros) see it. dbt-fusion only sets it as a context
-    // variable in build_compile_and_run_base_context, which doesn't propagate to
-    // cross-template macro calls (upstream issue #1289 — closed as not-planned).
-    jinja_env
-        .env
-        .add_global("execute", minijinja::Value::from(true));
+    // ── Jinja env setup ─────────────────────────────────────────────────
+    // Shared with execute_node so hooks and nodes render against identical
+    // globals; see `render_env` for what the per-workflow overrides cover.
+    let phase = input.phase.to_string();
+    let mut render_env = render_env::prepare_render_env(
+        state,
+        &render_env::RenderOverrides {
+            env: &input.env,
+            target: input.target.as_deref(),
+            vars: &input.vars,
+            full_refresh: input.full_refresh,
+        },
+        &phase,
+    )?;
+    let jinja_env = &mut render_env.jinja_env;
+    let adapter = Arc::clone(&render_env.adapter);
 
     // ── Build base context ───────────────────────────────────────────────
     let namespace_keys: Vec<String> = jinja_env

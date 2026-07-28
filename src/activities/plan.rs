@@ -87,11 +87,68 @@ pub fn select_command_node_ids(
     }
 
     warn_unsupported_resource_types(state, input.command.as_str());
+    warn_parse_time_vars(state, &input.vars);
 
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes found for command '{}'", input.command);
     }
     Ok(selected_ids)
+}
+
+/// Warn when a workflow's `--vars` are read at parse time, where they cannot
+/// take effect.
+///
+/// The worker parses each project once at startup, so `var()` calls evaluated
+/// during parsing — `{{ config(...) }}` blocks, `dbt_project.yml` — are already
+/// baked in by the time a workflow runs. Render-time `var()` in model bodies,
+/// macros and hooks *is* overridden (see `render_env`). Naming the affected
+/// nodes is more useful than a blanket "vars may not work": it points at the
+/// exact models whose config would silently keep the startup value.
+fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json::Value>) {
+    if vars.is_empty() {
+        return;
+    }
+    let affected: Vec<String> = state
+        .resolver_state
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.common()
+                .raw_code
+                .as_deref()
+                .is_some_and(|code| config_block_reads_var(code, vars.keys()))
+        })
+        .map(|(id, _)| id.clone())
+        .take(20)
+        .collect();
+
+    if !affected.is_empty() {
+        warn!(
+            nodes = ?affected,
+            "workflow vars are referenced inside config() blocks, which are evaluated \
+             when the worker parses the project — those uses keep their startup value. \
+             Only render-time var() calls reflect the workflow's vars"
+        );
+    }
+}
+
+/// True if `raw_code` has a `config(...)` block mentioning `var('<name>')` for
+/// any of the given names.
+///
+/// Deliberately a substring scan rather than a Jinja parse: a false positive
+/// costs one warning line, and parsing every node's template at plan time to
+/// remove it would not be worth the cost.
+fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'a String>) -> bool {
+    let Some(config_start) = raw_code.find("config(") else {
+        return false;
+    };
+    let Some(config_end) = raw_code[config_start..].find(')') else {
+        return false;
+    };
+    let block = &raw_code[config_start..config_start + config_end];
+    var_names.into_iter().any(|name| {
+        block.contains(&format!("var('{name}'")) || block.contains(&format!("var(\"{name}\""))
+    })
 }
 
 /// Warn about resource types this planner never schedules.

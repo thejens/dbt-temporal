@@ -129,6 +129,8 @@ mod tests {
             defer_manifest_ref: None,
             event_time_start: None,
             event_time_end: None,
+            vars: BTreeMap::new(),
+            full_refresh: false,
         }
     }
 

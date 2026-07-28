@@ -25,12 +25,12 @@ use crate::hooks::execute_hooks;
 use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
     HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus, ProjectHookPhase,
-    ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig, RunSegmentState,
+    ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig, RetryConfig, RunSegmentState,
     SaveSegmentStateInput, StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
-use super::helpers::{elapsed_secs, plural};
+use super::helpers::{build_retry_policy, elapsed_secs, plural};
 
 /// Build the workflow-detail line shown after `plan_project` returns:
 /// "planned 17 nodes across 8 levels".
@@ -103,6 +103,39 @@ pub fn build_skip_output(
     }
 }
 
+/// What a project-hook activity is allowed to do: how long it may run, and
+/// whether it may retry.
+///
+/// Bundled because the two always travel together to both hook phases, and the
+/// call sites already carry enough arguments.
+#[derive(Clone, Copy)]
+pub struct HookPolicy<'a> {
+    pub timeouts: &'a TimeoutConfig,
+    pub retry: &'a RetryConfig,
+}
+
+/// Activity options for a project-hook phase.
+///
+/// A retry policy is attached only when the phase opted in. Temporal's default
+/// policy retries an unlimited number of times, so a hook that opts in without
+/// one would hammer a failing warehouse forever; bounding it with the project's
+/// own `retry` settings keeps hooks on the same budget as nodes. When the phase
+/// has not opted in the activity reports every failure as non-retryable, so no
+/// policy is needed.
+fn hook_activity_options(phase: ProjectHookPhase, policy: HookPolicy<'_>) -> ActivityOptions {
+    let options = ActivityOptions::with_start_to_close_timeout(Duration::from_secs(
+        policy.timeouts.hook_secs,
+    ))
+    .heartbeat_timeout(Duration::from_secs(policy.timeouts.hook_heartbeat_secs));
+    if policy.retry.project_hooks.allows(phase) {
+        options
+            .retry_policy(build_retry_policy(policy.retry))
+            .build()
+    } else {
+        options.build()
+    }
+}
+
 /// Build the input for `run_project_hooks` (on-run-start or on-run-end).
 /// `node_results` is empty for on-run-start, populated for on-run-end.
 pub fn build_project_hooks_input(
@@ -111,6 +144,7 @@ pub fn build_project_hooks_input(
     input: &DbtRunInput,
     effective_env: &BTreeMap<String, String>,
     node_results: &[NodeExecutionResult],
+    retry_config: &RetryConfig,
 ) -> ProjectHooksInput {
     ProjectHooksInput {
         phase,
@@ -121,6 +155,7 @@ pub fn build_project_hooks_input(
         node_results: node_results.to_vec(),
         vars: input.vars.clone(),
         full_refresh: input.full_refresh,
+        retry_on_error: retry_config.project_hooks.allows(phase),
     }
 }
 
@@ -410,7 +445,7 @@ pub async fn run_on_run_start(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
     effective_env: &BTreeMap<String, String>,
-    timeouts: &TimeoutConfig,
+    policy: HookPolicy<'_>,
 ) -> Result<(), WorkflowTermination> {
     if !plan.has_on_run_start {
         return Ok(());
@@ -418,10 +453,15 @@ pub async fn run_on_run_start(
     ctx.set_current_details("running on-run-start hooks".to_string());
     ctx.start_activity(
         DbtActivities::run_project_hooks,
-        build_project_hooks_input(ProjectHookPhase::OnRunStart, plan, input, effective_env, &[]),
-        ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.hook_secs))
-            .heartbeat_timeout(Duration::from_secs(timeouts.hook_heartbeat_secs))
-            .build(),
+        build_project_hooks_input(
+            ProjectHookPhase::OnRunStart,
+            plan,
+            input,
+            effective_env,
+            &[],
+            policy.retry,
+        ),
+        hook_activity_options(ProjectHookPhase::OnRunStart, policy),
     )
     .await
     .map_err(|e| {
@@ -469,7 +509,7 @@ pub async fn run_on_run_end(
     effective_env: &BTreeMap<String, String>,
     all_results: &[NodeExecutionResult],
     hook_errors: &mut Vec<HookError>,
-    timeouts: &TimeoutConfig,
+    policy: HookPolicy<'_>,
 ) {
     if !plan.has_on_run_end {
         return;
@@ -484,10 +524,9 @@ pub async fn run_on_run_end(
                 input,
                 effective_env,
                 all_results,
+                policy.retry,
             ),
-            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.hook_secs))
-                .heartbeat_timeout(Duration::from_secs(timeouts.hook_heartbeat_secs))
-                .build(),
+            hook_activity_options(ProjectHookPhase::OnRunEnd, policy),
         )
         .await;
     if let Err(e) = result {
@@ -792,6 +831,7 @@ mod tests {
             &input,
             &env,
             &[], // on-run-start has no results yet
+            &RetryConfig::default(),
         );
         assert_eq!(phs.phase, ProjectHookPhase::OnRunStart);
         assert_eq!(phs.project, "shop");
@@ -818,8 +858,14 @@ mod tests {
             failures: None,
             freshness: None,
         }];
-        let phs =
-            build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &results);
+        let phs = build_project_hooks_input(
+            ProjectHookPhase::OnRunEnd,
+            &plan,
+            &input,
+            &env,
+            &results,
+            &RetryConfig::default(),
+        );
         assert_eq!(phs.phase, ProjectHookPhase::OnRunEnd);
         assert_eq!(phs.node_results.len(), 1);
     }
@@ -1073,5 +1119,113 @@ mod tests {
         assert_eq!(payloads[0].0, "DbtStatus");
         let val: serde_json::Value = serde_json::from_slice(&payloads[0].1.data).unwrap();
         assert_eq!(val, serde_json::json!("failed"));
+    }
+
+    // --- project hook activity options ---
+
+    /// Without an explicit policy Temporal retries an activity indefinitely, so
+    /// an opted-in hook must carry the project's bounded one — otherwise
+    /// enabling retries would turn a failing warehouse into an endless loop.
+    #[test]
+    fn an_opted_in_phase_gets_the_projects_bounded_retry_policy() {
+        let retry = RetryConfig {
+            max_attempts: 7,
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let timeouts = TimeoutConfig::default();
+        let opts = hook_activity_options(
+            ProjectHookPhase::OnRunStart,
+            HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry,
+            },
+        );
+        let policy = opts
+            .retry_policy
+            .expect("an opted-in phase must bound its retries");
+        assert_eq!(policy.maximum_attempts, 7);
+    }
+
+    /// The phase that did not opt in reports every failure as non-retryable, so
+    /// it needs no policy — and must not silently acquire one.
+    #[test]
+    fn a_phase_that_did_not_opt_in_gets_no_retry_policy() {
+        let retry = RetryConfig {
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let timeouts = TimeoutConfig::default();
+        let opts = hook_activity_options(
+            ProjectHookPhase::OnRunEnd,
+            HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry,
+            },
+        );
+        assert!(opts.retry_policy.is_none(), "on_run_end did not opt in");
+    }
+
+    /// Timeouts apply either way — opting in changes retries, not deadlines.
+    #[test]
+    fn hook_timeouts_apply_regardless_of_the_opt_in() {
+        let timeouts = TimeoutConfig {
+            hook_secs: 111,
+            hook_heartbeat_secs: 60,
+            ..TimeoutConfig::default()
+        };
+        for on in [true, false] {
+            let retry = RetryConfig {
+                project_hooks: crate::types::ProjectHookRetry {
+                    on_run_start: on,
+                    on_run_end: on,
+                },
+                ..RetryConfig::default()
+            };
+            let opts = hook_activity_options(
+                ProjectHookPhase::OnRunStart,
+                HookPolicy {
+                    timeouts: &timeouts,
+                    retry: &retry,
+                },
+            );
+            assert_eq!(opts.heartbeat_timeout, Some(Duration::from_mins(1)));
+        }
+    }
+
+    /// The input carries the resolved decision, so the activity does not have
+    /// to re-read config on every attempt — and each phase carries its own.
+    #[test]
+    fn the_hooks_input_carries_the_resolved_opt_in_per_phase() {
+        let retry = RetryConfig {
+            project_hooks: crate::types::ProjectHookRetry {
+                on_run_start: true,
+                on_run_end: false,
+            },
+            ..RetryConfig::default()
+        };
+        let plan = empty_plan();
+        let input = empty_input();
+        let env = BTreeMap::new();
+
+        let start = build_project_hooks_input(
+            ProjectHookPhase::OnRunStart,
+            &plan,
+            &input,
+            &env,
+            &[],
+            &retry,
+        );
+        assert!(start.retry_on_error);
+
+        let end =
+            build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &[], &retry);
+        assert!(!end.retry_on_error);
     }
 }

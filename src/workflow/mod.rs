@@ -34,7 +34,7 @@ use self::helpers::{
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
-    build_list_output, load_segment_state, plan_and_announce, resolve_project_config,
+    HookPolicy, build_list_output, load_segment_state, plan_and_announce, resolve_project_config,
     run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks, save_segment_state,
     store_run_artifacts, upsert_terminal_status, write_command_memo,
 };
@@ -165,7 +165,11 @@ impl DbtRunWorkflow {
                 return Ok(out);
             }
 
-            run_on_run_start(ctx, &input, &plan, &effective_env, &timeouts).await?;
+            let hook_policy = HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry_config,
+            };
+            run_on_run_start(ctx, &input, &plan, &effective_env, hook_policy).await?;
         }
 
         ctx.state_mut(|s| s.status.phase = "executing".to_string());
@@ -222,7 +226,10 @@ impl DbtRunWorkflow {
             &effective_env,
             &levels.all_results,
             &mut hook_errors,
-            &timeouts,
+            HookPolicy {
+                timeouts: &timeouts,
+                retry: &retry_config,
+            },
         )
         .await;
 

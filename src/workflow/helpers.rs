@@ -769,6 +769,7 @@ mod tests {
             max_interval_secs: 120,
             backoff_coefficient: 3.0,
             non_retryable_errors: vec!["permission denied".into()],
+            project_hooks: crate::types::ProjectHookRetry::default(),
         };
         let policy = build_retry_policy(&config);
         assert_eq!(policy.maximum_attempts, 10);

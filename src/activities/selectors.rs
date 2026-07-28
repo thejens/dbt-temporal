@@ -99,6 +99,17 @@ pub fn apply_selectors(
         return Ok(selected_ids);
     }
 
+    // Reject methods this planner cannot evaluate before selection runs. An
+    // unevaluable criterion matches nothing, which is invisible in the two
+    // positions that matter: inside an `or` it silently under-selects, and in
+    // `--exclude` it silently excludes nothing.
+    if let Some(expr) = select_expr.as_ref() {
+        validate_selector_support(expr).context("invalid --select")?;
+    }
+    if let Some(expr) = exclude_expr.as_ref() {
+        validate_selector_support(expr).context("invalid --exclude")?;
+    }
+
     // Graph operators (`+model`, `model+`, `@model`) walk the dependency maps;
     // plain selectors never touch them. Building the maps clones every node id
     // in the project twice, so skip it when nothing walks the graph.
@@ -137,6 +148,77 @@ fn parse_selector(spec: Option<&str>) -> Result<Option<SelectExpression>, anyhow
         return Ok(None);
     }
     Ok(Some(parse_model_specifiers(&tokens)?))
+}
+
+/// Reject any criterion in `expr` that `matches_base_criteria` cannot evaluate.
+///
+/// dbt-common parses the full dbt selector grammar — 23 methods — while this
+/// planner evaluates a subset. The unevaluable ones must fail loudly here
+/// rather than reaching the matcher, where they would contribute an empty set
+/// and quietly change which nodes run.
+fn validate_selector_support(expr: &SelectExpression) -> Result<(), anyhow::Error> {
+    let mut errors = Vec::new();
+    collect_unsupported(expr, &mut errors);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    errors.dedup();
+    anyhow::bail!(
+        "unsupported selector method(s): {}. Supported: tag, fqn, path, package, \
+         resource_type, config.materialized, state:new, state:modified[.*]",
+        errors.join("; ")
+    )
+}
+
+/// Walk an expression tree, appending a message for each unsupported criterion.
+fn collect_unsupported(expr: &SelectExpression, errors: &mut Vec<String>) {
+    match expr {
+        SelectExpression::Atom(criteria) => {
+            if let Some(reason) = criterion_support_error(criteria) {
+                errors.push(reason);
+            }
+            if let Some(inner) = criteria.exclude.as_deref() {
+                collect_unsupported(inner, errors);
+            }
+        }
+        SelectExpression::And(exprs) | SelectExpression::Or(exprs) => {
+            for e in exprs {
+                collect_unsupported(e, errors);
+            }
+        }
+        SelectExpression::Exclude(inner) => collect_unsupported(inner, errors),
+    }
+}
+
+/// Why a single criterion cannot be evaluated, or `None` when it can.
+///
+/// Kept adjacent to `matches_base_criteria` — the two must agree, or a method
+/// passes validation and then silently matches nothing.
+fn criterion_support_error(criteria: &SelectionCriteria) -> Option<String> {
+    match criteria.method {
+        MethodName::Tag
+        | MethodName::Fqn
+        | MethodName::Path
+        | MethodName::Package
+        | MethodName::ResourceType => None,
+        // Only the two state sets this planner computes from a previous
+        // manifest. `state:old` / `state:unmodified` parse fine but have no
+        // backing set, so they would match nothing.
+        MethodName::State => {
+            let v = criteria.value.as_str();
+            if v == "new" || v == "modified" || v.starts_with("modified.") {
+                None
+            } else {
+                Some(format!("state:{v}"))
+            }
+        }
+        MethodName::Config => match criteria.method_args.first().map(String::as_str) {
+            Some("materialized") => None,
+            Some(arg) => Some(format!("config.{arg}")),
+            None => Some("config (no sub-selector)".to_string()),
+        },
+        other => Some(other.to_string()),
+    }
 }
 
 /// True if any criterion in the expression walks the dependency graph
@@ -288,6 +370,90 @@ fn walk_graph(
     }
 }
 
+/// Match a node's FQN against an `fqn:` selector value.
+///
+/// dbt treats the value as dot-separated FQN segments matched against the
+/// node's FQN (`[package, ...directories, name]`), as a prefix, with `*`
+/// wildcards per segment. The package element is optional so `--select
+/// staging.stg_customers` works without naming the package. A bare value also
+/// matches the node name outright, which is the common `--select my_model`
+/// form.
+///
+/// Prefix rather than substring matching is what keeps `--select stg` from
+/// also selecting `stg_customers`.
+fn fqn_matches(fqn: &[String], name: &str, value: &str) -> bool {
+    let segments: Vec<&str> = value.split('.').collect();
+    if segments.len() == 1 && segment_matches(segments[0], name) {
+        return true;
+    }
+    // Try against the full FQN, then again with the leading package element
+    // dropped so callers may omit it.
+    fqn_prefix_matches(fqn, &segments)
+        || fqn
+            .split_first()
+            .is_some_and(|(_, rest)| fqn_prefix_matches(rest, &segments))
+}
+
+/// True when `segments` matches a leading run of `fqn`, wildcards allowed.
+fn fqn_prefix_matches(fqn: &[String], segments: &[&str]) -> bool {
+    if segments.len() > fqn.len() {
+        return false;
+    }
+    segments
+        .iter()
+        .zip(fqn)
+        .all(|(seg, actual)| segment_matches(seg, actual))
+}
+
+/// Glob-match one selector segment against one FQN element.
+///
+/// Only `*` is supported (dbt also allows `?` and character classes, which do
+/// not appear in practice for FQN selection).
+fn segment_matches(segment: &str, actual: &str) -> bool {
+    if !segment.contains('*') {
+        return segment == actual;
+    }
+    let mut rest = actual;
+    let mut parts = segment.split('*');
+    // A leading literal must anchor at the start.
+    if let Some(first) = parts.next() {
+        let Some(stripped) = rest.strip_prefix(first) else {
+            return false;
+        };
+        rest = stripped;
+    }
+    let literals: Vec<&str> = parts.collect();
+    let Some((last, middle)) = literals.split_last() else {
+        return true;
+    };
+    for literal in middle {
+        let Some(pos) = rest.find(literal) else {
+            return false;
+        };
+        rest = &rest[pos + literal.len()..];
+    }
+    // A trailing literal must anchor at the end.
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+/// Match a node's source file against a `path:` selector value.
+///
+/// dbt selects a node when its `original_file_path` *is* the given path or
+/// lives underneath it as a directory. Comparing whole path components rather
+/// than raw substrings is what stops `path:models/staging` from also matching
+/// `models/staging_v2/…`.
+fn path_matches(original_file_path: &std::path::Path, value: &str) -> bool {
+    let needle = std::path::Path::new(value.trim_end_matches('/'));
+    let mut node_parts = original_file_path.components();
+    for want in needle.components() {
+        match node_parts.next() {
+            Some(got) if got == want => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Check if a node matches the base criterion (without graph operators).
 fn matches_base_criteria(
     unique_id: &str,
@@ -309,16 +475,8 @@ fn matches_base_criteria(
             }
         }
         MethodName::Tag => node.common().tags.contains(&criteria.value),
-        MethodName::Fqn => {
-            let name = &node.common().name;
-            let fqn = node.common().fqn.join(".");
-            criteria.value == *name || fqn.contains(&criteria.value)
-        }
-        MethodName::Path => node
-            .common()
-            .original_file_path
-            .to_string_lossy()
-            .contains(&criteria.value),
+        MethodName::Fqn => fqn_matches(&node.common().fqn, &node.common().name, &criteria.value),
+        MethodName::Path => path_matches(&node.common().original_file_path, &criteria.value),
         MethodName::ResourceType => {
             // `as_str_name()` returns the proto enum constant ("NODE_TYPE_TEST");
             // dbt-style selectors pass the bare name ("test"). Normalize both ends.
@@ -531,12 +689,75 @@ mod tests {
 
     #[test]
     fn apply_selectors_filters_by_fqn_name_exact() {
-        // The fqn matcher accepts an exact name OR a substring of the dotted fqn,
-        // so a search like "customers" matches anything whose fqn contains it
-        // (including "stg_customers"). Use a name that's only one node's exact match.
         let (ids, nodes) = build_three_model_project();
         let out = apply_selectors(ids, &nodes, Some("stg_orders"), None, None).unwrap();
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
+    }
+
+    /// Regression: the matcher used to substring-match the dotted FQN, so
+    /// `customers` also pulled in `stg_customers`.
+    #[test]
+    fn apply_selectors_fqn_name_does_not_substring_match() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("customers"), None, None).unwrap();
+        assert_eq!(out, vec!["model.shop.customers".to_string()]);
+    }
+
+    #[test]
+    fn apply_selectors_fqn_matches_dotted_path_with_and_without_package() {
+        let (ids, nodes) = build_three_model_project();
+        let expected = vec![
+            "model.shop.stg_customers".to_string(),
+            "model.shop.stg_orders".to_string(),
+        ];
+
+        let with_package =
+            apply_selectors(ids.clone(), &nodes, Some("shop.staging"), None, None).unwrap();
+        assert_eq!(with_package, expected);
+
+        let without_package = apply_selectors(ids, &nodes, Some("staging"), None, None).unwrap();
+        assert_eq!(without_package, expected);
+    }
+
+    #[test]
+    fn apply_selectors_fqn_supports_wildcards() {
+        let (ids, nodes) = build_three_model_project();
+        let out = apply_selectors(ids, &nodes, Some("stg_*"), None, None).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "model.shop.stg_customers".to_string(),
+                "model.shop.stg_orders".to_string()
+            ]
+        );
+    }
+
+    /// Regression: `path:` used raw substring matching, so a `models/staging`
+    /// selector also matched a sibling `models/staging_v2/` directory.
+    #[test]
+    fn path_matches_on_whole_components_not_substrings() {
+        use std::path::Path;
+
+        assert!(path_matches(Path::new("models/staging/stg_customers.sql"), "models/staging"));
+        assert!(path_matches(Path::new("models/staging/stg_customers.sql"), "models/staging/"));
+        assert!(path_matches(Path::new("models/customers.sql"), "models/customers.sql"));
+
+        assert!(!path_matches(Path::new("models/staging_v2/x.sql"), "models/staging"));
+        assert!(!path_matches(Path::new("models/staging/x.sql"), "staging"));
+        assert!(!path_matches(Path::new("models/customers.sql"), "models/staging"));
+    }
+
+    #[test]
+    fn segment_matches_handles_wildcard_positions() {
+        assert!(segment_matches("exact", "exact"));
+        assert!(!segment_matches("exact", "exactly"));
+        assert!(segment_matches("*", "anything"));
+        assert!(segment_matches("stg_*", "stg_orders"));
+        assert!(!segment_matches("stg_*", "fct_orders"));
+        assert!(segment_matches("*_orders", "stg_orders"));
+        assert!(!segment_matches("*_orders", "stg_orders_v2"));
+        assert!(segment_matches("stg_*_v2", "stg_orders_v2"));
+        assert!(!segment_matches("stg_*_v2", "stg_orders_v3"));
     }
 
     #[test]
@@ -591,14 +812,65 @@ mod tests {
     }
 
     #[test]
-    fn apply_selectors_unknown_config_field_returns_empty() {
-        // Some malformed selectors are accepted by the parser but match nothing;
-        // the contract for apply_selectors here is "either error or return empty".
+    fn apply_selectors_unknown_config_field_is_rejected() {
         let (ids, nodes) = build_three_model_project();
-        let result = apply_selectors(ids, &nodes, Some("config:not_a_field=foo"), None, None);
-        if let Ok(out) = result {
-            assert!(out.is_empty());
+        let err = apply_selectors(ids, &nodes, Some("config:not_a_field=foo"), None, None)
+            .expect_err("unsupported config sub-selector must be rejected");
+        assert!(err.to_string().contains("--select"), "got: {err:#}");
+    }
+
+    // --- unsupported method rejection ---
+
+    /// The failure mode this guards: an unevaluable method contributes an empty
+    /// set, so inside an `or` it silently drops nodes the user asked for.
+    #[test]
+    fn unsupported_method_in_union_is_rejected_not_ignored() {
+        let (ids, nodes) = build_three_model_project();
+        let err = apply_selectors(ids, &nodes, Some("tag:nightly source:raw"), None, None)
+            .expect_err("source: is not evaluable and must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("source"), "should name the method: {msg}");
+        assert!(msg.contains("unsupported selector method"), "got: {msg}");
+    }
+
+    /// And in `--exclude` it silently excludes nothing, which over-selects.
+    #[test]
+    fn unsupported_method_in_exclude_is_rejected() {
+        let (ids, nodes) = build_three_model_project();
+        let err = apply_selectors(ids, &nodes, None, Some("test_type:generic"), None)
+            .expect_err("test_type: is not evaluable and must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--exclude"), "got: {msg}");
+        assert!(msg.contains("test_type"), "should name the method: {msg}");
+    }
+
+    #[test]
+    fn unsupported_state_subselector_is_rejected() {
+        let nodes = state_nodes();
+        let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+        let err = apply_selectors(ids, &nodes, Some("state:unmodified"), None, None)
+            .expect_err("state:unmodified has no backing set");
+        assert!(format!("{err:#}").contains("state:unmodified"), "got: {err:#}");
+    }
+
+    #[test]
+    fn supported_state_subselectors_are_accepted() {
+        let nodes = state_nodes();
+        let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+        for sel in ["state:new", "state:modified", "state:modified.body"] {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None)
+                .unwrap_or_else(|e| panic!("{sel} should be accepted: {e:#}"));
         }
+    }
+
+    /// A `.sql` value parses as the `file` method, which is unsupported — the
+    /// user gets told rather than seeing an empty run.
+    #[test]
+    fn file_method_from_bare_sql_name_is_rejected() {
+        let (ids, nodes) = build_three_model_project();
+        let err = apply_selectors(ids, &nodes, Some("customers.sql"), None, None)
+            .expect_err("file: is not evaluable and must be rejected");
+        assert!(format!("{err:#}").contains("file"), "got: {err:#}");
     }
 
     /// Build a 4-node DAG: stg_customers, stg_orders -> orders -> ar_summary

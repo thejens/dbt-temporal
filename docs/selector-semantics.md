@@ -90,3 +90,51 @@ depend — even transitively through an ephemeral model — on a model in anothe
 directory, either move the shared model into the selected path or run with a
 broader selector (e.g. `+leaf_model`) so dbt resolves the upstream dependency
 for you.
+
+---
+
+# Supported selector methods
+
+dbt-temporal parses the full dbt selector grammar (via `dbt-common`) but
+evaluates a subset of the methods. Anything outside this list is **rejected**
+at plan time with an error naming the method.
+
+| Method | Supported | Notes |
+|---|---|---|
+| *(bare name)* | yes | `fqn` — exact node name, or dotted FQN prefix, `*` wildcards |
+| `tag:` | yes | exact tag match |
+| `path:` | yes | whole-component path prefix (a file, or a directory and everything under it) |
+| `package:` | yes | exact package name |
+| `resource_type:` | yes | `model`, `test`, `seed`, `snapshot`, `unit_test`, … |
+| `config.materialized:` | yes | the only `config.` sub-selector |
+| `state:new` | yes | requires `state_manifest_ref` |
+| `state:modified[.*]` | yes | all `modified.<sub>` forms coarsen to the full modified set |
+| `config.<other>:` | **no** | |
+| `state:old`, `state:unmodified` | **no** | no backing set is computed |
+| `file:` | **no** | note a bare `foo.sql` value parses as `file:` |
+| `source:`, `exposure:`, `metric:`, `saved_query:`, `semantic_model:`, `function:` | **no** | those resource types have no execution path either |
+| `test_name:`, `test_type:`, `group:`, `access:`, `version:`, `result:`, `source_status:`, `column:` | **no** | |
+
+Graph operators (`+model`, `model+`, `N+model`, `@model`), unions (space),
+intersections (comma) and nested excludes all work with any supported method.
+
+## Why rejection rather than "matches nothing"
+
+An unevaluable method contributes an empty match set. Alone that surfaces as
+"no nodes matched", but in the two positions that matter it is silent:
+
+- inside a union (`--select "tag:nightly source:raw"`) it drops the nodes the
+  second half asked for, and the run reports success having built less than
+  requested;
+- in `--exclude` it excludes nothing, so the run builds *more* than requested.
+
+Both produce a green run with the wrong node set, so the planner fails fast
+instead.
+
+## `--indirect-selection` and `selectors.yml`
+
+Neither is supported. dbt's `--indirect-selection` modes (`eager`, `cautious`,
+`buildable`, `empty`) govern how tests are pulled in alongside selected models;
+dbt-temporal always behaves as `eager` and additionally injects its own test
+gates (see the `architecture-invariants` notes). Named selectors from
+`selectors.yml` are not read — pass the expanded selector string instead.

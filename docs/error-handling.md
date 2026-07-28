@@ -105,5 +105,7 @@ than failing — so a very large run on a worker without artifact storage can
 still hit the server limit. Configure a store if you build projects at that
 scale.
 
-Continuation never fires before the first level completes; a run already over
-the threshold would otherwise continue forever without making progress.
+Every segment executes at least one level before it may hand off. A run that
+arrives already over the threshold would otherwise continue forever without
+making progress — and since a resumed segment starts partway through the plan,
+that guard counts levels done *in the current segment*, not the level index.

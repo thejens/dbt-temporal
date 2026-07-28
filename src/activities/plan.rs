@@ -86,10 +86,111 @@ pub fn select_command_node_ids(
         );
     }
 
+    warn_unsupported_resource_types(state, input.command.as_str());
+    warn_parse_time_vars(state, &input.vars);
+
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes found for command '{}'", input.command);
     }
     Ok(selected_ids)
+}
+
+/// Warn when a workflow's `--vars` are read at parse time, where they cannot
+/// take effect.
+///
+/// The worker parses each project once at startup, so `var()` calls evaluated
+/// during parsing — `{{ config(...) }}` blocks, `dbt_project.yml` — are already
+/// baked in by the time a workflow runs. Render-time `var()` in model bodies,
+/// macros and hooks *is* overridden (see `render_env`). Naming the affected
+/// nodes is more useful than a blanket "vars may not work": it points at the
+/// exact models whose config would silently keep the startup value.
+fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json::Value>) {
+    if vars.is_empty() {
+        return;
+    }
+    let affected: Vec<String> = state
+        .resolver_state
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.common()
+                .raw_code
+                .as_deref()
+                .is_some_and(|code| config_block_reads_var(code, vars.keys()))
+        })
+        .map(|(id, _)| id.clone())
+        .take(20)
+        .collect();
+
+    if !affected.is_empty() {
+        warn!(
+            nodes = ?affected,
+            "workflow vars are referenced inside config() blocks, which are evaluated \
+             when the worker parses the project — those uses keep their startup value. \
+             Only render-time var() calls reflect the workflow's vars"
+        );
+    }
+}
+
+/// True if `raw_code` has a `config(...)` block mentioning `var('<name>')` for
+/// any of the given names.
+///
+/// Deliberately a substring scan rather than a Jinja parse: a false positive
+/// costs one warning line, and parsing every node's template at plan time to
+/// remove it would not be worth the cost.
+fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'a String>) -> bool {
+    let Some(config_start) = raw_code.find("config(") else {
+        return false;
+    };
+    let Some(config_end) = raw_code[config_start..].find(')') else {
+        return false;
+    };
+    let block = &raw_code[config_start..config_start + config_end];
+    var_names.into_iter().any(|name| {
+        block.contains(&format!("var('{name}'")) || block.contains(&format!("var(\"{name}\""))
+    })
+}
+
+/// Warn about resource types this planner never schedules.
+///
+/// dbt Core v2 resolves functions, exposures, metrics, saved queries and
+/// semantic models into the same node graph as models, but dbt-temporal has no
+/// execution path for them. Silently dropping them makes a run look complete
+/// when part of the project was never built, so say so once per plan. Only
+/// graph-building commands warn — the single-resource commands (`run`, `test`,
+/// `seed`, …) legitimately ignore everything outside their own type.
+fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
+    if !matches!(command, "build" | "list") {
+        return;
+    }
+    let nodes = &state.resolver_state.nodes;
+    let unsupported: Vec<(&str, usize)> = [
+        ("functions", nodes.functions.len()),
+        ("exposures", nodes.exposures.len()),
+        ("metrics", nodes.metrics.len()),
+        ("saved_queries", nodes.saved_queries.len()),
+        ("semantic_models", nodes.semantic_models.len()),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+    .collect();
+
+    if !unsupported.is_empty() {
+        warn!(
+            resources = ?unsupported,
+            "project defines resource types dbt-temporal does not execute — \
+             they are excluded from the plan and will not be built"
+        );
+    }
+}
+
+/// Tag an artifact-store read/write as retryable.
+///
+/// The planner's own failures are permanent (bad selector, missing project),
+/// but its object-store round-trips fail transiently like any network call and
+/// must not sink the run on a single 5xx.
+fn artifact_io_error(e: anyhow::Error) -> anyhow::Error {
+    crate::error::DbtTemporalError::ArtifactStore(e).into()
 }
 
 /// Plan activity inner logic — called from DbtActivities::plan_project.
@@ -125,10 +226,9 @@ pub async fn plan_project_inner(
                  (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
             )
         })?;
-        let bytes = artifact_store
-            .retrieve(manifest_ref)
-            .await
-            .with_context(|| format!("loading state manifest from {manifest_ref}"))?;
+        let bytes = artifact_store.retrieve(manifest_ref).await.map_err(|e| {
+            artifact_io_error(e.context(format!("loading state manifest from {manifest_ref}")))
+        })?;
         let manifest: serde_json::Value =
             serde_json::from_slice(&bytes).context("parsing state manifest JSON")?;
         Some(super::selectors::StateSelector::from_previous_manifest(
@@ -162,10 +262,9 @@ pub async fn plan_project_inner(
                  (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
             )
         })?;
-        let bytes = artifact_store
-            .retrieve(retry_ref)
-            .await
-            .with_context(|| format!("loading previous run_results from {retry_ref}"))?;
+        let bytes = artifact_store.retrieve(retry_ref).await.map_err(|e| {
+            artifact_io_error(e.context(format!("loading previous run_results from {retry_ref}")))
+        })?;
         let retry_ids = parse_retry_node_ids(&bytes)?;
         let filtered: Vec<String> = selected_ids
             .into_iter()
@@ -236,7 +335,8 @@ pub async fn plan_project_inner(
             })?;
             let path = artifact_store
                 .store(&invocation_id, "manifest.json", manifest_json.as_bytes())
-                .await?;
+                .await
+                .map_err(|e| artifact_io_error(e.context("storing manifest.json")))?;
             (None, Some(path))
         }
     } else {
@@ -386,6 +486,10 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
         "compile" => matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot),
         // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
         "test" => matches!(rt, NodeType::Test),
+        // seed / snapshot mirror the single-resource dbt commands of the same
+        // name. Both assume the rest of the graph is already in place.
+        "seed" => matches!(rt, NodeType::Seed),
+        "snapshot" => matches!(rt, NodeType::Snapshot),
         // list selects the full graph (same as build) — the workflow returns node metadata
         // without executing; no SQL is compiled or sent to the warehouse.
         "list" => matches!(
@@ -553,6 +657,45 @@ mod tests {
         assert!(!command_includes_node_type("test", NodeType::Model));
         assert!(!command_includes_node_type("test", NodeType::Seed));
         assert!(!command_includes_node_type("test", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn seed_command_includes_only_seeds() {
+        assert!(command_includes_node_type("seed", NodeType::Seed));
+        assert!(!command_includes_node_type("seed", NodeType::Model));
+        assert!(!command_includes_node_type("seed", NodeType::Test));
+        assert!(!command_includes_node_type("seed", NodeType::Snapshot));
+    }
+
+    #[test]
+    fn snapshot_command_includes_only_snapshots() {
+        assert!(command_includes_node_type("snapshot", NodeType::Snapshot));
+        assert!(!command_includes_node_type("snapshot", NodeType::Model));
+        assert!(!command_includes_node_type("snapshot", NodeType::Test));
+        assert!(!command_includes_node_type("snapshot", NodeType::Seed));
+    }
+
+    /// Resource types with no execution path must stay out of every command's
+    /// plan — they are reported via `warn_unsupported_resource_types` instead.
+    #[test]
+    fn no_command_schedules_unsupported_resource_types() {
+        for command in [
+            "run", "build", "compile", "test", "seed", "snapshot", "list",
+        ] {
+            for rt in [
+                NodeType::Function,
+                NodeType::Exposure,
+                NodeType::Metric,
+                NodeType::SavedQuery,
+                NodeType::SemanticModel,
+                NodeType::Analysis,
+            ] {
+                assert!(
+                    !command_includes_node_type(command, rt),
+                    "{command} should not schedule {rt:?}"
+                );
+            }
+        }
     }
 
     #[test]

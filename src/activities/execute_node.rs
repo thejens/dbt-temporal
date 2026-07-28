@@ -18,21 +18,22 @@ use schema_patch::{
 };
 use schema_patcher::has_env_var_in_config_schema_or_database;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use temporalio_sdk::error::ApplicationFailure;
+
 use tracing::{info, warn};
 use yml_to_value::yml_value_to_minijinja_with_jinja;
 
 use crate::error::DbtTemporalError;
-use crate::project_registry::ProjectRegistry;
+
 use crate::types::{NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
 
 use super::DbtActivities;
 use super::heartbeat;
 use super::node_helpers::{
-    extract_adapter_response, extract_test_failures, inject_ephemeral_ctes, patch_target_global,
-    render_materialization,
+    extract_adapter_response, extract_test_failures, inject_ephemeral_ctes, render_materialization,
 };
 use super::node_serialization::{build_agate_table, get_node_config_yml, get_sql_header};
+use super::render_env;
+use super::retry;
 
 /// Execute node activity — outer wrapper that handles errors, cancellation,
 /// and periodic heartbeating.
@@ -62,9 +63,12 @@ pub async fn execute_node_outer(
                     // {:#} prints the whole context chain; the top context
                     // alone routinely hides the actionable cause.
                     tracing::error!(node = %unique_id, error = %format!("{e:#}"), "activity failed");
-                    let dbt_err = downcast_or_wrap_as_adapter(e);
-                    let patterns = registry_non_retryable_patterns(&activities.registry, &project);
-                    Err(classify_for_temporal(&dbt_err, patterns.as_deref().unwrap_or(&[])))
+                    let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
+                    Err(retry::classify(
+                        e,
+                        patterns.as_deref().unwrap_or(&[]),
+                        retry::Unclassified::RetryAsAdapter,
+                    ))
                 }
             }
         }
@@ -80,75 +84,133 @@ pub async fn execute_node_outer(
     }
 }
 
-/// Whether to surface an error to Temporal as retryable or not.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RetryDecision {
-    /// Retry within the activity's retry policy.
-    Retry,
-    /// Skip the policy — the error is permanent.
-    NoRetry,
-}
-
-/// Decide whether a `DbtTemporalError` should be surfaced to Temporal as retryable.
+/// Load the deferred node set from a previous run's manifest.
 ///
-/// Adapter errors are retryable by default unless the user-supplied pattern
-/// list matches the error's display string. All other variants — Compilation,
-/// Configuration, ProjectNotFound, TestFailure — are permanent.
-pub fn decide_retry(
-    err: &DbtTemporalError,
-    non_retryable_patterns: &[regex::Regex],
-) -> RetryDecision {
-    if !err.is_retryable() {
-        return RetryDecision::NoRetry;
-    }
-    if non_retryable_patterns.is_empty() {
-        return RetryDecision::Retry;
-    }
-    let msg = err.to_string();
-    if crate::error::matches_error_patterns(&msg, non_retryable_patterns) {
-        tracing::info!(
-            error = %msg,
-            "adapter error matched non-retryable pattern, suppressing retry"
-        );
-        RetryDecision::NoRetry
-    } else {
-        RetryDecision::Retry
-    }
+/// `--defer`'s purpose: unbuilt upstream `ref()`s resolve against the relations
+/// that manifest describes instead of failing.
+async fn load_defer_nodes(
+    activities: &DbtActivities,
+    manifest_ref: Option<&str>,
+) -> Result<Option<dbt_schemas::schemas::Nodes>, anyhow::Error> {
+    let Some(manifest_ref) = manifest_ref else {
+        return Ok(None);
+    };
+    let store = activities.artifact_store.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "defer_manifest_ref requires artifact storage to be configured \
+             (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+        )
+    })?;
+    let bytes = store.retrieve(manifest_ref).await.map_err(|e| {
+        DbtTemporalError::ArtifactStore(
+            e.context(format!("loading defer manifest from {manifest_ref}")),
+        )
+    })?;
+    // Manifests must parse through dbt's own serde path (JSON → YmlValue →
+    // typed): node config structs serialize warehouse-specific keys flattened,
+    // which the plain serde_json deserializer rejects ("missing field
+    // __warehouse_specific_config__").
+    let manifest_str = std::str::from_utf8(&bytes).context("defer manifest is not UTF-8")?;
+    let manifest: dbt_schemas::schemas::manifest::DbtManifest =
+        dbt_schemas::schemas::serde::typed_struct_from_json_str(manifest_str, None)
+            .map_err(|e| anyhow::anyhow!("parsing defer manifest JSON: {e}"))?;
+    let quoting = dbt_schemas::schemas::common::DbtQuoting {
+        database: Some(false),
+        schema: Some(true),
+        identifier: Some(true),
+        snowflake_ignore_case: None,
+    };
+    Ok(Some(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting)))
 }
 
-/// Wrap an `anyhow::Error` as an `ActivityError` whose retry classification
-/// follows from `decide_retry`.
-fn classify_for_temporal(
-    dbt_err: &DbtTemporalError,
-    non_retryable_patterns: &[regex::Regex],
-) -> ActivityError {
-    let source = anyhow::anyhow!("{dbt_err}");
-    match decide_retry(dbt_err, non_retryable_patterns) {
-        RetryDecision::Retry => ActivityError::application(ApplicationFailure::new(source)),
-        RetryDecision::NoRetry => {
-            ActivityError::application(ApplicationFailure::non_retryable(source))
+/// Build the compile+run base context, wired to an activity-scoped
+/// `ResultStore`.
+///
+/// The store is returned alongside because the caller must re-inject its
+/// closures after `build_run_node_context` overwrites them — see the call site.
+/// Without that, `adapter_response` extraction reads a different store than the
+/// materialization macros wrote to.
+fn build_base_context(
+    state: &crate::worker_state::WorkerState,
+    defer_nodes: Option<&dbt_schemas::schemas::Nodes>,
+    namespace_keys: Vec<String>,
+) -> (BTreeMap<String, minijinja::Value>, ResultStore) {
+    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
+        Arc::clone(&state.resolver_state.node_resolver),
+        &state.resolver_state.root_project_name,
+        &state.resolver_state.nodes,
+        defer_nodes,
+        Arc::clone(&state.resolver_state.runtime_config),
+        namespace_keys,
+        None,
+    );
+    let result_store = ResultStore::default();
+    inject_result_store(&mut base_context, &result_store);
+    (base_context, result_store)
+}
+
+/// Point a context's `store_result` / `load_result` / `store_raw_result` at
+/// `store`.
+fn inject_result_store(context: &mut BTreeMap<String, minijinja::Value>, store: &ResultStore) {
+    context
+        .insert("store_result".to_owned(), minijinja::Value::from_function(store.store_result()));
+    context.insert("load_result".to_owned(), minijinja::Value::from_function(store.load_result()));
+    context.insert(
+        "store_raw_result".to_owned(),
+        minijinja::Value::from_function(store.store_raw_result()),
+    );
+}
+
+/// Per-activity scratch space for one node execution.
+///
+/// Activities must never share `target/`: dbt-fusion writes compiled SQL and
+/// per-ephemeral cumulative CTE chains there, and concurrent workflows on the
+/// same worker would race on those files. Each activity therefore gets a fresh
+/// temp dir seeded from the worker's in-memory SQL caches.
+///
+/// Holding the `TempDir` keeps the directory alive; dropping this struct
+/// deletes it, so it must outlive every render that reads from `io_args`.
+struct ActivityWorkspace {
+    _temp_dir: tempfile::TempDir,
+    ephemeral_dir: std::path::PathBuf,
+    io_args: dbt_common::io_args::IoArgs,
+}
+
+impl ActivityWorkspace {
+    fn new(
+        state: &crate::worker_state::WorkerState,
+        node_path: &std::path::Path,
+        rt: NodeType,
+        invocation_id: &str,
+    ) -> Result<Self, anyhow::Error> {
+        let temp_dir = tempfile::tempdir().context("creating temp dir for activity")?;
+        let out_dir = temp_dir.path().to_path_buf();
+
+        let ephemeral_dir = temp_dir.path().join("ephemeral");
+        std::fs::create_dir_all(&ephemeral_dir)
+            .with_context(|| format!("creating ephemeral dir {}", ephemeral_dir.display()))?;
+
+        let cache_key = node_path.to_string_lossy().to_string();
+        write_cached_sql(
+            &state.compiled_sql_cache,
+            &cache_key,
+            &out_dir.join("compiled").join(node_path),
+        )?;
+        if rt == NodeType::Snapshot {
+            write_cached_sql(&state.snapshot_sql_cache, &cache_key, &out_dir.join(node_path))?;
         }
-    }
-}
 
-/// Try to recover the original `DbtTemporalError` from an `anyhow::Error`,
-/// falling back to wrapping the error as `Adapter` (the retryable default).
-fn downcast_or_wrap_as_adapter(err: anyhow::Error) -> DbtTemporalError {
-    match err.downcast::<DbtTemporalError>() {
-        Ok(d) => d,
-        Err(other) => DbtTemporalError::Adapter(other),
+        Ok(Self {
+            _temp_dir: temp_dir,
+            ephemeral_dir,
+            io_args: dbt_common::io_args::IoArgs {
+                in_dir: state.io_args.in_dir.clone(),
+                out_dir,
+                invocation_id: parse_invocation_id(invocation_id)?,
+                ..Default::default()
+            },
+        })
     }
-}
-
-/// Look up the user-configured non-retryable patterns for a project. Returns
-/// `None` when the project isn't registered (during tests or shutdown) so the
-/// caller can fall back to "all adapter errors retry".
-fn registry_non_retryable_patterns(
-    registry: &Arc<ProjectRegistry>,
-    project: &str,
-) -> Option<Vec<regex::Regex>> {
-    let state = registry.get(Some(project)).ok()?;
-    Some(state.non_retryable_error_patterns.clone())
 }
 
 /// Patch refs in compiled SQL when a per-workflow env override changed the
@@ -382,73 +444,22 @@ pub async fn execute_node_inner(
     // --- COMPILE PHASE ---
     let compile_start = chrono::Utc::now();
 
-    // Clone the Jinja environment for this execution and configure for run phase.
-    let mut jinja_env = (*state.jinja_env).clone();
-
-    // Override env_var() with per-workflow environment variables so parallel
-    // workflows get isolated env — no shared process-level env vars.
-    if !input.env.is_empty() {
-        let env_overrides = Arc::new(input.env.clone());
-        jinja_env.env.add_func_func("env_var", move |state, args| {
-            // dbt_jinja_utils::LookupFn = dyn Fn(&str) -> Option<Value>, which is
-            // implicitly 'static — the inner closure must own its captures, so we
-            // bump the Arc refcount per call.
-            let map = Arc::clone(&env_overrides);
-            let lookup = move |key: &str| -> Option<minijinja::Value> {
-                // Value::from(&str) uses minijinja's inline SmallStr where it fits,
-                // avoiding the second alloc that Value::from(String) would do.
-                map.get(key).map(|v| minijinja::Value::from(v.as_str()))
-            };
-            dbt_jinja_utils::env_var(false, Some(&lookup), state, args)
-        });
-    }
-
-    // Use per-workflow adapter engine if env overrides require it (profiles.yml uses env_var),
-    // otherwise use the shared adapter engine from worker startup.
-    // When rebuilding, capture the per-workflow schema/database for relation patching.
-    //
-    // _rebuild_guard keeps the RebuildResult (and its CancellationTokenSource) alive
-    // for the duration of the activity. The engine's cancellation token holds a Weak
-    // ref to the source; without this guard, the source is dropped and every SQL
-    // statement is immediately cancelled.
-    #[allow(unused_assignments, clippy::collection_is_never_read)]
-    // _rebuild_guard is a drop guard, not read
-    let mut _rebuild_guard = None;
-    let (adapter_engine, env_schema, env_database) =
-        if !input.env.is_empty() && state.profile_uses_env_vars {
-            let result = crate::worker::rebuild_adapter_engine_with_env(
-                state,
-                input.target.as_deref(),
-                &input.env,
-            )
-            .map_err(|e| {
-                DbtTemporalError::Configuration(format!("rebuilding adapter engine: {e:#}"))
-            })?;
-            let engine = Arc::clone(&result.engine);
-            let schema = result.schema.clone();
-            let database = result.database.clone();
-            _rebuild_guard = Some(result);
-            (engine, Some(schema), Some(database))
-        } else {
-            (Arc::clone(&state.adapter_engine), None, None)
-        };
-
-    let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
-    let adapter = Arc::new(dbt_adapter::Adapter::new(
-        Arc::new(adapter_impl),
-        None, // time_machine
-        state.cancellation_source.token(),
-    ));
-
-    // Configure the Jinja environment for compile+run phase.
-    // This sets execute=true context where adapter.* calls hit the real DB.
-    dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(&mut jinja_env, adapter);
-
-    // Patch `target` / `env` Jinja globals with per-workflow schema/database so all macros
-    // (generate_schema_name, materializations, custom macros) see the correct values.
-    if let (Some(wf_schema), Some(wf_database)) = (&env_schema, &env_database) {
-        patch_target_global(&mut jinja_env, wf_schema, wf_database, input.target.as_deref());
-    }
+    // Private Jinja env + adapter for this activity, with the workflow's env
+    // vars, --vars and --full-refresh applied. `render_env` must stay alive for
+    // the whole activity: it owns the rebuilt engine's cancellation source.
+    let mut render_env = render_env::prepare_render_env(
+        state,
+        &render_env::RenderOverrides {
+            env: &input.env,
+            target: input.target.as_deref(),
+            vars: &input.vars,
+            full_refresh: input.full_refresh,
+        },
+        "node",
+    )?;
+    let jinja_env = &mut render_env.jinja_env;
+    let env_schema = render_env.env_schema.clone();
+    let env_database = render_env.env_database.clone();
 
     // Get namespace keys from the Jinja macro namespace registry.
     let namespace_keys: Vec<String> = jinja_env
@@ -457,63 +468,10 @@ pub async fn execute_node_inner(
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    // Load deferred state when the caller provided a previous manifest URI.
-    // The deferred nodes let ref() resolve against production relations for
-    // nodes that haven't been built in the current run.
-    let defer_nodes = if let Some(ref manifest_ref) = input.defer_manifest_ref {
-        let store = activities
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("defer_manifest_ref requires artifact storage to be configured (set ARTIFACT_STORE and WRITE_ARTIFACTS)"))?;
-        let bytes = store
-            .retrieve(manifest_ref)
-            .await
-            .with_context(|| format!("loading defer manifest from {manifest_ref}"))?;
-        // Manifests must parse through dbt's own serde path (JSON → YmlValue →
-        // typed): node config structs serialize warehouse-specific keys
-        // flattened, which the plain serde_json deserializer rejects
-        // ("missing field __warehouse_specific_config__").
-        let manifest_str = std::str::from_utf8(&bytes).context("defer manifest is not UTF-8")?;
-        let manifest: dbt_schemas::schemas::manifest::DbtManifest =
-            dbt_schemas::schemas::serde::typed_struct_from_json_str(manifest_str, None)
-                .map_err(|e| anyhow::anyhow!("parsing defer manifest JSON: {e}"))?;
-        let quoting = dbt_schemas::schemas::common::DbtQuoting {
-            database: Some(false),
-            schema: Some(true),
-            identifier: Some(true),
-            snowflake_ignore_case: None,
-        };
-        Some(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting))
-    } else {
-        None
-    };
+    let defer_nodes = load_defer_nodes(activities, input.defer_manifest_ref.as_deref()).await?;
 
-    // Build the base context for compile+run phase.
-    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
-        Arc::clone(&state.resolver_state.node_resolver),
-        &state.resolver_state.root_project_name,
-        &state.resolver_state.nodes,
-        defer_nodes.as_ref(),
-        Arc::clone(&state.resolver_state.runtime_config),
-        namespace_keys,
-        None,
-    );
-
-    // Override store_result/load_result/store_raw_result with our own ResultStore so we can
-    // extract adapter response metadata after rendering completes.
-    let result_store = ResultStore::default();
-    base_context.insert(
-        "store_result".to_owned(),
-        minijinja::Value::from_function(result_store.store_result()),
-    );
-    base_context.insert(
-        "load_result".to_owned(),
-        minijinja::Value::from_function(result_store.load_result()),
-    );
-    base_context.insert(
-        "store_raw_result".to_owned(),
-        minijinja::Value::from_function(result_store.store_raw_result()),
-    );
+    let (base_context, result_store) =
+        build_base_context(state, defer_nodes.as_ref(), namespace_keys);
 
     // Serialize the node config for the deprecated_config parameter.
     let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
@@ -533,38 +491,15 @@ pub async fn execute_node_inner(
     // Extract sql_header from model config (only models have this field).
     let sql_header = get_sql_header(&state.resolver_state.nodes, unique_id, rt);
 
-    // Create an ephemeral output dir for this activity so concurrent workflows
-    // and cross-worker dispatch don't share target/.
-    let temp_dir = tempfile::tempdir().context("creating temp dir for activity")?;
-    let temp_out = temp_dir.path().to_path_buf();
-
-    // Per-activity ephemeral CTE persistence dir. dbt-fusion's
-    // `inject_and_persist_ephemeral_models` writes per-ephemeral cumulative CTE
-    // chains here; sharing the dir across activities would race on those files.
-    let ephemeral_dir = temp_dir.path().join("ephemeral");
-    std::fs::create_dir_all(&ephemeral_dir)
-        .with_context(|| format!("creating ephemeral dir {}", ephemeral_dir.display()))?;
-
     let node_path = common.path.to_string_lossy().to_string();
-
-    // Seed the temp out_dir with cached compiled / snapshot SQL — see
-    // `write_cached_sql` for why this is per-activity rather than shared.
-    write_cached_sql(
-        &state.compiled_sql_cache,
-        &node_path,
-        &temp_out.join("compiled").join(&common.path),
-    )?;
-    if rt == NodeType::Snapshot {
-        write_cached_sql(&state.snapshot_sql_cache, &node_path, &temp_out.join(&common.path))?;
-    }
-
-    let invocation_id = parse_invocation_id(&input.invocation_id)?;
-    let io_args = dbt_common::io_args::IoArgs {
-        in_dir: state.io_args.in_dir.clone(),
-        out_dir: temp_out,
-        invocation_id,
-        ..Default::default()
-    };
+    let workspace = ActivityWorkspace::new(state, &common.path, rt, &input.invocation_id)?;
+    // Destructure so the TempDir guard stays owned by this scope — dropping
+    // `workspace` early would delete the directory `io_args` points at.
+    let ActivityWorkspace {
+        _temp_dir,
+        ephemeral_dir,
+        io_args,
+    } = workspace;
 
     // Build the full run-phase node context.
     let mut node_context = dbt_jinja_utils::phases::run::build_run_node_context(
@@ -582,18 +517,7 @@ pub async fn execute_node_inner(
     // build_run_node_context creates its own ResultStore (via extend_base_context_stateful_fn),
     // overwriting ours. Re-inject our activity-scoped store so adapter_response extraction
     // reads the same store that materialization macros write to.
-    node_context.insert(
-        "store_result".to_owned(),
-        minijinja::Value::from_function(result_store.store_result()),
-    );
-    node_context.insert(
-        "load_result".to_owned(),
-        minijinja::Value::from_function(result_store.load_result()),
-    );
-    node_context.insert(
-        "store_raw_result".to_owned(),
-        minijinja::Value::from_function(result_store.store_raw_result()),
-    );
+    inject_result_store(&mut node_context, &result_store);
 
     // Microbatch: replace ref() and source() with time-window-aware versions when
     // event_time_start/end are provided. The materialisation template uses these to
@@ -672,7 +596,7 @@ pub async fn execute_node_inner(
     // Default macro path: reconstruct the schema using dbt's default
     // `<target_schema>[_<custom>]` pattern from the profile-rebuilt target.schema.
     let schema_rewrite_map = if state.has_custom_schema_name_macro && !input.env.is_empty() {
-        let schema_map = build_schema_rewrite_map(state, &jinja_env).map_err(|e| {
+        let schema_map = build_schema_rewrite_map(state, jinja_env).map_err(|e| {
             DbtTemporalError::Compilation(format!("building schema rewrite map: {e:#}"))
         })?;
         apply_schema_map_to_context(
@@ -715,7 +639,7 @@ pub async fn execute_node_inner(
         && let Some(test) = state.resolver_state.nodes.tests.get(unique_id)
         && let Some(ref meta) = test.__test_attr__.test_metadata
     {
-        let kwargs_map = build_test_kwargs_map(&meta.kwargs, &jinja_env, &node_context);
+        let kwargs_map = build_test_kwargs_map(&meta.kwargs, jinja_env, &node_context);
         node_context
             .insert("_dbt_generic_test_kwargs".to_owned(), minijinja::Value::from(kwargs_map));
     }
@@ -750,7 +674,7 @@ pub async fn execute_node_inner(
             state,
             unit,
             &state.resolver_state.nodes,
-            &jinja_env,
+            jinja_env,
             &node_context,
             &state.io_args.in_dir,
             &ephemeral_dir,
@@ -773,7 +697,7 @@ pub async fn execute_node_inner(
             let render_filename = state.io_args.in_dir.join(&common.original_file_path);
             let compiled = dbt_jinja_utils::utils::render_sql_with_listeners(
                 &raw_sql,
-                &jinja_env,
+                jinja_env,
                 &node_context,
                 &[],
                 &[],
@@ -787,7 +711,7 @@ pub async fn execute_node_inner(
                 &compiled,
                 &common.name,
                 &state.resolver_state.nodes,
-                &jinja_env,
+                jinja_env,
                 &node_context,
                 &state.io_args.in_dir,
                 &ephemeral_dir,
@@ -899,7 +823,7 @@ pub async fn execute_node_inner(
             .ok_or_else(|| {
                 DbtTemporalError::ProjectNotFound(format!("source not found: {unique_id}"))
             })?;
-        let verdict = freshness::run_freshness_check(source, &jinja_env, &node_context)?;
+        let verdict = freshness::run_freshness_check(source, jinja_env, &node_context)?;
         let execute_end = chrono::Utc::now();
         let execution_time = start_instant.elapsed().as_secs_f64();
         let outcome = match verdict {
@@ -977,7 +901,7 @@ pub async fn execute_node_inner(
         })?;
 
     // Render the materialization template (triggers SQL execution through BridgeAdapter).
-    let rendered = render_materialization(&jinja_env, &fq_name, &node_context)?;
+    let rendered = render_materialization(jinja_env, &fq_name, &node_context)?;
 
     // Prefer the compiled SQL from the context; fall back to rendered output if non-empty.
     let compiled_code = finalize_compiled_code(compiled_sql, &rendered);
@@ -1112,7 +1036,12 @@ fn build_success_message(
 mod tests {
     use super::*;
 
+    use crate::activities::retry::{
+        RetryDecision, Unclassified, decide_retry, downcast_or_default,
+        registry_non_retryable_patterns, to_activity_error,
+    };
     use crate::error::compile_error_patterns;
+    use crate::project_registry::ProjectRegistry;
 
     // --- decide_retry ---
 
@@ -1173,7 +1102,7 @@ mod tests {
     fn downcast_or_wrap_recovers_dbt_temporal_error_variant() {
         let original = DbtTemporalError::Compilation("bad ref".into());
         let any: anyhow::Error = anyhow::anyhow!(original);
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         // Compilation must survive the round-trip — without this, retry
         // classification would silently demote Compilation to Adapter (retryable).
         assert!(matches!(recovered, DbtTemporalError::Compilation(_)));
@@ -1187,14 +1116,14 @@ mod tests {
             failures: 1,
         };
         let any: anyhow::Error = anyhow::anyhow!(original);
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         assert!(matches!(recovered, DbtTemporalError::TestFailure { .. }));
     }
 
     #[test]
     fn downcast_or_wrap_falls_back_to_adapter_for_plain_anyhow() {
         let any: anyhow::Error = anyhow::anyhow!("a plain error not from us");
-        let recovered = downcast_or_wrap_as_adapter(any);
+        let recovered = downcast_or_default(any, Unclassified::RetryAsAdapter);
         // Adapter is the retryable default — keeps us out of false positives
         // for transient warehouse issues that don't carry our typed variant.
         assert!(matches!(recovered, DbtTemporalError::Adapter(_)));
@@ -1476,7 +1405,7 @@ mod tests {
     #[test]
     fn classify_for_temporal_marks_retryable_adapter_error() {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection timeout"));
-        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        let activity_err = to_activity_error(&err, &empty_patterns());
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if !af.is_non_retryable())
         );
@@ -1485,7 +1414,7 @@ mod tests {
     #[test]
     fn classify_for_temporal_marks_compilation_as_non_retryable() {
         let err = DbtTemporalError::Compilation("bad ref".into());
-        let activity_err = classify_for_temporal(&err, &empty_patterns());
+        let activity_err = to_activity_error(&err, &empty_patterns());
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
         );
@@ -1495,7 +1424,7 @@ mod tests {
     fn classify_for_temporal_promotes_pattern_match_to_non_retryable() {
         let err = DbtTemporalError::Adapter(anyhow::anyhow!("permission denied for table foo"));
         let patterns = compile_error_patterns(&["permission denied".to_string()]);
-        let activity_err = classify_for_temporal(&err, &patterns);
+        let activity_err = to_activity_error(&err, &patterns);
         assert!(
             matches!(activity_err, ActivityError::Application(ref af) if af.is_non_retryable())
         );

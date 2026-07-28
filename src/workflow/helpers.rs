@@ -444,10 +444,15 @@ pub fn build_retry_policy(config: &RetryConfig) -> RetryPolicy {
             nanos: 0,
         }),
         maximum_attempts: i32::try_from(config.max_attempts).unwrap_or(i32::MAX),
+        // Must mirror `DbtTemporalError::is_retryable` — every variant that
+        // returns false belongs here.
         non_retryable_error_types: vec![
             "DbtTemporalError::Compilation".to_string(),
             "DbtTemporalError::Configuration".to_string(),
             "DbtTemporalError::ProjectNotFound".to_string(),
+            "DbtTemporalError::TestFailure".to_string(),
+            "DbtTemporalError::UnitTestFailure".to_string(),
+            "DbtTemporalError::StaleSource".to_string(),
         ],
     }
 }
@@ -656,6 +661,9 @@ mod tests {
                 "DbtTemporalError::Compilation",
                 "DbtTemporalError::Configuration",
                 "DbtTemporalError::ProjectNotFound",
+                "DbtTemporalError::TestFailure",
+                "DbtTemporalError::UnitTestFailure",
+                "DbtTemporalError::StaleSource",
             ]
         );
     }

@@ -13,27 +13,31 @@ use tracing::{info, warn};
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
     HookConfig, HookError, HookErrorMode, HookEvent, HookExecutionOutcome, HookPayload,
-    HooksConfig, ResolveConfigInput, ResolvedProjectConfig, RetryConfig,
+    HooksConfig, ResolveConfigInput, ResolvedProjectConfig, RetryConfig, TimeoutConfig,
 };
 
 use crate::workflow::DbtRunWorkflow;
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 300;
 
-/// Load project config (hooks + retry) from `dbt_temporal.yml` in the given directory.
-/// Returns defaults if the file doesn't exist.
-pub fn load_project_config(project_dir: &Path) -> anyhow::Result<(HooksConfig, RetryConfig)> {
+/// Load project config (hooks + retry + timeouts) from `dbt_temporal.yml` in
+/// the given directory. Returns defaults if the file doesn't exist.
+pub fn load_project_config(
+    project_dir: &Path,
+) -> anyhow::Result<(HooksConfig, RetryConfig, TimeoutConfig)> {
     #[derive(serde::Deserialize)]
     struct FileConfig {
         #[serde(default)]
         hooks: HooksConfig,
         #[serde(default)]
         retry: RetryConfig,
+        #[serde(default)]
+        timeouts: TimeoutConfig,
     }
 
     let path = project_dir.join("dbt_temporal.yml");
     if !path.exists() {
-        return Ok((HooksConfig::default(), RetryConfig::default()));
+        return Ok((HooksConfig::default(), RetryConfig::default(), TimeoutConfig::default()));
     }
 
     let contents =
@@ -42,7 +46,13 @@ pub fn load_project_config(project_dir: &Path) -> anyhow::Result<(HooksConfig, R
     let file_config: FileConfig =
         dbt_yaml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
 
-    Ok((file_config.hooks, file_config.retry))
+    // Fail worker startup rather than let an unusable timeout surface mid-run.
+    file_config
+        .timeouts
+        .validate()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+
+    Ok((file_config.hooks, file_config.retry, file_config.timeouts))
 }
 
 /// Activity inner logic for resolve_config — no Temporal context dependency.
@@ -57,22 +67,25 @@ pub fn resolve_config_impl(
         input.input_hooks,
         &state.default_hooks,
         &state.default_retry,
+        &state.default_timeouts,
     ))
 }
 
 /// Pure config-merge step extracted from `resolve_config_impl` so it can be
 /// unit-tested without standing up a full `WorkerState`.
 ///
-/// The caller's `input_hooks` is a full override (when present); retry config
-/// always comes from the worker-state defaults.
+/// The caller's `input_hooks` is a full override (when present); retry and
+/// timeout config always come from the worker-state defaults.
 fn merge_resolved_config(
     input_hooks: Option<HooksConfig>,
     default_hooks: &HooksConfig,
     default_retry: &RetryConfig,
+    default_timeouts: &TimeoutConfig,
 ) -> ResolvedProjectConfig {
     ResolvedProjectConfig {
         hooks: input_hooks.unwrap_or_else(|| default_hooks.clone()),
         retry: default_retry.clone(),
+        timeouts: default_timeouts.clone(),
     }
 }
 
@@ -400,7 +413,12 @@ mod tests {
             ..RetryConfig::default()
         };
 
-        let resolved = merge_resolved_config(Some(input_hooks), &default_hooks, &default_retry);
+        let resolved = merge_resolved_config(
+            Some(input_hooks),
+            &default_hooks,
+            &default_retry,
+            &TimeoutConfig::default(),
+        );
 
         assert_eq!(resolved.hooks.pre_run.len(), 1);
         assert_eq!(resolved.hooks.pre_run[0].workflow_type, "from_input");
@@ -672,7 +690,8 @@ mod tests {
 
         let default_retry = RetryConfig::default();
 
-        let resolved = merge_resolved_config(None, &default_hooks, &default_retry);
+        let resolved =
+            merge_resolved_config(None, &default_hooks, &default_retry, &TimeoutConfig::default());
 
         assert_eq!(resolved.hooks.on_success.len(), 1);
         assert_eq!(resolved.hooks.on_success[0].workflow_type, "publish");
@@ -684,7 +703,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbtt-hooks-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir)?;
 
-        let (hooks, retry) = load_project_config(&dir)?;
+        let (hooks, retry, _timeouts) = load_project_config(&dir)?;
         assert!(hooks.pre_run.is_empty());
         assert!(hooks.on_success.is_empty());
         assert!(hooks.on_failure.is_empty());
@@ -720,7 +739,7 @@ retry:
 ",
         )?;
 
-        let (hooks, retry) = load_project_config(&dir)?;
+        let (hooks, retry, _timeouts) = load_project_config(&dir)?;
         assert_eq!(hooks.pre_run.len(), 1);
         assert_eq!(hooks.pre_run[0].workflow_type, "notify");
         assert_eq!(hooks.pre_run[0].task_queue, "hooks-queue");
@@ -758,7 +777,7 @@ hooks:
 ",
         )?;
 
-        let (hooks, retry) = load_project_config(&dir)?;
+        let (hooks, retry, _timeouts) = load_project_config(&dir)?;
         assert_eq!(hooks.on_failure.len(), 1);
         assert_eq!(retry.max_attempts, 3);
         assert!(retry.non_retryable_errors.is_empty());
@@ -774,7 +793,7 @@ hooks:
         std::fs::write(dir.join("dbt_temporal.yml"), "")?;
 
         let result = load_project_config(&dir);
-        if let Ok((hooks, retry)) = result {
+        if let Ok((hooks, retry, _timeouts)) = result {
             assert!(hooks.pre_run.is_empty());
             assert_eq!(retry.max_attempts, 3);
         } // Parsing empty file as error is acceptable.
@@ -803,7 +822,7 @@ hooks:
 ",
         )?;
 
-        let (hooks, _) = load_project_config(&dir)?;
+        let (hooks, _, _) = load_project_config(&dir)?;
         assert_eq!(hooks.pre_run.len(), 1);
         let hook = &hooks.pre_run[0];
         assert_eq!(hook.workflow_type, "dbt_run");
@@ -833,7 +852,7 @@ hooks:
 ",
         )?;
 
-        let (hooks, _) = load_project_config(&dir)?;
+        let (hooks, _, _) = load_project_config(&dir)?;
         assert!(hooks.pre_run[0].input.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -960,7 +979,7 @@ hooks:
 ",
         )?;
 
-        let (hooks, _) = load_project_config(&dir)?;
+        let (hooks, _, _) = load_project_config(&dir)?;
         assert_eq!(hooks.on_success.len(), 2);
         assert!(hooks.on_success[0].fire_and_forget);
         assert!(!hooks.on_success[1].fire_and_forget);

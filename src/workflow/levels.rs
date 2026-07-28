@@ -18,7 +18,7 @@ use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowTermination};
 use crate::activities::DbtActivities;
 use crate::types::{
     DbtRunInput, ExecutionPlan, NodeExecutionInput, NodeExecutionResult, NodeStatus,
-    NodeStatusTree, RetryConfig,
+    NodeStatusTree, RetryConfig, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -55,6 +55,7 @@ struct LevelState<'a> {
     plan: &'a ExecutionPlan,
     input: &'a DbtRunInput,
     retry_config: &'a RetryConfig,
+    timeouts: &'a TimeoutConfig,
     effective_env: &'a BTreeMap<String, String>,
     total_nodes: usize,
     log_lines: &'a mut Vec<String>,
@@ -75,6 +76,7 @@ pub async fn execute_levels(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
     retry_config: &RetryConfig,
+    timeouts: &TimeoutConfig,
     effective_env: &BTreeMap<String, String>,
 ) -> Result<LevelExecutionOutcome, WorkflowTermination> {
     let mut node_status = build_node_status_tree(plan);
@@ -93,6 +95,7 @@ pub async fn execute_levels(
             plan,
             input,
             retry_config,
+            timeouts,
             effective_env,
             total_nodes,
             log_lines: &mut log_lines,
@@ -205,6 +208,8 @@ async fn execute_one_level(
             defer_manifest_ref: state.input.defer_manifest_ref.clone(),
             event_time_start: state.input.event_time_start.clone(),
             event_time_end: state.input.event_time_end.clone(),
+            vars: state.input.vars.clone(),
+            full_refresh: state.input.full_refresh,
         };
 
         // Per-node labelling in Temporal UI: activity_id for event details,
@@ -252,14 +257,16 @@ async fn execute_one_level(
         let future = ctx.start_activity(
             DbtActivities::execute_node,
             node_input,
-            ActivityOptions::with_start_to_close_timeout(Duration::from_hours(1))
-                .heartbeat_timeout(Duration::from_mins(5))
-                .maybe_activity_id(activity_label.clone())
-                .maybe_summary(activity_label)
-                .cancellation_type(ActivityCancellationType::TryCancel)
-                .retry_policy(build_retry_policy(state.retry_config))
-                .maybe_priority(priority)
-                .build(),
+            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(
+                state.timeouts.node_secs,
+            ))
+            .heartbeat_timeout(Duration::from_secs(state.timeouts.node_heartbeat_secs))
+            .maybe_activity_id(activity_label.clone())
+            .maybe_summary(activity_label)
+            .cancellation_type(ActivityCancellationType::TryCancel)
+            .retry_policy(build_retry_policy(state.retry_config))
+            .maybe_priority(priority)
+            .build(),
         );
         futures.push((unique_id, future));
     }
@@ -341,7 +348,40 @@ async fn execute_one_level(
         s.status.tally(state.node_status);
     });
 
+    warn_if_history_is_growing_large(ctx, level_idx, state.plan.levels.len());
+
     Ok(())
+}
+
+/// Surface an oversized workflow history before the server rejects it.
+///
+/// Every node costs roughly three history events (schedule / start / complete),
+/// plus one per retry and per memo upsert. Temporal warns around 10,240 events
+/// and hard-fails at 51,200, so a wide `build` over a large project can walk
+/// into the ceiling with no warning — the run dies mid-DAG and the failure
+/// looks like a Temporal problem rather than a sizing one.
+///
+/// This only reports. Continue-as-new is the real fix but is not safe to apply
+/// blindly here: the level loop carries `all_results` and `log_lines` forward
+/// for `store_artifacts` and `on-run-end`, so a continued run would need those
+/// handed over as input or spilled to the artifact store first.
+fn warn_if_history_is_growing_large(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    level_idx: usize,
+    total_levels: usize,
+) {
+    // Replay re-runs this loop; logging then would duplicate every warning.
+    if ctx.is_replaying() || !ctx.continue_as_new_suggested() {
+        return;
+    }
+    tracing::warn!(
+        history_length = ctx.history_length(),
+        completed_levels = level_idx + 1,
+        total_levels,
+        "workflow history is large enough that Temporal suggests continue-as-new; \
+         this run may hit the server's history limit before finishing. Narrow the \
+         run with --select, or split the project across workflows"
+    );
 }
 
 /// Fairness keys are limited to 64 bytes server-side; truncate on a char

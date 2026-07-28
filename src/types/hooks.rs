@@ -80,6 +80,117 @@ impl Default for RetryConfig {
     }
 }
 
+// --- Activity timeouts ---
+
+/// Activity timeouts, configurable in `dbt_temporal.yml` under `timeouts:`.
+///
+/// Defaults reproduce the values these were hardcoded to. The one most likely
+/// to need raising is `node_secs`: a model that legitimately runs longer than
+/// an hour would otherwise be killed mid-statement and retried.
+///
+/// Heartbeat timeouts should stay well above the activity heartbeat tick
+/// (`heartbeat::HEARTBEAT_INTERVAL`, 30s) — the server treats a missed
+/// heartbeat as a dead worker and reschedules. `validate` enforces that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// `execute_node` start-to-close. Bounds a single node's compile + execute.
+    #[serde(default = "default_node_secs")]
+    pub node_secs: u64,
+    /// `execute_node` heartbeat timeout.
+    #[serde(default = "default_node_heartbeat_secs")]
+    pub node_heartbeat_secs: u64,
+    /// `run_project_hooks` start-to-close, for both on-run-start and on-run-end.
+    #[serde(default = "default_hook_secs")]
+    pub hook_secs: u64,
+    /// `run_project_hooks` heartbeat timeout.
+    #[serde(default = "default_hook_heartbeat_secs")]
+    pub hook_heartbeat_secs: u64,
+    /// `plan_project` start-to-close. Covers selector evaluation, DAG build,
+    /// and any state/retry manifest fetched from the artifact store.
+    #[serde(default = "default_plan_secs")]
+    pub plan_secs: u64,
+    /// `store_artifacts` start-to-close. Scales with manifest size and the
+    /// artifact store's upload throughput.
+    #[serde(default = "default_store_artifacts_secs")]
+    pub store_artifacts_secs: u64,
+}
+
+const fn default_node_secs() -> u64 {
+    3600
+}
+const fn default_node_heartbeat_secs() -> u64 {
+    300
+}
+const fn default_hook_secs() -> u64 {
+    300
+}
+const fn default_hook_heartbeat_secs() -> u64 {
+    120
+}
+const fn default_plan_secs() -> u64 {
+    300
+}
+const fn default_store_artifacts_secs() -> u64 {
+    120
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            node_secs: default_node_secs(),
+            node_heartbeat_secs: default_node_heartbeat_secs(),
+            hook_secs: default_hook_secs(),
+            hook_heartbeat_secs: default_hook_heartbeat_secs(),
+            plan_secs: default_plan_secs(),
+            store_artifacts_secs: default_store_artifacts_secs(),
+        }
+    }
+}
+
+/// Smallest heartbeat timeout that leaves room for a missed tick. The activity
+/// heartbeats every 30s, so anything under this reports healthy workers dead.
+const MIN_HEARTBEAT_SECS: u64 = 60;
+
+impl TimeoutConfig {
+    /// Reject values that would break the activity rather than tune it.
+    ///
+    /// Called at config load so a typo fails worker startup with a clear
+    /// message, instead of surfacing later as activities timing out mid-run.
+    pub fn validate(&self) -> Result<(), String> {
+        let zero_checks = [
+            ("node_secs", self.node_secs),
+            ("hook_secs", self.hook_secs),
+            ("plan_secs", self.plan_secs),
+            ("store_artifacts_secs", self.store_artifacts_secs),
+        ];
+        for (name, value) in zero_checks {
+            if value == 0 {
+                return Err(format!("timeouts.{name} must be greater than zero"));
+            }
+        }
+
+        let heartbeats = [
+            ("node_heartbeat_secs", self.node_heartbeat_secs, self.node_secs, "node_secs"),
+            ("hook_heartbeat_secs", self.hook_heartbeat_secs, self.hook_secs, "hook_secs"),
+        ];
+        for (name, value, ceiling, ceiling_name) in heartbeats {
+            if value < MIN_HEARTBEAT_SECS {
+                return Err(format!(
+                    "timeouts.{name} must be at least {MIN_HEARTBEAT_SECS}s — the activity \
+                     heartbeats every 30s, and a shorter timeout marks live workers dead"
+                ));
+            }
+            if value > ceiling {
+                return Err(format!(
+                    "timeouts.{name} ({value}s) exceeds timeouts.{ceiling_name} ({ceiling}s), \
+                     so it can never fire"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // --- Lifecycle hooks ---
 
 /// How to handle a hook workflow failure.
@@ -162,6 +273,7 @@ pub struct HookExecutionOutcome {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -345,5 +457,66 @@ mod tests {
         assert_eq!(back.event, "on_failure");
         assert_eq!(back.error, "child failed");
         Ok(())
+    }
+
+    // --- TimeoutConfig ---
+
+    #[test]
+    fn timeout_defaults_match_the_previously_hardcoded_values() {
+        let t = TimeoutConfig::default();
+        assert_eq!(t.node_secs, 3600);
+        assert_eq!(t.node_heartbeat_secs, 300);
+        assert_eq!(t.hook_secs, 300);
+        assert_eq!(t.hook_heartbeat_secs, 120);
+        assert_eq!(t.plan_secs, 300);
+        assert_eq!(t.store_artifacts_secs, 120);
+        t.validate().expect("defaults must be valid");
+    }
+
+    #[test]
+    fn timeout_config_fills_defaults_for_omitted_keys() {
+        let t: TimeoutConfig = dbt_yaml::from_str("node_secs: 7200").unwrap();
+        assert_eq!(t.node_secs, 7200);
+        assert_eq!(t.hook_secs, 300, "unset keys keep their default");
+        t.validate().expect("partial override must be valid");
+    }
+
+    #[test]
+    fn timeout_validation_rejects_zero_durations() {
+        let t = TimeoutConfig {
+            node_secs: 0,
+            ..TimeoutConfig::default()
+        };
+        let err = t.validate().expect_err("zero must be rejected");
+        assert!(err.contains("node_secs"), "got: {err}");
+    }
+
+    /// A heartbeat timeout below the 30s tick marks healthy workers dead.
+    #[test]
+    fn timeout_validation_rejects_heartbeats_shorter_than_the_tick() {
+        let t = TimeoutConfig {
+            node_heartbeat_secs: 15,
+            ..TimeoutConfig::default()
+        };
+        let err = t
+            .validate()
+            .expect_err("sub-tick heartbeat must be rejected");
+        assert!(err.contains("node_heartbeat_secs"), "got: {err}");
+        assert!(err.contains("30s"), "should explain the tick: {err}");
+    }
+
+    /// A heartbeat timeout above start-to-close can never fire.
+    #[test]
+    fn timeout_validation_rejects_heartbeat_above_start_to_close() {
+        let t = TimeoutConfig {
+            hook_secs: 100,
+            hook_heartbeat_secs: 200,
+            ..TimeoutConfig::default()
+        };
+        let err = t
+            .validate()
+            .expect_err("unreachable heartbeat must be rejected");
+        assert!(err.contains("hook_heartbeat_secs"), "got: {err}");
+        assert!(err.contains("can never fire"), "got: {err}");
     }
 }

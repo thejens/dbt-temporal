@@ -434,8 +434,9 @@ pub async fn initialize_project(
         .collect();
 
     // Load project config (hooks + retry) from dbt_temporal.yml (if present).
-    let (default_hooks, default_retry) = crate::hooks::load_project_config(&project_dir)
-        .with_context(|| format!("loading config from {}", project_dir.display()))?;
+    let (default_hooks, default_retry, default_timeouts) =
+        crate::hooks::load_project_config(&project_dir)
+            .with_context(|| format!("loading config from {}", project_dir.display()))?;
 
     // Pre-compile non-retryable-error regexes; invalid patterns log a warning and are dropped.
     let non_retryable_error_patterns =
@@ -492,6 +493,7 @@ pub async fn initialize_project(
         packages,
         default_hooks,
         default_retry,
+        default_timeouts,
         non_retryable_error_patterns,
         profiles_path,
         profile_name_in_project,

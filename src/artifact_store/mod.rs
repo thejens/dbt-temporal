@@ -16,6 +16,8 @@ pub trait ArtifactStore: Send + Sync {
     async fn store(&self, invocation_id: &str, filename: &str, content: &[u8]) -> Result<String>;
 
     /// Retrieve content by path/URI.
-    #[allow(dead_code)] // Part of the public interface; not yet used by the worker.
+    ///
+    /// Used by `plan_project` to load the manifests behind `state_manifest_ref`
+    /// and `retry_from`, and by `execute_node` for `defer_manifest_ref`.
     async fn retrieve(&self, path: &str) -> Result<Vec<u8>>;
 }

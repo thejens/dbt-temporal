@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 use temporalio_sdk::error::ApplicationFailure;
-use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowTermination};
+use temporalio_sdk::{ActivityOptions, LocalActivityOptions, WorkflowContext, WorkflowTermination};
 
 use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
@@ -26,6 +26,7 @@ use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
     HooksConfig, NodeExecutionResult, NodeStatus, ProjectHookPhase, ProjectHooksInput,
     ResolveConfigInput, ResolvedProjectConfig, StoreArtifactsInput, StoreArtifactsOutput,
+    TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -118,6 +119,8 @@ pub fn build_project_hooks_input(
         env: effective_env.clone(),
         target: input.target.clone(),
         node_results: node_results.to_vec(),
+        vars: input.vars.clone(),
+        full_refresh: input.full_refresh,
     }
 }
 
@@ -279,12 +282,13 @@ pub fn write_command_memo(
 pub async fn plan_and_announce(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
+    plan_timeout_secs: u64,
 ) -> Result<ExecutionPlan, WorkflowTermination> {
     let plan: ExecutionPlan = ctx
         .start_activity(
             DbtActivities::plan_project,
             input.clone(),
-            ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(plan_timeout_secs)),
         )
         .await
         .map_err(|e| {
@@ -303,15 +307,25 @@ pub async fn plan_and_announce(
     Ok(plan)
 }
 
+/// Resolve hook/retry/timeout config for the run.
+///
+/// Runs as a **local activity**: it only reads config already parsed into
+/// `WorkerState`, so dispatching it through the task queue would cost three
+/// history events and a poll round-trip per run to do a map lookup. Local
+/// activities execute inline on the worker holding the workflow task and are
+/// recorded as a single marker.
 pub async fn resolve_project_config(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
     plan: &ExecutionPlan,
 ) -> Result<ResolvedProjectConfig, WorkflowTermination> {
-    ctx.start_activity(
+    ctx.start_local_activity(
         DbtActivities::resolve_config,
         build_resolve_config_input(plan, input),
-        ActivityOptions::start_to_close_timeout(Duration::from_secs(10)),
+        LocalActivityOptions {
+            start_to_close_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        },
     )
     .await
     .map_err(|e| {
@@ -354,6 +368,7 @@ pub async fn run_on_run_start(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
     effective_env: &BTreeMap<String, String>,
+    timeouts: &TimeoutConfig,
 ) -> Result<(), WorkflowTermination> {
     if !plan.has_on_run_start {
         return Ok(());
@@ -362,8 +377,8 @@ pub async fn run_on_run_start(
     ctx.start_activity(
         DbtActivities::run_project_hooks,
         build_project_hooks_input(ProjectHookPhase::OnRunStart, plan, input, effective_env, &[]),
-        ActivityOptions::with_start_to_close_timeout(Duration::from_mins(5))
-            .heartbeat_timeout(Duration::from_mins(2))
+        ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.hook_secs))
+            .heartbeat_timeout(Duration::from_secs(timeouts.hook_heartbeat_secs))
             .build(),
     )
     .await
@@ -379,6 +394,7 @@ pub async fn store_run_artifacts(
     plan: &ExecutionPlan,
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
+    timeouts: &TimeoutConfig,
 ) -> Result<(Option<StoreArtifactsOutput>, Option<String>), WorkflowTermination> {
     if !plan.write_artifacts {
         return Ok((None, None));
@@ -387,7 +403,9 @@ pub async fn store_run_artifacts(
         .start_activity(
             DbtActivities::store_artifacts,
             build_store_artifacts_input(plan, all_results, log_lines),
-            ActivityOptions::start_to_close_timeout(Duration::from_mins(2)),
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(
+                timeouts.store_artifacts_secs,
+            )),
         )
         .await
         .map_err(|e| {
@@ -409,6 +427,7 @@ pub async fn run_on_run_end(
     effective_env: &BTreeMap<String, String>,
     all_results: &[NodeExecutionResult],
     hook_errors: &mut Vec<HookError>,
+    timeouts: &TimeoutConfig,
 ) {
     if !plan.has_on_run_end {
         return;
@@ -424,8 +443,8 @@ pub async fn run_on_run_end(
                 effective_env,
                 all_results,
             ),
-            ActivityOptions::with_start_to_close_timeout(Duration::from_mins(5))
-                .heartbeat_timeout(Duration::from_mins(2))
+            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.hook_secs))
+                .heartbeat_timeout(Duration::from_secs(timeouts.hook_heartbeat_secs))
                 .build(),
         )
         .await;

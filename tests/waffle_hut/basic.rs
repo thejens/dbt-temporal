@@ -228,8 +228,10 @@ async fn test_select_exclude() -> Result<()> {
             assert!(names.iter().any(|n| n.contains("stg_payments")));
 
             // --- exclude models matching "customers" ---
-            // Fqn substring: "customers" matches both stg_customers and customers.
-            // Remaining: stg_orders, stg_payments, orders (3 models, all independent).
+            // `fqn:` matches an exact node name, not a substring of the dotted
+            // FQN, so this excludes `customers` and leaves `stg_customers`
+            // alone — matching what `dbt run --exclude customers` does.
+            // Remaining: stg_customers, stg_orders, stg_payments, orders.
             tracing::info!("Select test: exclude=customers");
             let run = run_dbt_workflow(
                 &client,
@@ -241,15 +243,23 @@ async fn test_select_exclude() -> Result<()> {
             print_results(output);
 
             assert!(output.success);
-            assert_eq!(output.node_results.len(), 3, "should run 3 models");
+            let names: Vec<&str> = output
+                .node_results
+                .iter()
+                .map(|r| r.unique_id.as_str())
+                .collect();
+            assert_eq!(output.node_results.len(), 4, "should run 4 models, got {names:?}");
             for r in &output.node_results {
                 assert_eq!(r.status, NodeStatus::Success, "{} should succeed", r.unique_id);
-                assert!(
-                    !r.unique_id.contains("customers"),
-                    "{} should not match 'customers'",
-                    r.unique_id
-                );
             }
+            assert!(
+                !names.contains(&"model.waffle_hut.customers"),
+                "the exact-named model must be excluded, got {names:?}"
+            );
+            assert!(
+                names.contains(&"model.waffle_hut.stg_customers"),
+                "a name merely containing 'customers' must NOT be excluded, got {names:?}"
+            );
 
             Ok(())
         })

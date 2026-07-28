@@ -10,6 +10,8 @@ pub mod node_serialization;
 pub mod node_telemetry;
 pub mod plan;
 pub mod project_hooks;
+pub mod render_env;
+pub mod retry;
 pub mod selectors;
 pub mod store_artifacts;
 
@@ -65,9 +67,23 @@ impl DbtActivities {
         ctx: ActivityContext,
         input: DbtRunInput,
     ) -> Result<ExecutionPlan, ActivityError> {
+        let project = input.project.clone();
         plan::plan_project_inner(&self, &ctx, input)
             .await
-            .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
+            .map_err(|e| {
+                // Planning is mostly local work, so an untyped failure is a bug or
+                // bad input and must not retry. The remote reads it does make
+                // (state manifest, retry_from, manifest upload) tag themselves as
+                // ArtifactStore, which survives this default and does retry.
+                let patterns = project
+                    .as_deref()
+                    .and_then(|p| retry::registry_non_retryable_patterns(&self.registry, p));
+                retry::classify(
+                    e,
+                    patterns.as_deref().unwrap_or(&[]),
+                    retry::Unclassified::Permanent,
+                )
+            })
     }
 
     #[activity(name = "execute_node")]
@@ -82,12 +98,10 @@ impl DbtActivities {
     #[activity(name = "store_artifacts")]
     pub async fn store_artifacts(
         self: Arc<Self>,
-        _ctx: ActivityContext,
+        ctx: ActivityContext,
         input: StoreArtifactsInput,
     ) -> Result<StoreArtifactsOutput, ActivityError> {
-        store_artifacts::store_artifacts_inner(&self, input)
-            .await
-            .map_err(|e| ActivityError::application(ApplicationFailure::non_retryable(e)))
+        store_artifacts::store_artifacts_outer(&self, ctx, input).await
     }
 
     #[activity(name = "resolve_config")]

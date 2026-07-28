@@ -1,13 +1,62 @@
 use anyhow::Context;
-use tracing::info;
+use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use tracing::{info, warn};
 
+use crate::artifact_store::ArtifactStore;
+use crate::error::DbtTemporalError;
 use crate::types::{StoreArtifactsInput, StoreArtifactsOutput};
 
 use super::DbtActivities;
+use super::heartbeat;
+use super::retry;
+
+/// Outer wrapper — cancellation, heartbeating, and retry classification.
+///
+/// This activity is pure object-store I/O and runs *after* every node has
+/// finished, so a transient 5xx here would otherwise throw away a completed
+/// run's results. Store failures are tagged `ArtifactStore` and retry;
+/// everything else (missing store config, serialization bugs) is permanent.
+pub async fn store_artifacts_outer(
+    activities: &DbtActivities,
+    ctx: ActivityContext,
+    input: StoreArtifactsInput,
+) -> Result<StoreArtifactsOutput, ActivityError> {
+    let project = input.project.clone();
+    tokio::select! {
+        result = store_artifacts_inner(activities, input) => {
+            result.map_err(|e| {
+                warn!(error = %format!("{e:#}"), "store_artifacts failed");
+                let patterns = project
+                    .as_deref()
+                    .and_then(|p| retry::registry_non_retryable_patterns(&activities.registry, p));
+                retry::classify(
+                    e,
+                    patterns.as_deref().unwrap_or(&[]),
+                    retry::Unclassified::Permanent,
+                )
+            })
+        }
+        () = ctx.cancelled() => {
+            info!("store_artifacts cancelled");
+            Err(ActivityError::cancelled())
+        }
+        // Uploading a large manifest to object storage can outlast the
+        // heartbeat timeout on a slow link; keep the tick alive so the server
+        // does not mistake a slow upload for a dead worker.
+        never = heartbeat::heartbeat_loop(&ctx) => match never {},
+    }
+}
+
+/// Tag an artifact-store I/O failure as retryable, preserving the call context.
+fn store_io_error(context: &'static str, e: anyhow::Error) -> anyhow::Error {
+    DbtTemporalError::ArtifactStore(e.context(context)).into()
+}
 
 /// Store run_results.json and manifest.json to the configured artifact store.
 ///
-/// Called from `DbtActivities::store_artifacts`.
+/// `store_artifacts_outer` wraps this with cancellation, heartbeat and error
+/// classification. Also the entry point for integration tests that drive
+/// artifact writing without a Temporal activity context.
 pub async fn store_artifacts_inner(
     activities: &DbtActivities,
     input: StoreArtifactsInput,
@@ -22,7 +71,7 @@ pub async fn store_artifacts_inner(
     let run_results_path = store
         .store(&input.invocation_id, "run_results.json", run_results_json.as_bytes())
         .await
-        .context("storing run_results.json")?;
+        .map_err(|e| store_io_error("storing run_results.json", e))?;
 
     info!(path = %run_results_path, "stored run_results.json");
 
@@ -31,7 +80,7 @@ pub async fn store_artifacts_inner(
         store
             .store(&input.invocation_id, "manifest.json", manifest_json.as_bytes())
             .await
-            .context("storing manifest.json")?
+            .map_err(|e| store_io_error("storing manifest.json", e))?
     } else if let Some(manifest_ref) = &input.manifest_ref {
         // Already stored during plan phase.
         manifest_ref.clone()
@@ -47,7 +96,7 @@ pub async fn store_artifacts_inner(
             let path = store
                 .store(&input.invocation_id, "log.txt", run_log.as_bytes())
                 .await
-                .context("storing log.txt")?;
+                .map_err(|e| store_io_error("storing log.txt", e))?;
             info!(path = %path, "stored log.txt");
             Some(path)
         } else {
@@ -84,7 +133,7 @@ pub async fn store_artifacts_inner(
         let path = store
             .store(&input.invocation_id, "sources.json", sources_json.as_bytes())
             .await
-            .context("storing sources.json")?;
+            .map_err(|e| store_io_error("storing sources.json", e))?;
         info!(path = %path, "stored sources.json");
     }
 
@@ -100,7 +149,7 @@ pub async fn store_artifacts_inner(
 async fn generate_and_store_catalog(
     activities: &DbtActivities,
     input: &StoreArtifactsInput,
-    store: &dyn crate::artifact_store::ArtifactStore,
+    store: &dyn ArtifactStore,
 ) -> Result<String, anyhow::Error> {
     let state = activities
         .registry
@@ -466,6 +515,27 @@ mod tests {
             .await
             .expect_err("missing ArtifactStore must error");
         assert!(err.to_string().contains("ArtifactStore not configured"));
+        // A misconfigured worker is permanent — retrying cannot fix it.
+        assert!(
+            !retry::downcast_or_default(err, retry::Unclassified::Permanent).is_retryable(),
+            "missing store config must not retry"
+        );
         Ok(())
+    }
+
+    /// The run is already finished by the time this activity runs, so losing it
+    /// to a transient object-store 5xx would discard completed work.
+    #[tokio::test]
+    async fn store_io_failure_is_classified_retryable() {
+        let err = store_io_error("storing run_results.json", anyhow::anyhow!("503 slow down"));
+
+        let classified = retry::downcast_or_default(err, retry::Unclassified::Permanent);
+        assert!(
+            classified.is_retryable(),
+            "artifact-store I/O must retry even under the activity's permanent default"
+        );
+        let msg = classified.to_string();
+        assert!(msg.contains("storing run_results.json"), "context lost: {msg}");
+        assert!(msg.contains("503 slow down"), "cause lost: {msg}");
     }
 }

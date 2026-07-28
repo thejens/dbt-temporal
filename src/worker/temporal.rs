@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use temporalio_common::protos::temporal::api::enums::v1::VersioningBehavior;
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_common::worker::{
     WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
@@ -130,6 +131,16 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     let build_id = format!("dbt-temporal-{}", env!("CARGO_PKG_VERSION"));
     // When a deployment name is configured, enable versioned task routing so Temporal
     // can steer tasks to the correct worker version during rolling deploys.
+    //
+    // `default_versioning_behavior` is mandatory here, not optional: the Rust SDK
+    // has no per-workflow versioning attribute and always reports
+    // `VersioningBehavior::Unspecified` on task completion, which a versioned
+    // worker's server rejects. Core substitutes this default only when it is set.
+    //
+    // `Pinned` is the correct choice for `dbt_run`: the workflow carries no
+    // `patched()` calls, so an in-flight run must finish on the worker version
+    // that started it rather than migrating onto changed workflow code mid-DAG.
+    // A dbt run is finite, so pinned executions drain on their own.
     let deployment = if let Some(ref name) = config.deployment_name {
         WorkerDeploymentOptions {
             version: WorkerDeploymentVersion {
@@ -137,7 +148,7 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
                 build_id,
             },
             use_worker_versioning: true,
-            default_versioning_behavior: None,
+            default_versioning_behavior: Some(VersioningBehavior::Pinned),
         }
     } else {
         WorkerDeploymentOptions::from_build_id(build_id)
@@ -441,8 +452,25 @@ mod tests {
     fn build_worker_options_with_deployment_name() {
         let mut config = test_config();
         config.deployment_name = Some("dbt-temporal-prod".into());
-        // Verify it doesn't panic — versioned deployment path is exercised.
-        let _opts = build_worker_options(&config);
+        let opts = build_worker_options(&config);
+
+        let deployment = opts.deployment_options;
+        assert!(deployment.use_worker_versioning);
+        assert_eq!(deployment.version.deployment_name, "dbt-temporal-prod");
+        // A versioned worker that reports Unspecified has its task completions
+        // rejected by the server — the Rust SDK never sets a per-workflow
+        // behavior, so this default is the only thing standing in for one.
+        assert_eq!(deployment.default_versioning_behavior, Some(VersioningBehavior::Pinned));
+    }
+
+    #[test]
+    fn build_worker_options_without_deployment_name_is_unversioned() {
+        // Core rejects a default_versioning_behavior when versioning is off, so
+        // the unversioned path must leave it unset.
+        let opts = build_worker_options(&test_config());
+        let deployment = opts.deployment_options;
+        assert!(!deployment.use_worker_versioning);
+        assert_eq!(deployment.default_versioning_behavior, None);
     }
 
     #[test]

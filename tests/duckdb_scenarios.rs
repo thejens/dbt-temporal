@@ -464,3 +464,75 @@ async fn full_refresh_rebuilds_an_existing_incremental_model() {
         "full refresh must take the rebuild branch, got: {refreshed}"
     );
 }
+
+// --- dbt Core v2 function nodes ---
+
+/// A DuckDB project with one function and a model that calls it.
+///
+/// DuckDB has no `CREATE FUNCTION`, so the project supplies the
+/// `duckdb__scalar_function_sql` override dbt-fusion does not ship — the same
+/// adapter-dispatch hook a real DuckDB user would write. It emits
+/// `CREATE MACRO`, which means the function body has to arrive through
+/// `model.compiled_code`: an empty body yields `AS ()` and a parse error rather
+/// than a silently wrong result.
+fn function_project() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("functions/add_one.sql", "x + 1\n"),
+        (
+            "functions/schema.yml",
+            "version: 2\n\
+             functions:\n\
+             \x20 - name: add_one\n\
+             \x20   returns:\n\
+             \x20     data_type: int\n\
+             \x20   arguments:\n\
+             \x20     - name: x\n\
+             \x20       data_type: int\n",
+        ),
+        (
+            "macros/duckdb_functions.sql",
+            "{% macro duckdb__scalar_function_sql(target_relation) %}\n\
+             \x20   {%- set names = [] -%}\n\
+             \x20   {%- for arg in model.arguments -%}{%- do names.append(arg.name) -%}{%- endfor -%}\n\
+             \x20   CREATE OR REPLACE MACRO {{ target_relation.identifier }} ({{ names | join(', ') }})\n\
+             \x20   AS ({{ model.compiled_code }})\n\
+             {% endmacro %}\n",
+        ),
+        ("models/uses_fn.sql", "select add_one(41) as answer"),
+    ]
+}
+
+/// The regression this guards: `model.compiled_code` is not a value we can put
+/// in the context — the `model` object reads it off disk, from a path that
+/// nests under the package name. Writing compiled SQL anywhere else leaves the
+/// attribute empty, and only the materializations that use it (function DDL,
+/// not the model ones) notice.
+#[tokio::test]
+async fn function_bodies_reach_the_warehouse_through_model_compiled_code() {
+    let harness = Harness::build_files(&function_project()).await;
+
+    // The planner schedules it.
+    let input: dbt_temporal::types::DbtRunInput =
+        serde_json::from_value(serde_json::json!({ "command": "build" })).unwrap();
+    let planned =
+        dbt_temporal::activities::plan::select_command_node_ids(harness.state(), &input).unwrap();
+    assert!(
+        planned.iter().any(|id| id == "function.spike.add_one"),
+        "build must schedule function nodes, got {planned:?}"
+    );
+
+    let created = harness
+        .run_uid("function.spike.add_one")
+        .await
+        .expect("creating the function should succeed");
+    assert_eq!(created.status, dbt_temporal::types::NodeStatus::Success, "{created:?}");
+
+    // The proof that the body survived: a model calling the function computes
+    // 41 + 1. A missing body could not produce this.
+    harness.run_ok("uses_fn").await;
+    assert_eq!(
+        harness.query_scalar("select answer from uses_fn"),
+        "42",
+        "the function body must have been compiled into the macro"
+    );
+}

@@ -405,7 +405,7 @@ pub async fn initialize_project(
     // Capture compiled SQL and snapshot raw SQL into in-memory caches.
     // This lets activities use ephemeral temp dirs instead of sharing target/.
     let (compiled_sql_cache, snapshot_sql_cache, test_sql_cache) =
-        build_sql_caches(&resolver_state.nodes, &out_dir);
+        build_sql_caches(&resolver_state.nodes, &project_dir, &out_dir);
     info!(
         project = %project_name,
         compiled = compiled_sql_cache.len(),
@@ -516,10 +516,16 @@ pub async fn initialize_project(
 /// After the resolve step, dbt-fusion has written compiled SQL to `out_dir/compiled/`
 /// and snapshot SQL to `out_dir/`. We read these into BTreeMaps keyed by the node's
 /// `common_attr.path` so activities can write them into ephemeral temp dirs.
+///
+/// The compiled layout nests under package name and varies by resource type, so
+/// it comes from fusion's own `get_node_path_abs` rather than a reconstruction —
+/// a path that only *looks* right yields an empty cache and no error.
 fn build_sql_caches(
     nodes: &dbt_schemas::schemas::Nodes,
+    in_dir: &std::path::Path,
     out_dir: &std::path::Path,
 ) -> (BTreeMap<String, String>, BTreeMap<String, String>, BTreeMap<String, String>) {
+    use dbt_schemas::schemas::nodes::NodePathKind;
     use dbt_schemas::schemas::telemetry::NodeType;
 
     let mut compiled_sql_cache = BTreeMap::new();
@@ -529,8 +535,7 @@ fn build_sql_caches(
     for (_unique_id, node) in nodes.iter() {
         let path = node.common().path.to_string_lossy().to_string();
 
-        // Compiled SQL: out_dir/compiled/<path>
-        let compiled_path = out_dir.join("compiled").join(&path);
+        let compiled_path = node.get_node_path_abs(NodePathKind::Compiled, in_dir, out_dir);
         if let Ok(sql) = std::fs::read_to_string(&compiled_path) {
             compiled_sql_cache.insert(path.clone(), sql);
         }
@@ -623,71 +628,83 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    /// Fixtures carry a real package name and `original_file_path`: the
+    /// compiled tree nests under both, so a fixture that leaves them blank
+    /// would pass against a path built any number of wrong ways.
+    fn common_attrs(unique_id: &str, name: &str, path: &str, ofp: &str) -> CommonAttributes {
+        CommonAttributes {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            package_name: "shop".to_string(),
+            path: PathBuf::from(path).into(),
+            original_file_path: PathBuf::from(ofp).into(),
+            ..CommonAttributes::default()
+        }
+    }
+
     fn make_model(unique_id: &str, name: &str, path: &str) -> Arc<DbtModel> {
         Arc::new(DbtModel {
-            __common_attr__: CommonAttributes {
-                unique_id: unique_id.to_string(),
-                name: name.to_string(),
-                path: PathBuf::from(path).into(),
-                ..CommonAttributes::default()
-            },
+            __common_attr__: common_attrs(unique_id, name, path, path),
             ..DbtModel::default()
         })
     }
 
     fn make_snapshot(unique_id: &str, name: &str, path: &str) -> Arc<DbtSnapshot> {
         Arc::new(DbtSnapshot {
-            __common_attr__: CommonAttributes {
-                unique_id: unique_id.to_string(),
-                name: name.to_string(),
-                path: PathBuf::from(path).into(),
-                ..CommonAttributes::default()
-            },
+            __common_attr__: common_attrs(unique_id, name, path, path),
             __base_attr__: NodeBaseAttributes::default(),
             ..DbtSnapshot::default()
         })
     }
 
+    /// A generic test's `original_file_path` is the YAML it was declared in,
+    /// not its own generated SQL — the many-to-one case in the compiled tree.
     fn make_test(unique_id: &str, name: &str, path: &str) -> Arc<DbtTest> {
         Arc::new(DbtTest {
-            __common_attr__: CommonAttributes {
-                unique_id: unique_id.to_string(),
-                name: name.to_string(),
-                path: PathBuf::from(path).into(),
-                ..CommonAttributes::default()
-            },
+            __common_attr__: common_attrs(unique_id, name, path, "models/schema.yml"),
             ..DbtTest::default()
         })
     }
 
+    /// Each compiled file is written where dbt-fusion itself would put it —
+    /// nested under the package name, and under `original_file_path` for the
+    /// many-to-one resource types. Reading from a flatter path finds nothing
+    /// and fails silently, so these assertions are the only thing standing
+    /// between a wrong layout and an empty cache.
     #[test]
     fn build_sql_caches_picks_up_compiled_sql_for_each_node() {
+        let project = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let in_dir = project.path();
         let out = dir.path();
 
         let mut nodes = Nodes::default();
         nodes
             .models
             .insert("model.shop.m".to_string(), make_model("model.shop.m", "m", "models/m.sql"));
-        write(&out.join("compiled/models/m.sql"), "SELECT 1 -- compiled");
+        write(&out.join("compiled/shop/models/m.sql"), "SELECT 1 -- compiled");
 
-        // snapshot — both compiled SQL and raw snapshot file are checked
+        // snapshot — both compiled SQL and raw snapshot file are checked.
+        // Snapshots compile into a directory named after their source file.
         nodes.snapshots.insert(
             "snapshot.shop.s".to_string(),
             make_snapshot("snapshot.shop.s", "s", "snapshots/s.sql"),
         );
-        write(&out.join("compiled/snapshots/s.sql"), "SELECT compiled_snap");
+        write(&out.join("compiled/shop/snapshots/s.sql/s.sql"), "SELECT compiled_snap");
         write(&out.join("snapshots/s.sql"), "{% snapshot s %}...{% endsnapshot %}");
 
-        // test — compiled SQL + the generic-test-generated SQL beside it
+        // test — compiled SQL under the declaring YAML, plus the generated SQL
         nodes.tests.insert(
             "test.shop.t".to_string(),
             make_test("test.shop.t", "t", "generic_tests/t.sql"),
         );
-        write(&out.join("compiled/generic_tests/t.sql"), "SELECT compiled_test");
+        write(
+            &out.join("compiled/shop/models/schema.yml/generic_tests/t.sql"),
+            "SELECT compiled_test",
+        );
         write(&out.join("generic_tests/t.sql"), "SELECT generated_test_sql");
 
-        let (compiled, snapshots, tests) = build_sql_caches(&nodes, out);
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, in_dir, out);
 
         assert_eq!(compiled["models/m.sql"], "SELECT 1 -- compiled");
         assert_eq!(compiled["snapshots/s.sql"], "SELECT compiled_snap");
@@ -718,7 +735,7 @@ mod tests {
             .models
             .insert("model.shop.m".to_string(), make_model("model.shop.m", "m", "models/m.sql"));
 
-        let (compiled, snapshots, tests) = build_sql_caches(&nodes, out);
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, dir.path(), out);
         assert!(compiled.is_empty());
         assert!(snapshots.is_empty());
         assert!(tests.is_empty());
@@ -728,7 +745,7 @@ mod tests {
     fn build_sql_caches_returns_empty_for_empty_node_set() {
         let dir = tempfile::tempdir().unwrap();
         let nodes = Nodes::default();
-        let (compiled, snapshots, tests) = build_sql_caches(&nodes, dir.path());
+        let (compiled, snapshots, tests) = build_sql_caches(&nodes, dir.path(), dir.path());
         assert!(compiled.is_empty());
         assert!(snapshots.is_empty());
         assert!(tests.is_empty());

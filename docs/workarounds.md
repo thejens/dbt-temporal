@@ -54,6 +54,42 @@ The script:
    `~/Library/Caches/com.getdbt/adbc/aarch64-apple-darwin/libadbc_driver_postgresql-0.21.0+dbt0.21.0.dylib`,
    where dbt-temporal picks it up automatically.
 
+## 4. Relation cache goes stale in a long-lived worker
+
+dbt-fusion's `RelationCache` is built for the CLI's one-shot lifetime. The
+first existence check lists the whole schema and marks that schema
+**complete**; nothing writes back to it when a materialization subsequently
+creates or drops a relation (the bundled macros carry no `cache_added` /
+`cache_dropped` / `cache_renamed` calls). For the CLI that is sound — the
+process exits and the next invocation starts from an empty cache.
+
+A dbt-temporal worker outlives the run and shares one engine across every
+workflow, so the cache goes stale as soon as the first node materializes. The
+resulting failure is not a benign cache miss — a miss falls back to querying
+the warehouse. It is worse: `Adapter::get_relation` sees "schema cached and
+complete, relation not present" and reports the relation *definitively
+absent*. The materialization then skips dropping the pre-existing relation and
+fails renaming its temp table over the top:
+
+```
+Catalog Error: Could not rename "t__dbt_tmp" to "t": another entry with this
+name already exists!
+```
+
+The practical effect: the **second run of any model against a still-running
+worker** fails. Reproduced against DuckDB for both `table` and `view`
+materializations, and for `--full-refresh` on an incremental model.
+
+**Workaround:** `render_env::prepare_render_env` clears the engine's relation
+cache before each activity renders, restoring the per-invocation freshness the
+cache was designed around. The cost is one schema listing per node rather than
+one per worker lifetime. Covered by
+`tests/duckdb_scenarios.rs::rerunning_a_*_model_replaces_the_existing_relation`.
+
+**Upstream angle:** the durable fix is for the materialization macros to
+maintain the cache (as dbt-core's Python macros do), or for `insert_schema` to
+carry an invalidation hook. Not yet filed — see the filing policy note below.
+
 ## Other temporary hacks
 
 | Workaround | Description |

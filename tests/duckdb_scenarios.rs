@@ -412,3 +412,55 @@ async fn transitive_ephemeral_chain_is_inlined() {
     .await;
     harness.run_ok("downstream").await;
 }
+
+// --- re-running a model against an existing relation ---
+
+/// Regression: a worker outlives the run, and dbt-fusion's relation cache is
+/// built for the CLI's one-shot lifetime. The first existence check lists the
+/// schema and marks it complete; nothing writes back when the node then creates
+/// its relation. On the next run `get_relation` reported the relation
+/// *definitively absent* (not a miss — a miss would re-query), so the
+/// materialization skipped its drop and failed renaming the temp table over the
+/// top: `Could not rename "t__dbt_tmp" to "t"`.
+#[tokio::test]
+async fn rerunning_a_table_model_replaces_the_existing_relation() {
+    let harness =
+        Harness::build(&[("t", "{{ config(materialized='table') }}\nselect 1 as id")]).await;
+
+    harness.run_ok("t").await;
+    harness.run_ok("t").await;
+}
+
+/// Same defect, the view materialization's rename path.
+#[tokio::test]
+async fn rerunning_a_view_model_replaces_the_existing_relation() {
+    let harness =
+        Harness::build(&[("v", "{{ config(materialized='view') }}\nselect 1 as id")]).await;
+
+    harness.run_ok("v").await;
+    harness.run_ok("v").await;
+}
+
+/// The incremental case the stale cache made untestable: with the relation
+/// already built, `--full-refresh` must take the rebuild branch and succeed.
+#[tokio::test]
+async fn full_refresh_rebuilds_an_existing_incremental_model() {
+    let harness = Harness::build(&[(
+        "incr",
+        "{{ config(materialized='incremental') }}\n\
+         select 1 as id{% if is_incremental() %} where false{% endif %}",
+    )])
+    .await;
+
+    harness.run_ok("incr").await;
+
+    let refreshed = harness
+        .run_ok_with_overrides("incr", serde_json::json!({}), true)
+        .await
+        .compiled_code
+        .expect("compiled sql");
+    assert!(
+        !refreshed.contains("where false"),
+        "full refresh must take the rebuild branch, got: {refreshed}"
+    );
+}

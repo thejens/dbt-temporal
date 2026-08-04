@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Build the ADBC PostgreSQL driver from source with statically linked OpenSSL,
-# libpq, libpgcommon, and libpgport. The CDN-shipped driver uses
-# -undefined dynamic_lookup which leaves OpenSSL/libpq symbols unresolved,
-# causing SIGSEGV on macOS ARM64 at dlopen time.
+# Build the ADBC PostgreSQL driver from source so every symbol it needs resolves
+# at dlopen time. The CDN-shipped driver uses -undefined dynamic_lookup, which
+# leaves OpenSSL/libpq symbols unresolved; dbt's loader does not check the dlopen
+# result, so it calls through a NULL function pointer and the process dies with
+# EXC_BAD_ACCESS at address 0x0 on macOS ARM64.
+#
+# The result links libpgcommon/libpgport/libpq-oauth and OpenSSL statically, and
+# libpq itself dynamically from the Homebrew prefix (pkg-config hands cmake
+# `-L<libpq>/lib -lpq`, and the linker prefers the dylib). That is fine here:
+# this installs into a per-user cache on a machine that already has the brew
+# packages this script requires. It is not a relocatable artifact.
 set -euo pipefail
 
 ADBC_REPO="https://github.com/dbt-labs/arrow-adbc"
@@ -29,9 +36,17 @@ check_prereq cmake
 check_prereq brew
 check_brew_pkg libpq
 check_brew_pkg openssl@3
+# libpq 18's .pc declares `Requires.private: libssl, libcrypto, libcurl` for its
+# OAuth support, and libcurl.pc in turn requires zlib. Both are keg-only, so
+# pkg-config cannot see them unless their prefixes are on PKG_CONFIG_PATH —
+# without them the configure step fails with a bare "libpq not found".
+check_brew_pkg curl
+check_brew_pkg zlib
 
 LIBPQ_PREFIX="$(brew --prefix libpq)"
 OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+CURL_PREFIX="$(brew --prefix curl)"
+ZLIB_PREFIX="$(brew --prefix zlib)"
 
 # --- Clone / update source ---------------------------------------------------
 
@@ -69,16 +84,17 @@ mkdir -p "$BUILD_DIR"
 
 # libpgcommon_shlib.a / libpgport_shlib.a provide the frontend (non-_private)
 # symbols that libpq.a needs (pg_char_to_encoding, SCRAM, base64, etc.).
+# libpq-oauth.a covers the OAuth device-flow symbols libpq 18 split out.
 # They are linked normally (not -force_load) so only referenced objects are pulled in.
-LINKER_FLAGS="
-    $LIBPQ_PREFIX/lib/libpgcommon_shlib.a
-    $LIBPQ_PREFIX/lib/libpgport_shlib.a
-    $OPENSSL_PREFIX/lib/libssl.a
-    $OPENSSL_PREFIX/lib/libcrypto.a
-    -lgssapi_krb5"
+#
+# Must stay on ONE line: CMake truncates a cache value at the first newline
+# ("Value of CMAKE_SHARED_LINKER_FLAGS contained a newline; truncating"), which
+# silently drops every static library and yields a dylib with unresolved
+# OpenSSL symbols — the very SIGSEGV-at-dlopen this script exists to avoid.
+LINKER_FLAGS="$LIBPQ_PREFIX/lib/libpgcommon_shlib.a $LIBPQ_PREFIX/lib/libpgport_shlib.a $LIBPQ_PREFIX/lib/libpq-oauth.a $OPENSSL_PREFIX/lib/libssl.a $OPENSSL_PREFIX/lib/libcrypto.a -lgssapi_krb5"
 
 echo "=> Configuring cmake"
-PKG_CONFIG_PATH="$LIBPQ_PREFIX/lib/pkgconfig:$OPENSSL_PREFIX/lib/pkgconfig" \
+PKG_CONFIG_PATH="$LIBPQ_PREFIX/lib/pkgconfig:$OPENSSL_PREFIX/lib/pkgconfig:$CURL_PREFIX/lib/pkgconfig:$ZLIB_PREFIX/lib/pkgconfig" \
 cmake -S "$SRC_DIR/c" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DADBC_DRIVER_POSTGRESQL=ON \

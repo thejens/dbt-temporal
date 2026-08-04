@@ -207,7 +207,9 @@ pub async fn run_project_hooks_inner(
         if !sql.is_empty() {
             let ctx = dbt_adbc::QueryCtx::new(format!("{} hook[{idx}]", input.phase));
             adapter
-                .execute_without_state(Some(&ctx), sql, false)
+                // No adapter options: hook SQL runs on the connection's own
+                // session settings, same as before upstream added the parameter.
+                .execute_without_state(Some(&ctx), sql, false, None)
                 .map_err(|e| {
                     crate::error::classify_adapter_execution_error(
                         &e,

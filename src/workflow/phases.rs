@@ -16,9 +16,11 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime};
 
-use temporalio_common::protos::coresdk::AsJsonPayloadExt;
+use temporalio_common::search_attributes::SearchAttributeUpdate;
 use temporalio_sdk::error::ApplicationFailure;
-use temporalio_sdk::{ActivityOptions, LocalActivityOptions, WorkflowContext, WorkflowTermination};
+use temporalio_sdk::{
+    ActivityOptions, LocalActivityOptions, MemoValue, WorkflowContext, WorkflowTermination,
+};
 
 use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
@@ -31,6 +33,7 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{build_retry_policy, elapsed_secs, plural};
+use super::search_attributes::build_search_attribute_updates;
 
 /// Build the workflow-detail line shown after `plan_project` returns:
 /// "planned 17 nodes across 8 levels".
@@ -165,7 +168,7 @@ pub async fn save_segment_state(
     invocation_id: &str,
     state: RunSegmentState,
 ) -> Result<String, WorkflowTermination> {
-    ctx.start_activity(
+    ctx.execute_activity(
         DbtActivities::save_segment_state,
         SaveSegmentStateInput {
             invocation_id: invocation_id.to_string(),
@@ -186,7 +189,7 @@ pub async fn load_segment_state(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     state_ref: &str,
 ) -> Result<RunSegmentState, WorkflowTermination> {
-    ctx.start_activity(
+    ctx.execute_activity(
         DbtActivities::load_segment_state,
         LoadSegmentStateInput {
             state_ref: state_ref.to_string(),
@@ -277,65 +280,35 @@ pub fn apply_post_run_outcome(
     }
 }
 
-/// Convert search-attribute strings into the JSON-encoded payloads Temporal's
-/// `upsert_search_attributes` API expects. Pure: just serializes each value
-/// and wraps any failure into `WorkflowTermination::failed_application` with the
-/// attribute key in the error message.
-pub fn build_search_attribute_payloads(
-    attributes: &BTreeMap<String, String>,
-) -> Result<
-    Vec<(String, temporalio_common::protos::temporal::api::common::v1::Payload)>,
-    WorkflowTermination,
-> {
-    attributes
-        .iter()
-        .map(|(k, v)| {
-            let payload = v.as_json_payload().map_err(|e| {
-                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                    anyhow::anyhow!("serializing search attribute '{k}' as JSON payload: {e:#}"),
-                ))
-            })?;
-            Ok((k.clone(), payload))
-        })
-        .collect()
-}
-
-/// Re-upsert the `DbtStatus` search attribute to a terminal outcome
-/// (`passed` / `failed` / `skipped` / `cancelled`) as the run ends, so the
-/// workflow list can be filtered by outcome.
-///
-/// No-op unless `DbtStatus` is already in `plan.search_attributes` — that map
-/// has passed the namespace-registration filter, so this only upserts when the
-/// attribute is registered (upserting an unregistered attribute fails the
-/// workflow task). The initial `running` value is set at plan time.
-/// Build the single-entry `DbtStatus` payload list for the terminal upsert, or
+/// Build the single-entry `DbtStatus` update for the terminal upsert, or
 /// `None` when `DbtStatus` isn't in the plan's (registration-filtered)
 /// attributes — upserting an unregistered attribute would fail the workflow
-/// task. Pure, so the gating and payload shape are unit-testable without a
+/// task. Pure, so the gating and update shape are unit-testable without a
 /// `WorkflowContext`.
-type SearchAttributePayloads =
-    Vec<(String, temporalio_common::protos::temporal::api::common::v1::Payload)>;
-
-fn terminal_status_payloads(
+fn terminal_status_updates(
     plan: &ExecutionPlan,
     status: &str,
-) -> Option<Result<SearchAttributePayloads, WorkflowTermination>> {
+) -> Option<Result<Vec<SearchAttributeUpdate>, WorkflowTermination>> {
     if !plan.search_attributes.contains_key("DbtStatus") {
         return None;
     }
-    Some(build_search_attribute_payloads(&BTreeMap::from([(
+    Some(build_search_attribute_updates(&BTreeMap::from([(
         "DbtStatus".to_string(),
         status.to_string(),
     )])))
 }
 
+/// Re-upsert the `DbtStatus` search attribute to a terminal outcome
+/// (`passed` / `failed` / `skipped` / `cancelled`) as the run ends, so the
+/// workflow list can be filtered by outcome. The initial `running` value is
+/// set at plan time.
 pub fn upsert_terminal_status(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
     status: &str,
 ) -> Result<(), WorkflowTermination> {
-    if let Some(payloads) = terminal_status_payloads(plan, status) {
-        ctx.upsert_search_attributes(payloads?);
+    if let Some(updates) = terminal_status_updates(plan, status) {
+        ctx.upsert_search_attributes(updates?);
     }
     Ok(())
 }
@@ -344,14 +317,8 @@ pub fn write_command_memo(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
 ) -> Result<(), WorkflowTermination> {
-    let memo = CommandMemo::from(input);
-    ctx.upsert_memo([(
-        "command".to_string(),
-        memo.as_json_payload().map_err(|e| {
-            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
-        })?,
-    )]);
-    Ok(())
+    ctx.upsert_memo([("command", Some(MemoValue::new(CommandMemo::from(input))))])
+        .map_err(|e| WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e)))
 }
 
 /// Runs `plan_project`, upserts search attributes, sets the workflow's
@@ -362,7 +329,7 @@ pub async fn plan_and_announce(
     plan_timeout_secs: u64,
 ) -> Result<ExecutionPlan, WorkflowTermination> {
     let plan: ExecutionPlan = ctx
-        .start_activity(
+        .execute_activity(
             DbtActivities::plan_project,
             input.clone(),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(plan_timeout_secs)),
@@ -375,8 +342,7 @@ pub async fn plan_and_announce(
         })?;
 
     if !plan.search_attributes.is_empty() {
-        let sa_payloads = build_search_attribute_payloads(&plan.search_attributes)?;
-        ctx.upsert_search_attributes(sa_payloads);
+        ctx.upsert_search_attributes(build_search_attribute_updates(&plan.search_attributes)?);
     }
 
     ctx.set_current_details(build_planned_details(plan.nodes.len(), plan.levels.len()));
@@ -396,7 +362,7 @@ pub async fn resolve_project_config(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
 ) -> Result<ResolvedProjectConfig, WorkflowTermination> {
-    ctx.start_local_activity(
+    ctx.execute_local_activity(
         DbtActivities::resolve_config,
         build_resolve_config_input(plan, input),
         LocalActivityOptions {
@@ -451,7 +417,7 @@ pub async fn run_on_run_start(
         return Ok(());
     }
     ctx.set_current_details("running on-run-start hooks".to_string());
-    ctx.start_activity(
+    ctx.execute_activity(
         DbtActivities::run_project_hooks,
         build_project_hooks_input(
             ProjectHookPhase::OnRunStart,
@@ -482,7 +448,7 @@ pub async fn store_run_artifacts(
         return Ok((None, None));
     }
     let artifacts: StoreArtifactsOutput = ctx
-        .start_activity(
+        .execute_activity(
             DbtActivities::store_artifacts,
             build_store_artifacts_input(plan, all_results, log_lines),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(
@@ -516,7 +482,7 @@ pub async fn run_on_run_end(
     }
     ctx.set_current_details("running on-run-end hooks".to_string());
     let result = ctx
-        .start_activity(
+        .execute_activity(
             DbtActivities::run_project_hooks,
             build_project_hooks_input(
                 ProjectHookPhase::OnRunEnd,
@@ -947,8 +913,6 @@ mod tests {
         assert!(sel_fail.is_empty());
     }
 
-    // --- build_search_attribute_payloads ---
-
     // --- apply_post_run_outcome ---
 
     #[test]
@@ -985,13 +949,6 @@ mod tests {
         // Note: the err arm doesn't push to hook_errors — that loss is
         // intentional, the caller logs the error before calling here.
         assert!(hook_errors.is_empty());
-    }
-
-    #[test]
-    fn build_search_attribute_payloads_empty_input() {
-        let attrs = BTreeMap::new();
-        let result = build_search_attribute_payloads(&attrs).unwrap();
-        assert!(result.is_empty());
     }
 
     // --- apply_pre_run_outcome ---
@@ -1079,46 +1036,34 @@ mod tests {
         assert_eq!(out.hook_errors.len(), 2);
     }
 
-    #[test]
-    fn build_search_attribute_payloads_serializes_each_string() {
-        let mut attrs = BTreeMap::new();
-        attrs.insert("DbtProject".to_string(), "shop".to_string());
-        attrs.insert("DbtCommand".to_string(), "build".to_string());
-
-        let result = build_search_attribute_payloads(&attrs).unwrap();
-        assert_eq!(result.len(), 2);
-
-        // Order is BTreeMap-deterministic (alphabetical by key).
-        assert_eq!(result[0].0, "DbtCommand");
-        assert_eq!(result[1].0, "DbtProject");
-
-        // Each Payload contains the JSON-encoded string value.
-        let payload_value: serde_json::Value = serde_json::from_slice(&result[1].1.data).unwrap();
-        assert_eq!(payload_value, serde_json::json!("shop"));
-    }
-
-    // --- terminal_status_payloads ---
+    // --- terminal_status_updates ---
 
     #[test]
-    fn terminal_status_payloads_none_when_dbtstatus_not_registered() {
+    fn terminal_status_updates_none_when_dbtstatus_not_registered() {
         // empty_plan has no search attributes → DbtStatus is unregistered, so
         // the terminal upsert must be skipped (upserting it would fail the task).
         let plan = empty_plan();
-        assert!(terminal_status_payloads(&plan, "passed").is_none());
+        assert!(terminal_status_updates(&plan, "passed").is_none());
     }
 
     #[test]
-    fn terminal_status_payloads_builds_dbtstatus_when_registered() {
+    fn terminal_status_updates_builds_dbtstatus_when_registered() {
+        use temporalio_common::search_attributes::{SearchAttributeKey, SearchAttributes};
+
         let mut plan = empty_plan();
         plan.search_attributes
             .insert("DbtStatus".to_string(), "running".to_string());
-        let payloads = terminal_status_payloads(&plan, "failed")
+        let updates = terminal_status_updates(&plan, "failed")
             .expect("registered → Some")
-            .expect("payload builds");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].0, "DbtStatus");
-        let val: serde_json::Value = serde_json::from_slice(&payloads[0].1.data).unwrap();
-        assert_eq!(val, serde_json::json!("failed"));
+            .expect("update builds");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].name(), "DbtStatus");
+
+        // Round-trip through the typed collection to confirm the terminal
+        // value replaces the "running" one written at plan time.
+        let applied = SearchAttributes::new(updates);
+        let key: SearchAttributeKey<String> = SearchAttributeKey::keyword("DbtStatus");
+        assert_eq!(applied.get(&key).as_deref(), Some("failed"));
     }
 
     // --- project hook activity options ---
@@ -1147,7 +1092,7 @@ mod tests {
         let policy = opts
             .retry_policy
             .expect("an opted-in phase must bound its retries");
-        assert_eq!(policy.maximum_attempts, 7);
+        assert_eq!(policy.maximum_attempts(), 7);
     }
 
     /// The phase that did not opt in reports every failure as non-retryable, so

@@ -30,38 +30,40 @@ path = "src/lib.rs"
 
 [dependencies]
 # Temporal SDK
-temporalio-sdk = "0.5.0"
-temporalio-sdk-core = "0.5.0"
-temporalio-client = "0.5.0"
+# Core runtime/tuner types come through `temporalio_sdk::runtime`, so the worker
+# needs no direct temporalio-sdk-core dependency (it stays a dev-dependency for
+# the ephemeral test server).
+temporalio-sdk = "0.6.0"
+temporalio-client = "0.6.0"
 # otel + prometheus enable the worker-metrics exporters in the telemetry module.
-temporalio-common = { version = "0.5.0", features = ["otel", "prometheus"] }
-temporalio-macros = "0.5.0"
+temporalio-common = { version = "0.6.0", features = ["otel", "prometheus"] }
+temporalio-macros = "0.6.0"
 # Runtime crate referenced by code the `#[workflow]`/`#[workflow_methods]` macros
 # generate (their expansion names `::temporalio_workflow::*`).
-temporalio-workflow = "0.5.0"
+temporalio-workflow = "0.6.0"
 
-# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-07-06)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-08-03)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
 # FsError/ErrorCode: dbt's own transient/permanent error taxonomy. Some Jinja
 # adapter functions (e.g. run_query) wrap the underlying AdapterError in an
 # FsError, discarding it as a downcastable source but keeping its ErrorCode —
 # the retry classifier reads that field directly for those paths.
-dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
+dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
 # layer inserts a default so dbt-fusion's adapter code doesn't panic.
-dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "bb24b2468027f2c0ddf65bcc005c4aa418121c79" }
-dbt-yaml = "0.9.5"
+dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-yaml = "0.9.6"
 
 # Standard
 tokio = { version = "1", features = ["full"] }
@@ -106,7 +108,7 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
-temporalio-sdk-core = { version = "0.5.0", features = ["ephemeral-server"] }
+temporalio-sdk-core = { version = "0.6.0", features = ["ephemeral-server"] }
 
 [lints.rust]
 unsafe_code = "deny"

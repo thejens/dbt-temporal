@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
-use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
-use temporalio_sdk::WorkflowTermination;
+use temporalio_client::RetryPolicy;
 use temporalio_sdk::error::ApplicationFailure;
+use temporalio_sdk::{MemoValue, WorkflowTermination};
 
 use crate::types::{
     DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
@@ -48,14 +49,8 @@ pub fn upsert_node_status(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
     tree: &NodeStatusTree,
 ) -> Result<(), WorkflowTermination> {
-    use temporalio_common::protos::coresdk::AsJsonPayloadExt;
-    ctx.upsert_memo([(
-        "node_status".to_string(),
-        tree.as_json_payload().map_err(|e| {
-            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
-        })?,
-    )]);
-    Ok(())
+    ctx.upsert_memo([("node_status", Some(MemoValue::new(tree.clone())))])
+        .map_err(|e| WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e)))
 }
 
 /// Maximum number of log lines to store in the memo.
@@ -77,37 +72,24 @@ pub fn upsert_memo_state(
     tree: &NodeStatusTree,
     log_lines: &[String],
 ) -> Result<(), WorkflowTermination> {
-    use temporalio_common::protos::coresdk::AsJsonPayloadExt;
-
-    let memo_log = truncate_log_for_memo(log_lines);
-    let memo_tree = truncate_node_status_for_memo(tree);
-
     ctx.upsert_memo([
-        (
-            "node_status".to_string(),
-            memo_tree.as_json_payload().map_err(|e| {
-                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
-            })?,
-        ),
-        (
-            "log".to_string(),
-            memo_log.as_json_payload().map_err(|e| {
-                WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e))
-            })?,
-        ),
-    ]);
-    Ok(())
+        ("node_status", Some(MemoValue::new(truncate_node_status_for_memo(tree)))),
+        ("log", Some(MemoValue::new(truncate_log_for_memo(log_lines)))),
+    ])
+    .map_err(|e| WorkflowTermination::failed_application(ApplicationFailure::non_retryable(e)))
 }
 
 /// Keep only the last `MEMO_LOG_MAX_LINES` lines, prepending a truncation notice.
-fn truncate_log_for_memo(log_lines: &[String]) -> Vec<&str> {
+/// Returns owned lines: `MemoValue` defers serialization to the data converter
+/// at completion time, so it can only hold `'static` values.
+fn truncate_log_for_memo(log_lines: &[String]) -> Vec<String> {
     if log_lines.len() <= MEMO_LOG_MAX_LINES {
-        return log_lines.iter().map(String::as_str).collect();
+        return log_lines.to_vec();
     }
     let skip = log_lines.len() - (MEMO_LOG_MAX_LINES - 1);
     let mut out = Vec::with_capacity(MEMO_LOG_MAX_LINES);
-    out.push("... (log truncated, full log available in artifacts)");
-    out.extend(log_lines[skip..].iter().map(String::as_str));
+    out.push("... (log truncated, full log available in artifacts)".to_string());
+    out.extend_from_slice(&log_lines[skip..]);
     out
 }
 
@@ -279,7 +261,7 @@ pub fn mark_remaining_level_as_cancelled(
 ///
 /// Format: `<resource_type>:<name>` with the proto enum prefix stripped, so
 /// `NODE_TYPE_MODEL` → `model`. Returns `None` when the id isn't in the plan,
-/// matching the behaviour of `start_activity` (no label).
+/// matching the behaviour of `execute_activity` (no label).
 pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<String> {
     plan.nodes.get(unique_id).map(|info| {
         let rt = info
@@ -433,28 +415,22 @@ pub fn short_activity_error(e: &temporalio_sdk::ActivityExecutionError) -> Strin
 
 /// Build a Temporal RetryPolicy from our RetryConfig.
 pub fn build_retry_policy(config: &RetryConfig) -> RetryPolicy {
-    RetryPolicy {
-        initial_interval: Some(prost_types::Duration {
-            seconds: i64::try_from(config.initial_interval_secs).unwrap_or(i64::MAX),
-            nanos: 0,
-        }),
-        backoff_coefficient: config.backoff_coefficient,
-        maximum_interval: Some(prost_types::Duration {
-            seconds: i64::try_from(config.max_interval_secs).unwrap_or(i64::MAX),
-            nanos: 0,
-        }),
-        maximum_attempts: i32::try_from(config.max_attempts).unwrap_or(i32::MAX),
+    RetryPolicy::builder()
+        .initial_interval(Duration::from_secs(config.initial_interval_secs))
+        .backoff_coefficient(config.backoff_coefficient)
+        .maximum_interval(Duration::from_secs(config.max_interval_secs))
+        .maximum_attempts(config.max_attempts)
         // Must mirror `DbtTemporalError::is_retryable` — every variant that
         // returns false belongs here.
-        non_retryable_error_types: vec![
-            "DbtTemporalError::Compilation".to_string(),
-            "DbtTemporalError::Configuration".to_string(),
-            "DbtTemporalError::ProjectNotFound".to_string(),
-            "DbtTemporalError::TestFailure".to_string(),
-            "DbtTemporalError::UnitTestFailure".to_string(),
-            "DbtTemporalError::StaleSource".to_string(),
-        ],
-    }
+        .non_retryable_error_types([
+            "DbtTemporalError::Compilation",
+            "DbtTemporalError::Configuration",
+            "DbtTemporalError::ProjectNotFound",
+            "DbtTemporalError::TestFailure",
+            "DbtTemporalError::UnitTestFailure",
+            "DbtTemporalError::StaleSource",
+        ])
+        .build()
 }
 
 #[cfg(test)]
@@ -649,15 +625,13 @@ mod tests {
     fn build_retry_policy_from_defaults() {
         let config = RetryConfig::default();
         let policy = build_retry_policy(&config);
-        let initial = policy.initial_interval.unwrap();
-        assert_eq!(initial.seconds, config.initial_interval_secs as i64);
-        assert_eq!(policy.backoff_coefficient, config.backoff_coefficient);
-        let max_interval = policy.maximum_interval.unwrap();
-        assert_eq!(max_interval.seconds, config.max_interval_secs as i64);
-        assert_eq!(policy.maximum_attempts, config.max_attempts as i32);
+        assert_eq!(policy.initial_interval(), Duration::from_secs(config.initial_interval_secs));
+        assert_eq!(policy.backoff_coefficient(), config.backoff_coefficient);
+        assert_eq!(policy.maximum_interval(), Some(Duration::from_secs(config.max_interval_secs)));
+        assert_eq!(policy.maximum_attempts(), config.max_attempts);
         assert_eq!(
-            policy.non_retryable_error_types,
-            vec![
+            policy.non_retryable_error_types(),
+            [
                 "DbtTemporalError::Compilation",
                 "DbtTemporalError::Configuration",
                 "DbtTemporalError::ProjectNotFound",
@@ -772,10 +746,10 @@ mod tests {
             project_hooks: crate::types::ProjectHookRetry::default(),
         };
         let policy = build_retry_policy(&config);
-        assert_eq!(policy.maximum_attempts, 10);
-        assert_eq!(policy.initial_interval.unwrap().seconds, 5);
-        assert_eq!(policy.maximum_interval.unwrap().seconds, 120);
-        assert_eq!(policy.backoff_coefficient, 3.0);
+        assert_eq!(policy.maximum_attempts(), 10);
+        assert_eq!(policy.initial_interval(), Duration::from_secs(5));
+        assert_eq!(policy.maximum_interval(), Some(Duration::from_mins(2)));
+        assert_eq!(policy.backoff_coefficient(), 3.0);
     }
 
     #[test]
@@ -846,7 +820,7 @@ mod tests {
     #[test]
     fn elapsed_secs_returns_difference_when_both_present() {
         let start = std::time::SystemTime::UNIX_EPOCH;
-        let end = start + std::time::Duration::from_millis(2500);
+        let end = start + Duration::from_millis(2500);
         let secs = elapsed_secs(Some(start), Some(end));
         assert!((secs - 2.5).abs() < 1e-9);
     }
@@ -854,7 +828,7 @@ mod tests {
     #[test]
     fn elapsed_secs_returns_zero_when_end_before_start() {
         // duration_since returns Err when end < start; helper should yield 0.
-        let later = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let later = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
         let earlier = std::time::SystemTime::UNIX_EPOCH;
         assert!(elapsed_secs(Some(later), Some(earlier)).abs() < f64::EPSILON);
     }

@@ -33,6 +33,13 @@ pub async fn heartbeat_loop(ctx: &ActivityContext) -> Infallible {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        ctx.record_heartbeat(vec![]);
+        // Details are unused — the liveness signal is the heartbeat itself, so
+        // the unit payload is the smallest thing that carries it. A conversion
+        // failure on `()` is not reachable, but it must not end the loop: the
+        // activity would then silently stop heartbeating and be rescheduled as
+        // a dead worker.
+        if let Err(e) = ctx.record_heartbeat(()).await {
+            tracing::warn!(error = %e, "failed to record activity heartbeat");
+        }
     }
 }

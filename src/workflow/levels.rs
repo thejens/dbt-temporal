@@ -246,7 +246,7 @@ async fn execute_one_level(
     }
 
     // First pass: classify each node as skip-due-to-upstream-failure or schedule.
-    // Must collect schedule list before any start_activity call (which borrows
+    // Must collect schedule list before any execute_activity call (which borrows
     // ctx) so we can upsert memo first.
     let mut nodes_to_schedule: Vec<(String, NodeExecutionInput, Option<String>)> = Vec::new();
     for unique_id in level {
@@ -299,7 +299,7 @@ async fn execute_one_level(
     }
 
     // Memo: mark level as running (skipped nodes already set above).
-    // Must happen before start_activity calls which borrow ctx.
+    // Must happen before execute_activity calls which borrow ctx.
     upsert_memo_state(ctx, state.node_status, state.log_lines)?;
 
     // Update workflow details with the currently executing models (visible in Temporal UI).
@@ -333,7 +333,7 @@ async fn execute_one_level(
         } else {
             None
         };
-        let future = ctx.start_activity(
+        let future = ctx.execute_activity(
             DbtActivities::execute_node,
             node_input,
             ActivityOptions::with_start_to_close_timeout(Duration::from_secs(

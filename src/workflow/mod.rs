@@ -13,6 +13,7 @@
 mod helpers;
 mod levels;
 mod phases;
+mod search_attributes;
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -368,7 +369,7 @@ async fn continue_run_as_new(
     );
 
     Err(ctx
-        .continue_as_new(&next_input, ContinueAsNewOptions::default())
+        .continue_as_new(next_input, ContinueAsNewOptions::default())
         .expect_err("continue_as_new always returns Err"))
 }
 

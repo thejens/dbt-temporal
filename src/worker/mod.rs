@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
-use temporalio_sdk::Worker;
-use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
+use temporalio_sdk::runtime::RuntimeOptions;
+use temporalio_sdk::{Runtime, Worker};
 use tracing::info;
 
 use crate::activities::DbtActivities;
@@ -137,7 +137,7 @@ pub async fn connect_and_register(
         .telemetry_options(telemetry_options)
         .build()
         .map_err(|e| anyhow::anyhow!("building Temporal runtime options: {e}"))?;
-    let runtime = CoreRuntime::new_assume_tokio(runtime_options)?;
+    let runtime = Runtime::new_assume_tokio(runtime_options)?;
 
     // Connect to Temporal (new Connection + Client API)
     let tls_options = temporal::build_tls_options(config)?;
@@ -387,6 +387,10 @@ pub async fn initialize_project(
         &invocation_args,
         Arc::clone(&dbt_state),
         Macros::default(),
+        Nodes::default(),
+        // disabled_nodes: empty on a cold parse. Upstream threads this through
+        // so incremental re-resolves can carry disabled nodes forward; the
+        // worker always parses each project from scratch at startup.
         Nodes::default(),
         GetRelationCalls::default(),
         GetColumnsInRelationCalls::default(),

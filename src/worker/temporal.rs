@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use temporalio_common::protos::temporal::api::enums::v1::VersioningBehavior;
+use temporalio_client::Url;
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_common::worker::{
-    WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
+    VersioningBehavior, WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
 };
 use temporalio_sdk::WorkerOptions;
-use temporalio_sdk_core::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, Url, WorkerTuner};
+use temporalio_sdk::runtime::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, WorkerTuner};
 use tracing::info;
 
 use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
@@ -186,8 +186,8 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
             maximum: pa.maximum,
             initial: pa.initial,
         };
-        opts.workflow_task_poller_behavior = behavior;
-        opts.activity_task_poller_behavior = behavior;
+        opts.workflow_task_poller_behavior = Some(behavior);
+        opts.activity_task_poller_behavior = Some(behavior);
         info!(
             minimum = pa.minimum,
             maximum = pa.maximum,
@@ -234,7 +234,7 @@ fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync>
             activity_min_slots,
             activity_max_slots,
         } => {
-            use temporalio_sdk_core::{ResourceBasedTuner, ResourceSlotOptions};
+            use temporalio_sdk::runtime::{ResourceBasedTuner, ResourceSlotOptions};
 
             let mut tuner = ResourceBasedTuner::new(*target_mem_usage, *target_cpu_usage);
             tuner.with_activity_slots_options(ResourceSlotOptions::new(
@@ -487,15 +487,18 @@ mod tests {
             maximum: 64,
             initial: 8,
         };
-        assert_eq!(opts.workflow_task_poller_behavior, expected);
-        assert_eq!(opts.activity_task_poller_behavior, expected);
+        assert_eq!(opts.workflow_task_poller_behavior, Some(expected));
+        assert_eq!(opts.activity_task_poller_behavior, Some(expected));
     }
 
+    /// Unset is not "no autoscaling" — it is what makes the worker eligible for
+    /// the server-driven poller autoscaling enrollment, so it must stay `None`
+    /// rather than be filled in with an explicit default.
     #[test]
-    fn build_worker_options_keeps_default_poller_behavior() {
+    fn build_worker_options_leaves_poller_behavior_unconfigured_by_default() {
         let opts = build_worker_options(&test_config());
-        assert!(!opts.workflow_task_poller_behavior.is_autoscaling());
-        assert!(!opts.activity_task_poller_behavior.is_autoscaling());
+        assert_eq!(opts.workflow_task_poller_behavior, None);
+        assert_eq!(opts.activity_task_poller_behavior, None);
     }
 
     #[test]

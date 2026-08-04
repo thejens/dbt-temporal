@@ -5,9 +5,8 @@ use anyhow::Context;
 use temporalio_common::UntypedWorkflow;
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
-use temporalio_common::protos::coresdk::child_workflow::ParentClosePolicy;
 
-use temporalio_sdk::ChildWorkflowOptions;
+use temporalio_sdk::{ChildWorkflowCancellationType, ChildWorkflowOptions, ParentClosePolicy};
 use tracing::{info, warn};
 
 use crate::project_registry::ProjectRegistry;
@@ -137,14 +136,18 @@ fn build_hook_options(
         "{event} hook #{index}: {} (queue: {}{fnf})",
         hook.workflow_type, hook.task_queue
     );
-    ChildWorkflowOptions {
-        workflow_id,
-        task_queue: Some(hook.task_queue.clone()),
-        parent_close_policy,
-        execution_timeout: Some(Duration::from_secs(timeout)),
-        static_summary: Some(static_summary),
-        ..Default::default()
-    }
+    ChildWorkflowOptions::builder()
+        .workflow_id(workflow_id)
+        .task_queue(hook.task_queue.clone())
+        .parent_close_policy(parent_close_policy)
+        // A cancelled run must not block on its hooks acknowledging the
+        // cancellation: a hook that ignores cancellation would hold the run
+        // open until its own execution timeout. Set explicitly because the
+        // SDK default waits for the child to finish cancelling.
+        .cancel_type(ChildWorkflowCancellationType::Abandon)
+        .execution_timeout(Duration::from_secs(timeout))
+        .static_summary(static_summary)
+        .build()
 }
 
 /// Process the completion payload of a pre_run hook: merge any `extra_env`
@@ -465,7 +468,7 @@ mod tests {
     fn build_hook_options_sets_workflow_id_and_task_queue() {
         let hook = make_hook("notify", Some(30), false);
         let opts = build_hook_options(&hook, "id-123".to_string(), HookEvent::PreRun, 0);
-        assert_eq!(opts.workflow_id, "id-123");
+        assert_eq!(opts.workflow_id.as_deref(), Some("id-123"));
         assert_eq!(opts.task_queue.as_deref(), Some("q"));
         assert_eq!(opts.execution_timeout, Some(Duration::from_secs(30)));
     }

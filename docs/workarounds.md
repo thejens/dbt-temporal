@@ -34,11 +34,11 @@ ABI-incompatible with macOS's Heimdal. This causes a `SIGSEGV` (NULL function
 pointer call inside `pqConnectOptions2`) before any connection parameters —
 including `sslmode=disable` — are processed.
 
-**Workaround:** Build the driver from source, statically linking Homebrew's libpq
-and OpenSSL. Run:
+**Workaround:** Build the driver from source against Homebrew's libpq and
+OpenSSL. Run:
 
 ```bash
-brew install cmake libpq openssl@3
+brew install cmake libpq openssl@3 curl zlib
 bash scripts/build-adbc-postgres.sh
 ```
 
@@ -47,12 +47,34 @@ The script:
 2. Patches `BuildUtils.cmake` to remove `-undefined dynamic_lookup`, so the
    linker fails fast on unresolved symbols instead of deferring them.
 3. Configures cmake with Homebrew `libpq`/`openssl@3` and links
-   `libpgcommon_shlib.a`, `libpgport_shlib.a`, `libssl.a`, `libcrypto.a`
-   statically. Uses system `-lgssapi_krb5` (Heimdal) which is safe — GSSAPI
+   `libpgcommon_shlib.a`, `libpgport_shlib.a`, `libpq-oauth.a`, `libssl.a`,
+   `libcrypto.a`. Uses system `-lgssapi_krb5` (Heimdal) which is safe — GSSAPI
    is only invoked when the connection requests it.
 4. Installs the dylib to
    `~/Library/Caches/com.getdbt/adbc/aarch64-apple-darwin/libadbc_driver_postgresql-0.21.0+dbt0.21.0.dylib`,
-   where dbt-temporal picks it up automatically.
+   where dbt-temporal picks it up automatically, and verifies it `dlopen`s.
+
+**Verifying the installed driver.** A broken driver is indistinguishable from a
+code bug at the call site — the process just dies at `0x0`. Check it directly
+rather than guessing:
+
+```bash
+DRIVER=~/Library/Caches/com.getdbt/adbc/aarch64-apple-darwin/libadbc_driver_postgresql-0.21.0+dbt0.21.0.dylib
+python3 -c "import ctypes, sys; ctypes.CDLL(sys.argv[1]); print('OK')" "$DRIVER"
+```
+
+A `symbol not found in flat namespace '_OPENSSL_sk_num'` here means the cached
+dylib is the CDN build (or a bad local build) and needs rebuilding.
+
+**Two failure modes this script hit on Homebrew libpq 18** (fixed 2026-08-04;
+both produced the same SIGSEGV, so re-run the script if you see it again):
+- `CMAKE_SHARED_LINKER_FLAGS` was passed as a multi-line string. CMake truncates
+  a cache value at the first newline — it warns, but the warning scrolls past in
+  the build log — which dropped every static library from the link and produced
+  precisely the unresolved-symbol dylib this script exists to prevent.
+- libpq 18's `.pc` declares `Requires.private: libssl, libcrypto, libcurl`, and
+  `libcurl.pc` requires `zlib`. Both are keg-only, so without their prefixes on
+  `PKG_CONFIG_PATH` the configure step fails with a bare "libpq not found".
 
 ## 4. Relation cache goes stale in a long-lived worker
 

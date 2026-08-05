@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Build the ADBC PostgreSQL driver from source so every symbol it needs resolves
 # at dlopen time. The CDN-shipped driver uses -undefined dynamic_lookup, which
-# leaves OpenSSL/libpq symbols unresolved; dbt's loader does not check the dlopen
-# result, so it calls through a NULL function pointer and the process dies with
-# EXC_BAD_ACCESS at address 0x0 on macOS ARM64.
+# leaves OpenSSL/libpq symbols unresolved. The ADBC driver manager opens drivers
+# with RTLD_LAZY, so such a library loads "successfully" and its unresolved
+# symbols bind at first call instead — to NULL, under flat namespace. The
+# process then dies with EXC_BAD_ACCESS at address 0x0 on macOS ARM64, at the
+# first warehouse connection rather than at load, with nothing pointing back at
+# the driver. Reported upstream as apache/arrow-adbc#4663.
 #
 # The result links libpgcommon/libpgport/libpq-oauth and OpenSSL statically, and
 # libpq itself dynamically from the Homebrew prefix (pkg-config hands cmake

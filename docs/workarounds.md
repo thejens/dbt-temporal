@@ -23,16 +23,24 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 
 ## 3. ADBC PostgreSQL driver built from source (macOS ARM64)
 
-**Issue:** not yet filed. (This section previously linked `dbt-labs/arrow-adbc#31`, but that
-number turned out to be an unrelated merged PR — a stale/incorrect reference, not a real
-filing. Searched `dbt-labs/arrow-adbc` for existing reports of this SIGSEGV; found none.)
+**Issue:** [apache/arrow-adbc#4663](https://github.com/apache/arrow-adbc/issues/4663) — filed
+against the driver manager's `RTLD_LAZY`, which is what makes this undiagnosable rather than a
+clean load error. The `-undefined dynamic_lookup` linkage of the driver itself is separate and
+not filed.
 
 The CDN-shipped ADBC PostgreSQL driver is built with `-undefined dynamic_lookup`,
-which defers unresolved symbols to `dlopen` time. On macOS, OpenSSL symbols
-resolve to NULL (macOS ships LibreSSL, not OpenSSL) and GSSAPI symbols are
-ABI-incompatible with macOS's Heimdal. This causes a `SIGSEGV` (NULL function
-pointer call inside `pqConnectOptions2`) before any connection parameters —
-including `sslmode=disable` — are processed.
+which leaves OpenSSL and GSSAPI symbols unresolved. On macOS the OpenSSL ones
+cannot be satisfied at all (macOS ships LibreSSL, not OpenSSL) and GSSAPI is
+ABI-incompatible with macOS's Heimdal.
+
+That alone would be a clean load failure. What turns it into a crash is that the
+ADBC driver manager opens drivers with `RTLD_LAZY`
+([search.rs](https://github.com/apache/arrow-adbc/blob/00dfb8b9c0f776940781ea42c5b32b6bf3618652/rust/driver_manager/src/search.rs#L320)):
+the library loads "successfully", and the unresolved symbols bind at first *call*
+— to NULL, under flat namespace. The result is a `SIGSEGV` at address `0x0`
+inside libpq (`pqConnectOptions2`), before any connection parameters — including
+`sslmode=disable` — are processed, and with nothing in the backtrace pointing at
+the driver.
 
 **Workaround:** Build the driver from source against Homebrew's libpq and
 OpenSSL. Run:

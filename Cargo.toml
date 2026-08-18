@@ -113,6 +113,9 @@ aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 temporalio-sdk-core = { version = "0.7.0", features = ["ephemeral-server"] }
+# Replay fixtures are stored gzipped: the continue-as-new history is 2.4MB raw,
+# which both bloats the repo and trips the 500KB pre-commit size check.
+flate2 = "1"
 
 [lints.rust]
 unsafe_code = "deny"

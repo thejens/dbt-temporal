@@ -2788,6 +2788,7 @@ dependencies = [
  "dbt-tracing",
  "dbt-yaml",
  "filetime",
+ "flate2",
  "futures",
  "futures-util",
  "minijinja",

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use temporalio_client::{
     Client, ClientOptions, Connection, ConnectionOptions, UntypedWorkflow,
-    WorkflowGetResultOptions, WorkflowStartOptions, grpc::WorkflowService,
+    WorkflowFetchHistoryOptions, WorkflowGetResultOptions, WorkflowStartOptions,
+    grpc::WorkflowService,
 };
 use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
@@ -713,6 +714,14 @@ pub async fn run_dbt_workflow(
         .await
         .context("waiting for workflow result")?;
 
+    if std::env::var("DBT_TEMPORAL_RECORD_HISTORIES").is_ok() {
+        let history = handle
+            .fetch_history(WorkflowFetchHistoryOptions::default())
+            .await
+            .context("fetching history for replay fixture")?;
+        write_history_fixture(&history)?;
+    }
+
     let payload = raw_value
         .payloads
         .first()
@@ -724,6 +733,35 @@ pub async fn run_dbt_workflow(
         workflow_id,
         run_id,
     })
+}
+
+/// Directory holding the committed histories that `tests/workflow_replay.rs`
+/// replays against the current workflow code.
+pub fn history_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/histories")
+}
+
+/// Write a completed run's history to the replay fixture directory.
+///
+/// Gated on `DBT_TEMPORAL_RECORD_HISTORIES` at the call site, and off by
+/// default: recording on every run would rewrite the fixtures from the very
+/// code they exist to test, which defeats the point — their value is that they
+/// were produced by an *older* build. Regenerate deliberately, and only when a
+/// workflow change makes the recorded shape genuinely unreachable.
+fn write_history_fixture(history: &temporalio_client::WorkflowHistory) -> Result<()> {
+    let dir = history_fixture_dir();
+    std::fs::create_dir_all(&dir).context("creating history fixture dir")?;
+    // Name by event count so distinct run shapes land in distinct files
+    // instead of the last test overwriting every earlier one.
+    let path = dir.join(format!("dbt_run_{}_events.json.gz", history.events().len()));
+    let json = history.to_json().context("encoding history JSON")?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    std::io::Write::write_all(&mut encoder, &json).context("compressing history fixture")?;
+    let compressed = encoder.finish().context("finishing history fixture gzip")?;
+    std::fs::write(&path, compressed)
+        .with_context(|| format!("writing history fixture to {}", path.display()))?;
+    tracing::info!(path = %path.display(), "recorded replay fixture");
+    Ok(())
 }
 
 /// Describe a completed workflow and return its memo and search attributes.

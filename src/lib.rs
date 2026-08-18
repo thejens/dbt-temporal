@@ -11,4 +11,4 @@ pub mod tracing_setup;
 pub mod types;
 pub mod worker;
 pub mod worker_state;
-pub(crate) mod workflow;
+pub mod workflow;

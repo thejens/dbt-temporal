@@ -85,11 +85,16 @@ pub fn render_materialization(
 /// Walks the user's compiled SQL for `__dbt__cte__<name>` references, compiles
 /// each transitive ephemeral dependency through Jinja, and persists per-ephemeral
 /// CTE chains to `ephemeral_dir`. The final wrap is delegated to
-/// `dbt_jinja_utils::utils::inject_and_persist_ephemeral_models`, which produces
-/// SQL with `--EPHEMERAL-SELECT-WRAPPER-START/END` markers — matching vanilla
-/// dbt-fusion's compile output and consumable by dbt-fusion's adapter SQL
-/// tokenizer / diff (`crates/dbt-adapter/src/sql/{tokenizer,diff}.rs`), which
-/// rely on those markers to reason about ephemeral wrapping.
+/// `dbt_jinja_utils::utils::inject_and_persist_ephemeral_models`, matching
+/// vanilla dbt-fusion's compile output.
+///
+/// That helper picks one of two shapes. SQL that already opens with `WITH` gets
+/// the ephemeral CTEs spliced into its existing chain as siblings; everything
+/// else is wrapped in `select * from (...)` and marked with
+/// `--EPHEMERAL-SELECT-WRAPPER-START/END`, which dbt-fusion's adapter SQL
+/// tokenizer / diff (`crates/dbt-adapter/src/sql/{tokenizer,diff}.rs`) read to
+/// reason about ephemeral wrapping. Do not assume the markers are always
+/// present.
 ///
 /// `ephemeral_dir` must be unique per-activity; the persist step writes
 /// `<name>.sql` files there, so concurrent activities sharing a directory would
@@ -414,10 +419,13 @@ mod tests {
         // the user's compiled SQL starts with `WITH`, naively prepending the
         // ephemeral CTEs (our old code) produced two `WITH` keywords in a row.
         // BigQuery's parser then tried to read the second `WITH` as part of a
-        // recursive CTE's `... CYCLE ... DEPTH` clause and rejected it. The
-        // dbt-fusion helper wraps the user SQL in `select * from (...)` plus
-        // `--EPHEMERAL-SELECT-WRAPPER-START/END` markers so a leading user
-        // `WITH` becomes a valid subselect CTE list.
+        // recursive CTE's `... CYCLE ... DEPTH` clause and rejected it.
+        //
+        // The dbt-fusion helper splices the ephemeral CTEs into the user's
+        // existing chain, so both become siblings under one `WITH`. The
+        // `select * from (...)` wrapper and its `--EPHEMERAL-SELECT-WRAPPER-*`
+        // markers are the *other* branch, taken only when there is no leading
+        // `WITH` to splice into — see `..._emits_wrapper_markers` below.
         let dir = tempfile::tempdir()?;
 
         // Simulate the persist step for a single ephemeral named `alpha` —
@@ -445,38 +453,29 @@ mod tests {
         .map_err(|e| anyhow::anyhow!("wrap user model: {e:#}"))?;
 
         assert!(
-            wrapped.contains("--EPHEMERAL-SELECT-WRAPPER-START"),
-            "expected start marker; got:\n{wrapped}"
-        );
-        assert!(
-            wrapped.contains("--EPHEMERAL-SELECT-WRAPPER-END"),
-            "expected end marker; got:\n{wrapped}"
-        );
-        assert!(
             wrapped.contains("__dbt__cte__alpha as (\nselect 1 as k, 2 as v\n)"),
             "expected alpha to be inlined; got:\n{wrapped}"
         );
+        // Splice, not wrap: the ephemeral lands inside the user's own chain and
+        // `user_cte` follows it as a sibling behind a comma.
         assert!(
-            wrapped.contains("select * from (\nWITH user_cte AS"),
-            "expected user WITH wrapped in subselect; got:\n{wrapped}"
-        );
-        // The original two-WITH-in-a-row pathology: assert that the user
-        // `WITH` appears strictly *inside* the wrap, not as a sibling to the
-        // outer `with __dbt__cte__alpha ...`. The wrapper-start marker is the
-        // boundary; nothing before it should mention the user CTE.
-        let start_idx = wrapped
-            .find("--EPHEMERAL-SELECT-WRAPPER-START")
-            .ok_or_else(|| anyhow::anyhow!("start marker missing"))?;
-        let user_idx = wrapped
-            .find("WITH user_cte")
-            .ok_or_else(|| anyhow::anyhow!("user WITH missing"))?;
-        assert!(
-            user_idx > start_idx,
-            "user WITH must appear after the wrapper start; got:\n{wrapped}"
+            wrapped.starts_with("WITH  __dbt__cte__alpha as ("),
+            "expected alpha spliced into the leading WITH; got:\n{wrapped}"
         );
         assert!(
-            !wrapped[..start_idx].contains("WITH user_cte"),
-            "user WITH must not appear before the wrapper start; got:\n{wrapped}"
+            wrapped.contains("), user_cte AS ("),
+            "expected user_cte to remain a sibling CTE; got:\n{wrapped}"
+        );
+        assert!(
+            !wrapped.contains("--EPHEMERAL-SELECT-WRAPPER"),
+            "splice path must not emit wrapper markers; got:\n{wrapped}"
+        );
+        // The pathology itself: exactly one `WITH` keyword may open the
+        // statement. Two in a row is what BigQuery rejected.
+        assert_eq!(
+            wrapped.to_ascii_uppercase().matches("WITH").count(),
+            1,
+            "expected a single WITH keyword; got:\n{wrapped}"
         );
         Ok(())
     }

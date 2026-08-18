@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::{RecordBatch, StringArray};
+use arrow_array::{Array as _, RecordBatch, StringArray};
+use arrow_schema::DataType;
 use dbt_adapter::load_store::ResultStore;
 use dbt_common::constants::DBT_CTE_PREFIX;
 use dbt_schemas::schemas::Nodes;
@@ -654,8 +655,30 @@ fn compare_actual_expected(batch: &RecordBatch) -> Result<UnitTestOutcome, DbtTe
                 "unit test result is missing the actual_or_expected column"
             ))
         })?;
-    let labels = batch
-        .column(label_idx)
+    // The adapter normalizes every string column of a query result to
+    // `Utf8View` before handing it back (dbt-adapter's
+    // `concat_batches::to_view_types`, which sidesteps the i32 offset overflow
+    // that concatenating large `Utf8` batches hits). Cast the label column back
+    // to `Utf8` once so the row loop can borrow `&str` directly; the data
+    // columns need no such treatment because they go through
+    // `arrow_cast::display`, which renders every string representation alike.
+    let label_column = batch.column(label_idx);
+    let label_column = match label_column.data_type() {
+        DataType::Utf8 => Arc::clone(label_column),
+        DataType::Utf8View | DataType::LargeUtf8 => {
+            arrow_cast::cast(label_column.as_ref(), &DataType::Utf8).map_err(|e| {
+                DbtTemporalError::Adapter(anyhow::anyhow!(
+                    "casting actual_or_expected column to Utf8: {e}"
+                ))
+            })?
+        }
+        other => {
+            return Err(DbtTemporalError::Adapter(anyhow::anyhow!(
+                "actual_or_expected column is not a string column (got {other})"
+            )));
+        }
+    };
+    let labels = label_column
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| {
@@ -750,7 +773,7 @@ fn format_cell(column: &dyn arrow_array::Array, row: usize) -> Result<String, Db
 mod tests {
     use super::*;
 
-    use arrow_array::{ArrayRef, Int64Array};
+    use arrow_array::{ArrayRef, Int64Array, LargeStringArray, StringViewArray};
 
     // --- parse_given_input ---
 
@@ -893,6 +916,48 @@ mod tests {
             labels.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
         ));
         RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)]).unwrap()
+    }
+
+    /// The shape a real query result arrives in: the adapter normalizes string
+    /// columns to `Utf8View` before returning them.
+    fn batch_with_view_labels(ids: &[i64], labels: &[&str]) -> RecordBatch {
+        let id_col: ArrayRef = Arc::new(Int64Array::from(ids.to_vec()));
+        let label_col: ArrayRef = Arc::new(StringViewArray::from(labels.to_vec()));
+        RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)]).unwrap()
+    }
+
+    #[test]
+    fn compare_reads_utf8view_label_columns() {
+        // Regression: the adapter widens every result string column to
+        // `Utf8View`, so a plain `StringArray` downcast fails on real results
+        // and the unit test errors with "not a string column" instead of
+        // comparing anything.
+        let b =
+            batch_with_view_labels(&[2, 1, 1, 2], &["actual", "actual", "expected", "expected"]);
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(outcome.passed);
+        assert_eq!(outcome.actual_rows, 2);
+    }
+
+    #[test]
+    fn compare_reads_largeutf8_label_columns() {
+        // Drivers may hand back 64-bit-offset strings rather than `Utf8View`;
+        // both normalize through the same cast.
+        let id_col: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 1]));
+        let label_col: ArrayRef = Arc::new(LargeStringArray::from(vec!["actual", "expected"]));
+        let b = RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)])
+            .unwrap();
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(outcome.passed);
+        assert_eq!(outcome.actual_rows, 1);
+    }
+
+    #[test]
+    fn compare_detects_mismatch_with_utf8view_labels() {
+        let b = batch_with_view_labels(&[1, 3], &["actual", "expected"]);
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(!outcome.passed);
+        assert_eq!(outcome.failures, 2);
     }
 
     #[test]

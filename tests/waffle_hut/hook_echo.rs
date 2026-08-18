@@ -19,8 +19,10 @@ use anyhow::Result;
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_macros::{workflow, workflow_methods};
-use temporalio_sdk::{Worker, WorkerOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
-use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
+use temporalio_sdk::runtime::RuntimeOptions;
+use temporalio_sdk::{
+    Runtime, Worker, WorkerOptions, WorkflowContext, WorkflowContextView, WorkflowResult,
+};
 
 #[workflow]
 pub struct HookEchoWorkflow {
@@ -55,10 +57,10 @@ impl HookEchoWorkflow {
 }
 
 /// Build a Temporal worker with `HookEchoWorkflow` registered on the given
-/// task queue. Uses its own `CoreRuntime` (multiple `new_assume_tokio` calls
+/// task queue. Uses its own `Runtime` (multiple `new_assume_tokio` calls
 /// are safe — they share the ambient tokio runtime).
 pub async fn build_hook_worker(temporal_addr: &str, task_queue: &str) -> Result<Worker> {
-    let runtime = CoreRuntime::new_assume_tokio(
+    let runtime = Runtime::new_assume_tokio(
         RuntimeOptions::builder()
             .telemetry_options(TelemetryOptions::builder().build())
             .build()

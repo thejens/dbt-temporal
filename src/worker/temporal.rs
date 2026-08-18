@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use temporalio_client::Url;
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_common::worker::{
-    VersioningBehavior, WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes,
+    VersioningBehavior, WorkerDeploymentOptions, WorkerDeploymentVersion,
 };
 use temporalio_sdk::WorkerOptions;
 use temporalio_sdk::runtime::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, WorkerTuner};
@@ -107,26 +107,29 @@ pub fn build_tls_options(
                 .with_context(|| format!("reading TEMPORAL_TLS_CERT from {cert_path}"))?;
             let key = std::fs::read(key_path)
                 .with_context(|| format!("reading TEMPORAL_TLS_KEY from {key_path}"))?;
-            Some(temporalio_client::ClientTlsOptions {
-                client_cert: cert,
-                client_private_key: key,
-            })
+            Some(
+                temporalio_client::ClientTlsOptions::builder()
+                    .client_cert(cert)
+                    .client_private_key(key)
+                    .build(),
+            )
         }
         (None, None) => None,
         _ => anyhow::bail!("TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY must both be set for mTLS"),
     };
 
-    Ok(Some(temporalio_client::TlsOptions {
-        server_root_ca_cert: None,
-        domain: None,
-        client_tls_options: client_tls,
-        server_cert_verifier: None,
-    }))
+    Ok(Some(
+        temporalio_client::TlsOptions::builder()
+            .maybe_client_tls_options(client_tls)
+            .build(),
+    ))
 }
 
 /// Build a `WorkerOptions` with tuning settings from the config (fully built).
 ///
-/// Activity/workflow registrations are added by the caller on the `Worker` after creation.
+/// The caller registers the activities and workflow on the returned options
+/// before constructing the `Worker`; the set of polled task types is derived
+/// from those registrations.
 pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     let build_id = format!("dbt-temporal-{}", env!("CARGO_PKG_VERSION"));
     // When a deployment name is configured, enable versioned task routing so Temporal
@@ -142,14 +145,13 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     // that started it rather than migrating onto changed workflow code mid-DAG.
     // A dbt run is finite, so pinned executions drain on their own.
     let deployment = if let Some(ref name) = config.deployment_name {
-        WorkerDeploymentOptions {
-            version: WorkerDeploymentVersion {
-                deployment_name: name.clone(),
-                build_id,
-            },
-            use_worker_versioning: true,
-            default_versioning_behavior: Some(VersioningBehavior::Pinned),
-        }
+        WorkerDeploymentOptions::new(WorkerDeploymentVersion {
+            deployment_name: name.clone(),
+            build_id,
+        })
+        .use_worker_versioning(true)
+        .default_versioning_behavior(VersioningBehavior::Pinned)
+        .build()
     } else {
         WorkerDeploymentOptions::from_build_id(build_id)
     };
@@ -159,7 +161,6 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     let tuner = build_tuner(config);
 
     let mut opts = WorkerOptions::new(&config.temporal_task_queue)
-        .task_types(WorkerTaskTypes::all())
         .max_cached_workflows(config.max_cached_workflows)
         .deployment_options(deployment)
         .sticky_queue_schedule_to_start_timeout(sticky_timeout)

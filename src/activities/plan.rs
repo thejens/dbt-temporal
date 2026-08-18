@@ -223,9 +223,9 @@ pub async fn plan_project_inner(
 
     let invocation_id = ctx
         .info()
-        .workflow_execution
-        .as_ref()
-        .map_or_else(|| uuid::Uuid::new_v4().to_string(), |we| we.run_id().to_string());
+        .workflow_run_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let selected_ids = select_command_node_ids(state, &input)?;
     // The command's own node-type filter bounds what indirect selection may

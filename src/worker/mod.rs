@@ -180,17 +180,18 @@ pub async fn connect_and_register(
         priority_scheduling: PriorityScheduling(config.priority_scheduling),
     };
 
-    // Build worker options and create worker
-    let worker_options = temporal::build_worker_options(config);
-    // Worker::new returns Box<dyn Error>; not Send+Sync, so can't .context().
-    let mut worker = Worker::new(&runtime, client, worker_options)
-        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e}"))?;
-
-    // Register activities and workflow on the worker
-    worker.register_activities(activities);
-    worker
+    // Registrations belong to the options, not the built worker: the worker
+    // derives which task types to poll from what is registered, so it has to
+    // know before it is constructed.
+    let mut worker_options = temporal::build_worker_options(config);
+    worker_options.register_activities(activities);
+    worker_options
         .register_workflow::<DbtRunWorkflow>()
         .map_err(|e| anyhow::anyhow!("registering DbtRunWorkflow: {e}"))?;
+
+    // Worker::new returns Box<dyn Error>; not Send+Sync, so can't .context().
+    let worker = Worker::new(&runtime, client, worker_options)
+        .map_err(|e| anyhow::anyhow!("creating Temporal worker: {e}"))?;
 
     Ok(worker)
 }

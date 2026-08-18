@@ -773,7 +773,7 @@ fn format_cell(column: &dyn arrow_array::Array, row: usize) -> Result<String, Db
 mod tests {
     use super::*;
 
-    use arrow_array::{ArrayRef, Int64Array, StringViewArray};
+    use arrow_array::{ArrayRef, Int64Array, LargeStringArray, StringViewArray};
 
     // --- parse_given_input ---
 
@@ -937,6 +937,19 @@ mod tests {
         let outcome = compare_actual_expected(&b).unwrap();
         assert!(outcome.passed);
         assert_eq!(outcome.actual_rows, 2);
+    }
+
+    #[test]
+    fn compare_reads_largeutf8_label_columns() {
+        // Drivers may hand back 64-bit-offset strings rather than `Utf8View`;
+        // both normalize through the same cast.
+        let id_col: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 1]));
+        let label_col: ArrayRef = Arc::new(LargeStringArray::from(vec!["actual", "expected"]));
+        let b = RecordBatch::try_from_iter(vec![("id", id_col), ("actual_or_expected", label_col)])
+            .unwrap();
+        let outcome = compare_actual_expected(&b).unwrap();
+        assert!(outcome.passed);
+        assert_eq!(outcome.actual_rows, 1);
     }
 
     #[test]

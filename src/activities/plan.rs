@@ -669,6 +669,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_block_reads_var_detects_both_quote_styles() {
+        let names = ["region".to_string()];
+        assert!(config_block_reads_var(
+            "{{ config(schema=var('region')) }}\nselect 1",
+            names.iter()
+        ));
+        assert!(config_block_reads_var(
+            "{{ config(schema=var(\"region\")) }}\nselect 1",
+            names.iter()
+        ));
+    }
+
+    #[test]
+    fn config_block_reads_var_ignores_vars_outside_the_config_block() {
+        // The warning exists for config() blocks specifically: those are
+        // evaluated at parse time and keep the worker's startup value. A var
+        // in the model body is rendered per run and needs no warning.
+        let names = ["region".to_string()];
+        assert!(!config_block_reads_var(
+            "{{ config(materialized='table') }}\nselect '{{ var('region') }}' as r",
+            names.iter()
+        ));
+    }
+
+    #[test]
+    fn config_block_reads_var_handles_absent_or_unterminated_config() {
+        let names = ["region".to_string()];
+        assert!(!config_block_reads_var("select 1", names.iter()));
+        // Unterminated `config(` — no closing paren anywhere to bound the
+        // block, so there is nothing to scan.
+        assert!(!config_block_reads_var("{{ config(schema=var('region'", names.iter()));
+    }
+
+    #[test]
+    fn config_block_reads_var_is_false_for_unrelated_var_names() {
+        let names = ["other".to_string()];
+        assert!(!config_block_reads_var("{{ config(schema=var('region')) }}", names.iter()));
+    }
+
+    #[test]
     fn run_command_only_includes_models() {
         assert!(command_includes_node_type("run", NodeType::Model));
         assert!(!command_includes_node_type("run", NodeType::Test));

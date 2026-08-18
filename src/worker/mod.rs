@@ -362,6 +362,11 @@ pub async fn initialize_project(
         None,
         &token,
         Arc::new(dbt_loader::loader_hooks::NoOpLoaderHooks),
+        // Private `packages.yml` entries resolve to plain SSH clone URLs, so git
+        // authenticates with the provider directly. The alternative resolver
+        // mints credentials through dbt platform, which a self-hosted worker
+        // has no session for.
+        Arc::new(fs_deps::private_package::LocalPrivatePackageResolver),
     )
     .await
     .context("dbt load")?;

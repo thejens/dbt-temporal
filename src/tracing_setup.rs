@@ -25,7 +25,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use dbt_common::io_args::{FsCommand, LogFormat};
-use dbt_common::tracing::{FsTraceConfig, TelemetryHandle, dbt_init::init_tracing};
+use dbt_common::tracing::{FsTraceConfig, TelemetryHandle};
 
 /// Initialize the global tracing subscriber.
 ///
@@ -73,8 +73,9 @@ fn init_dbt_pipeline() -> Result<TelemetryHandle> {
     let log_format = parse_log_format("DBT_LOG_FORMAT")?.unwrap_or(LogFormat::Default);
     let config = fs_trace_config(max_log_verbosity, log_format);
 
-    let (handle, _config_provider) =
-        init_tracing(config).context("initializing dbt telemetry pipeline")?;
+    let (handle, _config_provider) = config
+        .init()
+        .context("initializing dbt telemetry pipeline")?;
     Ok(handle)
 }
 
@@ -101,9 +102,9 @@ fn fs_trace_config(max_log_verbosity: LevelFilter, log_format: LogFormat) -> FsT
         std::collections::HashSet::default(),
         false, // show_all_deprecations
         dbt_common::warn_error_options::WarnErrorOptions::default(),
+        false, // skip_fusion_only_upgrades — only set when replaying recorded runs
         None,  // log_file_name
         0,     // log_file_max_bytes
-        false, // disable_console_output
     )
     .with_command_name("dbt-temporal")
 }

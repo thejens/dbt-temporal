@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
 use raw_sql::resolve_raw_sql;
 use schema_patch::{
@@ -123,19 +122,18 @@ async fn load_defer_nodes(
     Ok(Some(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting)))
 }
 
-/// Build the compile+run base context, wired to an activity-scoped
-/// `ResultStore`.
+/// Build the compile+run base context.
 ///
-/// The store is returned alongside because the caller must re-inject its
-/// closures after `build_run_node_context` overwrites them — see the call site.
-/// Without that, `adapter_response` extraction reads a different store than the
-/// materialization macros wrote to.
+/// The `store_result` / `load_result` / `store_raw_result` closures this
+/// context carries are placeholders: `build_run_node_context` overlays its own
+/// `ResultStore` onto them and hands that store back, so the run path must read
+/// results from the store it returns rather than binding one here.
 fn build_base_context(
     state: &crate::worker_state::WorkerState,
     defer_nodes: Option<&dbt_schemas::schemas::Nodes>,
     namespace_keys: Vec<String>,
-) -> (BTreeMap<String, minijinja::Value>, ResultStore) {
-    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
+) -> BTreeMap<String, minijinja::Value> {
+    dbt_jinja_utils::phases::build_operation_context_btreemap(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
@@ -143,22 +141,7 @@ fn build_base_context(
         Arc::clone(&state.resolver_state.runtime_config),
         namespace_keys,
         None,
-    );
-    let result_store = ResultStore::default();
-    inject_result_store(&mut base_context, &result_store);
-    (base_context, result_store)
-}
-
-/// Point a context's `store_result` / `load_result` / `store_raw_result` at
-/// `store`.
-fn inject_result_store(context: &mut BTreeMap<String, minijinja::Value>, store: &ResultStore) {
-    context
-        .insert("store_result".to_owned(), minijinja::Value::from_function(store.store_result()));
-    context.insert("load_result".to_owned(), minijinja::Value::from_function(store.load_result()));
-    context.insert(
-        "store_raw_result".to_owned(),
-        minijinja::Value::from_function(store.store_raw_result()),
-    );
+    )
 }
 
 /// Where dbt-fusion looks for a node's compiled SQL.
@@ -500,8 +483,7 @@ pub async fn execute_node_inner(
 
     let defer_nodes = load_defer_nodes(activities, input.defer_manifest_ref.as_deref()).await?;
 
-    let (base_context, result_store) =
-        build_base_context(state, defer_nodes.as_ref(), namespace_keys);
+    let base_context = build_base_context(state, defer_nodes.as_ref(), namespace_keys);
 
     // Serialize the node config for the deprecated_config parameter.
     let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
@@ -531,8 +513,11 @@ pub async fn execute_node_inner(
         io_args,
     } = workspace;
 
-    // Build the full run-phase node context.
-    let mut node_context = dbt_jinja_utils::phases::run::build_run_node_context(
+    // Build the full run-phase node context. The returned store is the one the
+    // context's `store_result`/`load_result` closures write to, so every later
+    // result extraction (adapter_response, test failures, unit-test outcomes)
+    // must read from this store and not one built alongside it.
+    let (mut node_context, result_store) = dbt_jinja_utils::phases::run::build_run_node_context(
         node,
         &deprecated_config,
         state.resolver_state.adapter_type,
@@ -543,11 +528,6 @@ pub async fn execute_node_inner(
         sql_header,
         state.packages.clone(),
     );
-
-    // build_run_node_context creates its own ResultStore (via extend_base_context_stateful_fn),
-    // overwriting ours. Re-inject our activity-scoped store so adapter_response extraction
-    // reads the same store that materialization macros write to.
-    inject_result_store(&mut node_context, &result_store);
 
     // Microbatch: replace ref() and source() with time-window-aware versions when
     // event_time_start/end are provided. The materialisation template uses these to

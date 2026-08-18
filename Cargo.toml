@@ -42,27 +42,30 @@ temporalio-macros = "0.6.0"
 # generate (their expansion names `::temporalio_workflow::*`).
 temporalio-workflow = "0.6.0"
 
-# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-08-03)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-08-18)
+dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+# Private-package resolution, required by `dbt_loader::load`. The crate's lib
+# name is `fs_deps`, so imports read `fs_deps::private_package::*`.
+dbt-deps = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
 # FsError/ErrorCode: dbt's own transient/permanent error taxonomy. Some Jinja
 # adapter functions (e.g. run_query) wrap the underlying AdapterError in an
 # FsError, discarding it as a downcastable source but keeping its ErrorCode —
 # the retry classifier reads that field directly for those paths.
-dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
 # layer inserts a default so dbt-fusion's adapter code doesn't panic.
-dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "33ababc059583c5ef5d1f0bc0b555bb6e9a395c3" }
+dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
+minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "ec4e4b46263a3240b1bc87c1b54206dff167ad12" }
 dbt-yaml = "0.9.6"
 
 # Standard
@@ -85,6 +88,7 @@ arrow-select = "56"
 # Unit test result comparison (patched to the sdf-labs fork like all arrow crates).
 arrow-array = "56"
 arrow-cast = "56"
+arrow-schema = "56"
 # CSV fixture parsing for dbt unit tests.
 csv = "1"
 tempfile = "3"
@@ -94,7 +98,7 @@ prost-types = { version = "0.7", package = "prost-wkt-types" }
 object_store = { version = "0.12", optional = true }
 regex = "1.12.3"
 
-dbt-antlr4 = "1"
+dbt-antlr4 = "2"
 
 [features]
 default = []

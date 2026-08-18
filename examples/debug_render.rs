@@ -11,7 +11,6 @@
 )]
 use std::sync::Arc;
 
-use dbt_adapter::load_store::ResultStore;
 use dbt_schemas::schemas::telemetry::NodeType;
 
 #[tokio::main]
@@ -90,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    let mut base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
+    let base_context = dbt_jinja_utils::phases::build_operation_context_btreemap(
         Arc::clone(&state.resolver_state.node_resolver),
         &state.resolver_state.root_project_name,
         &state.resolver_state.nodes,
@@ -99,15 +98,6 @@ async fn main() -> anyhow::Result<()> {
         namespace_keys,
         None,
     );
-
-    // Our ResultStore — registered both in context and as globals.
-    let result_store = ResultStore::default();
-    let store_fn = minijinja::Value::from_function(result_store.store_result());
-    let load_fn = minijinja::Value::from_function(result_store.load_result());
-    base_context.insert("store_result".to_owned(), store_fn.clone());
-    base_context.insert("load_result".to_owned(), load_fn.clone());
-    jinja_env.env.add_global("store_result", store_fn);
-    jinja_env.env.add_global("load_result", load_fn);
 
     // Build node context
     let deprecated_config = dbt_temporal::activities::node_serialization::get_node_config_yml(
@@ -135,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let mut node_context = dbt_jinja_utils::phases::run::build_run_node_context(
+    let (mut node_context, result_store) = dbt_jinja_utils::phases::run::build_run_node_context(
         node,
         &deprecated_config,
         state.resolver_state.adapter_type,
@@ -147,13 +137,15 @@ async fn main() -> anyhow::Result<()> {
         state.packages.clone(),
     );
 
-    // Re-inject our ResultStore after build_run_node_context (it creates its own).
-    let store_fn = minijinja::Value::from_function(result_store.store_result());
-    let load_fn = minijinja::Value::from_function(result_store.load_result());
-    node_context.insert("store_result".to_owned(), store_fn.clone());
-    node_context.insert("load_result".to_owned(), load_fn.clone());
-    jinja_env.env.add_global("store_result", store_fn);
-    jinja_env.env.add_global("load_result", load_fn);
+    // The context already carries these closures; mirroring them as globals is
+    // what lets a bare `{{ store_result(...) }}` resolve in the ad-hoc renders
+    // below, which pass no context of their own.
+    jinja_env
+        .env
+        .add_global("store_result", minijinja::Value::from_function(result_store.store_result()));
+    jinja_env
+        .env
+        .add_global("load_result", minijinja::Value::from_function(result_store.load_result()));
 
     // ---- Diagnostics ----
     eprintln!("\n=== Context checks ===");

@@ -108,7 +108,10 @@ impl DbtActivities {
     }
 
     #[activity(name = "resolve_config")]
-    #[allow(clippy::unused_async)] // Must be async for #[activity] macro.
+    // Must be async for #[activity] macro; nothing here awaits. Both lint names
+    // are listed because they were introduced in different clippy releases, and
+    // `unknown_lints` keeps the older toolchain from rejecting the newer name.
+    #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn resolve_config(
         self: Arc<Self>,
         _ctx: ActivityContext,

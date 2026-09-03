@@ -1,7 +1,8 @@
 # Build
 /target
 
-# Claude Code
+# Agent config: skills under .agents/skills, harness config under .claude
+.agents
 .claude
 
 # Agent instructions

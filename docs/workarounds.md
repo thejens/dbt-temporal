@@ -1,14 +1,16 @@
 # dbt-fusion Workarounds
 
-dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as its rendering and execution engine. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
+dbt-temporal uses the dbt Core v2 Rust crates (formerly dbt-fusion, now developed in [dbt-labs/dbt-core](https://github.com/dbt-labs/dbt-core)) as its rendering and execution engine. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
-## 1. `ResultStore` not injectable into context builders
+## 1. `ResultStore` not injectable into context builders — **resolved upstream**
 
-**Issue:** [dbt-labs/dbt-core#14245](https://github.com/dbt-labs/dbt-core/issues/14245) (open; a draft PR was floated in review but not merged)
+**Issue:** [dbt-labs/dbt-core#14245](https://github.com/dbt-labs/dbt-core/issues/14245)
 
-`build_compile_and_run_base_context()` and `extend_base_context_stateful_fn()` (called inside `build_run_node_context`) each create their own `ResultStore` and inject its closures (`store_result`, `load_result`, `store_raw_result`) into the context. Callers that need to read adapter responses after materialization must use their own `ResultStore`, but the context builders overwrite its closures.
-
-**Workaround:** We create our `ResultStore` upfront, inject its closures into `base_context`, then re-inject after `build_run_node_context` overwrites them in `node_context`. Three stores are allocated per node; two are immediately discarded.
+`build_run_node_context` now returns the `ResultStore` it wires into the context,
+so the run path reads adapter responses from the store it is handed. The
+re-injection workaround (create a store upfront, inject its closures into
+`base_context`, re-inject after the builder overwrote them) is gone, and with it
+the two discarded stores per node.
 
 ## 2. `ref()` resolves schemas at parse time, not execution time
 
@@ -120,11 +122,75 @@ one per worker lifetime. Covered by
 maintain the cache (as dbt-core's Python macros do), or for `insert_schema` to
 carry an invalidation hook. Not yet filed — see the filing policy note below.
 
+## 5. dbt's telemetry data layer assumes it owns the process
+
+dbt code reads span start info and `TelemetryAttributes` straight out of span
+extensions (`read_current_span_start_info`, `record_current_span_status_from_attrs`)
+and panics when either is absent. Only `TelemetryDataLayer` writes them, and the
+types it stores are private to `dbt-tracing`, so no shim can stand in: any
+process that renders dbt Jinja has to run dbt's own data layer.
+
+That layer is written for the CLI, where every span in the process is dbt's. It
+asserts as much — each span must descend from a `create_root_info_span` root, and
+each event must have one above it. A worker's span tree is not dbt's alone: the
+Temporal SDK opens `polling_task`, and this crate logs at startup with no span
+open. Both trip the assertion. It is a `debug_assert`, so release builds survive
+it, which makes the failure a debug-only panic in an activity — a workflow that
+retries forever rather than an error.
+
+**Workaround:** two parts, both in [`tracing_setup`](../src/tracing_setup.rs) and
+[`node_telemetry`](../src/activities/node_telemetry.rs):
+
+- The data layer carries a filter admitting only dbt's own instrumentation
+  (`dbt_*` targets, excluding `dbt_temporal`), so foreign spans never reach it.
+- Every entry point that renders dbt Jinja or reaches the adapter opens an
+  `Invocation` root span: node execution, project hooks, catalog generation, and
+  project loading. Passing the run's invocation id also puts them in one trace,
+  since the layer derives `trace_id` from it.
+
+**Upstream angle:** the assertions want to be scoped to the layer's own filter,
+or the readback APIs want to degrade instead of panicking, so an embedder can
+host dbt alongside other instrumented libraries. Not filed — see the filing
+policy note below.
+
+## 6. The Jinja `graph` mapping is process-global
+
+`graph` (dbt-core's `manifest.flat_graph`) is scoped to one invocation in
+dbt-core: macros may stash scratch state on it — Elementary's
+`set_cache`/`get_cache` are built on `graph.setdefault("elementary", {})` — and
+that state dies with the process. dbt Core v2 reproduces the lifetime with a
+process-global holder (`dbt_jinja_utils::invocation_graph`, a
+`OnceLock<RwLock<Arc<MutableMap>>>`) plus a `reset_invocation_graph()` that
+`dbt_parser::resolver::resolve` calls at the top of every resolve. Every base
+context hands out that one object: `build_compile_base_ctx` puts a
+`LazyFlatGraph` in the `graph` slot, and its first read `update`s the project's
+flat graph into the shared map and returns the map itself.
+
+For the CLI that is exactly right. In a worker it is not scoped to anything a
+run controls:
+
+- **Across projects.** `update` merges by key, so the second project to render
+  overwrites `nodes` / `sources` / `macros` in the map the first project is
+  already holding. A multi-project worker can serve `graph.nodes` from the wrong
+  project.
+- **Across runs.** Scratch state written by one workflow's macros is visible to
+  the next, where dbt-core would have started clean.
+
+**No workaround.** The reset is global, so calling it per run would clear a
+concurrently rendering workflow's graph — worse than the leak. Nothing in the
+API scopes the map to a caller. The durable fix is upstream: hand out a handle
+(one per resolved project, or one per invocation) instead of a process global.
+Not filed — see the filing policy note below.
+
+Only projects whose macros read or write `graph` are affected; the flat-graph
+keys are derived data, so a project that only reads `graph.nodes` sees wrong
+data solely in the multi-project case.
+
 ## Other temporary hacks
 
 | Workaround | Description |
 |---|---|
-| **Telemetry compatibility layer** | dbt-fusion's adapter code expects `TelemetryAttributes` in span extensions (normally inserted by `TelemetryDataLayer`). Without it, `record_current_span_status_from_attrs` panics. We insert a default `TelemetryAttributes` for every span via [`DbtTelemetryCompatLayer`](../src/telemetry_compat.rs). |
+| **dbt's data layer on every tracing stack** | dbt code reads span start info and `TelemetryAttributes` out of span extensions and panics when either is missing; the types are private to `dbt-tracing`, so only its own `TelemetryDataLayer` can put them there. [`tracing_setup`](../src/tracing_setup.rs) wires that layer with no middlewares and no consumers into the non-OTLP stack, where it records the state and exports nothing. Any process that renders dbt Jinja — the worker, every integration test — needs it in its subscriber. |
 | **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
@@ -163,12 +229,12 @@ were never reconciled into it:
   tested a `var()` call through a post-hook and through the original #14148
   query-comment repro — both succeed. `RunNodeCtx` now has a
   `target_package_name` field (`#[serde(rename = "TARGET_PACKAGE_NAME")]`,
-  `crates/dbt-jinja-ctx/src/run.rs:132`) populated from
-  `common_attr.package_name` — the exact fix proposed in the #14148 comment
-  thread, landed without its own tracking issue. Our local workaround (the
-  manual `TARGET_PACKAGE_NAME` insertion in
-  `src/activities/execute_node.rs:652-655`) is now dead weight — remove it on
-  the next bump past `e4c0c1ef`.
+  `crates/dbt-jinja-ctx/src/run.rs`) populated from `common_attr.package_name`
+  — the exact fix proposed in the #14148 comment thread, landed without its own
+  tracking issue. **2026-09-03: our manual `TARGET_PACKAGE_NAME` insertion in
+  `execute_node.rs` was removed** — `build_run_node_context` serializes
+  `RunNodeCtx` into the returned map, so the key arrives with the same value we
+  were writing.
 
 Also found while auditing: three older reports not previously tracked in this
 file — [#14550](https://github.com/dbt-labs/dbt-core/issues/14550) (DISPATCH_CONFIG

@@ -17,19 +17,12 @@ use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 use temporalio_sdk_core::ephemeral_server::TemporalDevServerConfig;
 
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
 use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig};
-use dbt_temporal::telemetry_compat::DbtTelemetryCompatLayer;
 use dbt_temporal::types::{DbtRunInput, DbtRunOutput, NodeStatus, NodeStatusTree};
 
-/// Initialize tracing with the dbt-fusion telemetry compatibility layer.
+/// Initialize tracing with dbt's telemetry data layer (see `waffle_hut::infra`).
 pub fn init_tracing() {
-    let _ = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer().with_test_writer())
-        .with(DbtTelemetryCompatLayer)
-        .try_init();
+    dbt_temporal::tracing_setup::init_for_tests();
 }
 
 // ---------- Shared test infrastructure ----------

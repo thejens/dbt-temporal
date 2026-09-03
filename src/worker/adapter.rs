@@ -22,7 +22,7 @@ pub fn build_adapter_engine(
 
     let base_auth: Arc<dyn dbt_auth::Auth> = auth_override.unwrap_or_else(|| {
         let backend = backend_of(adapter_type);
-        dbt_auth::auth_for_backend(Box::new(dbt_auth::NoopAuthWarningPrinter), backend).into()
+        dbt_auth::auth_for_backend(backend).into()
     });
 
     let mapping = db_config.to_mapping().context("serialising db config")?;
@@ -47,6 +47,7 @@ pub fn build_adapter_engine(
         relation_cache,
         std::collections::BTreeMap::new(), // behavior_flag_overrides
         None,                              // threads
+        None,                              // dbt_cloud_project_id
     );
 
     Ok(Arc::new(engine))

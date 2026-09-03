@@ -7,11 +7,14 @@
 //! activity of one workflow run stitches into a single OTLP trace even when
 //! activities land on different workers, with no Temporal header propagation.
 //!
-//! These spans only produce output on the OTLP tracing stack
-//! (`DBT_EXPORT_TO_OTLP=1`, see `crate::tracing_setup`). On the default stack
-//! they are ordinary `tracing` spans with no subscriber that understands them —
-//! harmless. All failures here degrade to `Span::none()`: telemetry must never
-//! fail an activity that would otherwise run.
+//! They only produce *output* on the OTLP tracing stack
+//! (`DBT_EXPORT_TO_OTLP=1`, see `crate::tracing_setup`), but they are not
+//! optional on either stack: dbt's data layer is installed in both, and it
+//! asserts that every span it sees descends from an `Invocation` root. Any code
+//! path that renders dbt Jinja or reaches the adapter has to open one.
+//!
+//! All failures here degrade to `Span::none()`: telemetry must never fail work
+//! that would otherwise run.
 
 use dbt_common::tracing::span_info::record_span_status_from_attrs;
 use dbt_common::tracing::{create_info_span, create_root_info_span};
@@ -36,11 +39,34 @@ pub struct NodeExecutionSpans {
     pub node: tracing::Span,
 }
 
+/// The `Invocation` root span every piece of dbt work runs under.
+///
+/// dbt's telemetry data layer resolves each span's root and asserts it is one of
+/// these, so any code path that renders dbt Jinja or talks to the adapter needs
+/// one open above it — not only node execution. Passing the workflow's
+/// invocation id stitches all of a run's activities into a single trace, since
+/// the layer derives `trace_id` from it.
+///
+/// Returns [`tracing::Span::none`] for a non-UUID invocation id: the data layer
+/// panics on those, and telemetry must never fail work that would otherwise run.
+pub fn invocation_span(invocation_id: &str, raw_command: &str) -> tracing::Span {
+    if uuid::Uuid::parse_str(invocation_id).is_err() {
+        return tracing::Span::none();
+    }
+    create_root_info_span(Invocation {
+        invocation_id: invocation_id.to_owned(),
+        raw_command: raw_command.to_owned(),
+        eval_args: None,
+        process_info: None,
+        metrics: None,
+        parent_span_id: None,
+    })
+}
+
 /// Build the `Invocation` → `NodeEvaluated` span pair for an activity.
 ///
-/// Returns no-op spans when the invocation id is not a UUID (the upstream data
-/// layer panics on non-UUID invocation ids) or the node cannot be resolved —
-/// the activity body surfaces those as real errors.
+/// Returns no-op spans when the invocation id is not a UUID or the node cannot
+/// be resolved — the activity body surfaces those as real errors.
 pub fn node_execution_spans(
     registry: &ProjectRegistry,
     input: &NodeExecutionInput,
@@ -50,9 +76,6 @@ pub fn node_execution_spans(
         node: tracing::Span::none(),
     };
 
-    if uuid::Uuid::parse_str(&input.invocation_id).is_err() {
-        return noop();
-    }
     let Ok(state) = registry.get(Some(&input.project)) else {
         return noop();
     };
@@ -60,14 +83,10 @@ pub fn node_execution_spans(
         return noop();
     };
 
-    let invocation = create_root_info_span(Invocation {
-        invocation_id: input.invocation_id.clone(),
-        raw_command: format!("dbt {}", input.command),
-        eval_args: None,
-        process_info: None,
-        metrics: None,
-        parent_span_id: None,
-    });
+    let invocation = invocation_span(&input.invocation_id, &format!("dbt {}", input.command));
+    if invocation.is_none() {
+        return noop();
+    }
 
     let event = node.get_node_evaluated_event(
         ExecutionPhase::Run,

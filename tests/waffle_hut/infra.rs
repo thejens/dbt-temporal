@@ -13,22 +13,16 @@ use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 use temporalio_sdk_core::ephemeral_server::TemporalDevServerConfig;
 
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
 use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig};
-use dbt_temporal::telemetry_compat::DbtTelemetryCompatLayer;
 use dbt_temporal::types::{DbtRunInput, DbtRunOutput};
 
-/// Initialize tracing with the dbt-fusion telemetry compatibility layer.
+/// Initialize tracing with dbt's telemetry data layer.
 ///
-/// Without `DbtTelemetryCompatLayer`, dbt-fusion's adapter code crashes (SIGSEGV)
-/// when it tries to access `TelemetryAttributes` from span extensions.
+/// dbt's adapter and loader code reads span start info and `TelemetryAttributes`
+/// straight out of span extensions and panics when they are absent, so the data
+/// layer has to be in the stack even though these tests export no telemetry.
 pub fn init_tracing() {
-    let _ = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer().with_test_writer())
-        .with(DbtTelemetryCompatLayer)
-        .try_init();
+    dbt_temporal::tracing_setup::init_for_tests();
 }
 
 // ---------- Seed data ----------

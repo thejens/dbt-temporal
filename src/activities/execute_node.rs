@@ -587,13 +587,6 @@ pub async fn execute_node_inner(
         );
     }
 
-    // Inject TARGET_PACKAGE_NAME — required by ConfiguredVar (the var() function) to resolve
-    // project-scoped variables. The compile phase sets this but build_run_node_context doesn't.
-    node_context.insert(
-        "TARGET_PACKAGE_NAME".to_owned(),
-        minijinja::Value::from(common.package_name.clone()),
-    );
-
     // Patch `this`, `schema`, `database` when per-workflow env overrides are in play.
     //
     // Two strategies, chosen by whether the project overrides generate_schema_name:
@@ -901,9 +894,12 @@ pub async fn execute_node_inner(
         .get("sql")
         .and_then(|v| v.as_str().map(ToString::to_string));
 
+    // Resolve against the adapter the node actually runs on: `base.adapter` is the
+    // node's `+adapter` selection when it made one, and the run's default adapter
+    // otherwise. The resolver holds no default of its own.
     let fq_name = state
         .materialization_resolver
-        .find_materialization_macro_by_name(&materialization)
+        .find_materialization_macro_by_name(&materialization, base.adapter)
         .map_err(|e| {
             DbtTemporalError::Compilation(format!(
                 "no materialization found for node {unique_id} (materialization={materialization}): {e:#}"

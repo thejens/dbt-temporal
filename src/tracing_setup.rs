@@ -1,31 +1,50 @@
 //! Process-wide tracing initialization.
 //!
+//! Every stack goes through dbt's own `init_tracing`, because dbt's data layer
+//! only works when that function installed it: the layer resolves a span's root
+//! through a process span whose id lives in a private `OnceLock` that nothing
+//! else can set, and it reads span start info and `TelemetryAttributes` back out
+//! of span extensions in types private to `dbt-tracing`. Rendering dbt Jinja
+//! under any other subscriber panics.
+//!
 //! Two mutually exclusive stacks, chosen at startup:
 //!
-//! - **Default**: `tracing_subscriber` fmt + `EnvFilter` + the
-//!   [`crate::telemetry_compat::DbtTelemetryCompatLayer`] shim. The shim keeps
-//!   dbt-fusion adapter code from panicking when it reads `TelemetryAttributes`
-//!   from span extensions.
+//! - **Default**: dbt's [`TelemetryDataLayer`] with no middlewares and no
+//!   consumers — it records the state dbt reads back and exports nothing —
+//!   composed with our own `fmt` layer for console output. The console layer
+//!   carries its own `EnvFilter`, so `RUST_LOG` still selects what is printed.
 //! - **OTLP** (`DBT_EXPORT_TO_OTLP=1`): dbt-fusion's own telemetry pipeline
-//!   (`TelemetryDataLayer` + console output + OTLP trace/log export). The data
-//!   layer stores real `TelemetryAttributes`, so the compat shim is not needed
-//!   on this path, and dbt's structured events (`QueryExecuted`,
+//!   (the same data layer + console output + OTLP trace/log export), assembled
+//!   by `FsTraceConfig::init`. dbt's structured events (`QueryExecuted`,
 //!   `ConnectionLimitWait`, …) export as OTEL spans. The export endpoint comes
 //!   from the standard `OTEL_EXPORTER_OTLP_ENDPOINT` /
 //!   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
 //!   env vars (read by the upstream layer; OTLP over HTTP, collector port 4318).
 //!
 //! Either stack registers a global subscriber, so `init` must be called exactly
-//! once, from `main`, before any project loading. Tests never call it.
+//! once, from `main`, before any project loading. Integration tests call
+//! [`init_for_tests`] instead, which installs the same data layer against a
+//! test writer.
 
 use std::str::FromStr as _;
 
 use anyhow::{Context, Result};
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer as _};
 
 use dbt_common::io_args::{FsCommand, LogFormat};
-use dbt_common::tracing::{FsTraceConfig, TelemetryHandle};
+use dbt_common::tracing::{
+    FsTraceConfig, TelemetryHandle, dbt_data_layer_config, dbt_process_span_attributes,
+    init_tracing_with_data_layer,
+};
+use dbt_tracing::init::BaseSubscriber;
+use dbt_tracing::layer::{ConsumerLayer, MiddlewareLayer};
+use dbt_tracing::layers::data_layer::TelemetryDataLayer;
+
+/// The process span dbt's `init_tracing` opens, parked for the process
+/// lifetime. Dropping it closes the span, and the data layer resolves every
+/// parentless event through it — so it has to outlive every log call.
+static PROCESS_SPAN: std::sync::OnceLock<tracing::Span> = std::sync::OnceLock::new();
 
 /// Initialize the global tracing subscriber.
 ///
@@ -46,25 +65,88 @@ fn env_truthy(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
-/// The fmt-based stack used when OTLP export is off.
+/// The console stack used when OTLP export is off.
 fn init_default() {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
-                // The workflow future logs an error for every unhandled query
-                // (e.g. __stack_trace from the Temporal UI) and drops it.
-                // Suppress the module entirely; its other warnings (WFT
-                // failures, panics) are already surfaced in the Temporal UI.
-                .add_directive(
-                    "temporalio_sdk::workflow_future=off"
-                        .parse()
-                        .unwrap_or_else(|_| unreachable!("static directive always parses")),
-                ),
+    install_data_layer(tracing_subscriber::fmt::layer().with_filter(console_filter()));
+}
+
+/// Initialize tracing for integration tests.
+///
+/// The same stack as [`init`]'s default path, but printing through the test
+/// writer so `cargo test` captures it. Idempotent: every test can call it, and
+/// only the first call installs anything.
+pub fn init_for_tests() {
+    install_data_layer(
+        tracing_subscriber::fmt::layer()
+            .with_test_writer()
+            .with_filter(console_filter()),
+    );
+}
+
+/// What the console prints. Applied to the console layer alone, not to the
+/// subscriber, so narrowing it never starves the data layer of the spans dbt
+/// reads back.
+fn console_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        // The workflow future logs an error for every unhandled query
+        // (e.g. __stack_trace from the Temporal UI) and drops it.
+        // Suppress the module entirely; its other warnings (WFT
+        // failures, panics) are already surfaced in the Temporal UI.
+        .add_directive(
+            "temporalio_sdk::workflow_future=off"
+                .parse()
+                .unwrap_or_else(|_| unreachable!("static directive always parses")),
         )
-        .with(tracing_subscriber::fmt::layer())
-        .with(crate::telemetry_compat::DbtTelemetryCompatLayer)
-        .init();
+}
+
+/// Install dbt's data layer, with `console` composed onto it, as the global
+/// subscriber, and park the process span it opens.
+///
+/// The verbosity passed here caps the whole pipeline; dbt widens anything below
+/// TRACE to DEBUG. `RUST_LOG` selects within that cap through `console`, so it
+/// can quiet the console but cannot raise the pipeline past DEBUG.
+///
+/// A second call is a no-op — dbt reports the already-installed subscriber
+/// rather than panicking, which is what lets every integration test call
+/// [`init_for_tests`] unconditionally.
+fn install_data_layer<L>(console: L)
+where
+    L: tracing_subscriber::Layer<BaseSubscriber> + Send + Sync + 'static,
+{
+    let data_layer = TelemetryDataLayer::new(
+        dbt_data_layer_config(uuid::Uuid::new_v4().as_u128(), None),
+        // Matches how dbt builds it: keep code location in debug builds only.
+        !cfg!(debug_assertions),
+        std::iter::empty::<MiddlewareLayer>(),
+        std::iter::empty::<ConsumerLayer>(),
+    )
+    .with_filter(tracing_subscriber::filter::filter_fn(is_dbt_instrumentation));
+
+    if let Ok(process_span) = init_tracing_with_data_layer(
+        LevelFilter::INFO,
+        dbt_process_span_attributes("dbt-temporal"),
+        data_layer.and_then(console),
+    ) {
+        let _ = PROCESS_SPAN.set(process_span);
+    }
+}
+
+/// Whether a span or event belongs to dbt's own instrumentation, and so belongs
+/// to the data layer.
+///
+/// The layer is written for a process whose entire span tree is dbt's: it
+/// asserts that every span it sees descends from a `create_root_info_span` root.
+/// A worker's tree is not — the Temporal SDK opens `polling_task`, and this
+/// crate logs outside any span at startup — so without this filter the layer
+/// trips on the first foreign span. Narrowing it to dbt's crates leaves exactly
+/// the spans dbt itself reads back, which is the whole reason the layer is here.
+///
+/// `dbt_temporal` is deliberately outside the set: our own events are console
+/// output, not dbt telemetry, and many are emitted with no span open at all.
+fn is_dbt_instrumentation(metadata: &tracing::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    target.starts_with("dbt_") && !target.starts_with("dbt_temporal")
 }
 
 /// dbt-fusion's telemetry pipeline with OTLP export enabled.

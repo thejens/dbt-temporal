@@ -80,14 +80,15 @@ async fn test_activities_independent_of_target() -> Result<()> {
 
             // Step 3: Find the first WorkflowTaskCompleted event -- resetting here
             // replays all activities from the beginning of the workflow.
-            let history = handle
+            // `fetch_history` hands back a lazy stream; collect it before scanning.
+            let events = handle
                 .fetch_history(temporalio_client::WorkflowFetchHistoryOptions::builder().build())
+                .into_events()
                 .await
                 .context("fetching workflow history")?;
 
             use temporalio_common::protos::temporal::api::enums::v1::EventType;
-            let reset_event_id = history
-                .events()
+            let reset_event_id = events
                 .iter()
                 .find(|e| e.event_type() == EventType::WorkflowTaskCompleted)
                 .map(|e| e.event_id)

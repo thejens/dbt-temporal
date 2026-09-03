@@ -10,7 +10,7 @@ dependencies = [
  "adbc_core",
  "arrow",
  "arrow-schema",
- "base64",
+ "base64 0.22.1",
  "dashmap",
  "dbt-adbc",
  "dbt-fusion-workspace-hack",
@@ -294,7 +294,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "atoi",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "comfy-table",
  "half",
@@ -1066,6 +1066,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,7 +1178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee04c4c84f1f811b017f2fbb7dd8815c976e7ca98593de9c1e2afad0f636bff4"
 dependencies = [
  "async-stream",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "bollard-buildkit-proto",
  "bollard-stubs",
@@ -1229,7 +1235,7 @@ version = "1.52.1-rc.29.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f0a8ca8799131c1837d1282c3f81f31e76ceb0ce426e04a7fe1ccee3287c066"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bollard-buildkit-proto",
  "bytes",
  "prost 0.14.4",
@@ -1934,7 +1940,7 @@ dependencies = [
  "ahash",
  "arrow",
  "arrow-ipc",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "half",
  "hashbrown 0.14.5",
@@ -2032,7 +2038,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-json",
  "arrow-schema",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "crossbeam-skiplist",
  "crossbeam-utils",
@@ -2125,7 +2131,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "atomic-wait",
- "base64",
+ "base64 0.22.1",
  "dbt-fusion-workspace-hack",
  "dirs",
  "getrandom 0.2.17",
@@ -2187,7 +2193,7 @@ version = "2.0.0-rc.1"
 source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "adbc_core",
- "base64",
+ "base64 0.22.1",
  "dbt-adbc",
  "dbt-fusion-workspace-hack",
  "dbt-yaml",
@@ -2633,7 +2639,7 @@ name = "dbt-platform-auth"
 version = "2.0.0-rc.1"
 source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "dbt-fusion-workspace-hack",
  "dbt-schemas",
  "dbt-yaml",
@@ -2708,7 +2714,7 @@ dependencies = [
  "arrow",
  "arrow-schema",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bimap",
  "dbt-common",
  "dbt-fusion-workspace-hack",
@@ -3103,7 +3109,7 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29547a1dc60885a552306986316bc9701ba120c1a8db6769fa68691529ad373d"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
  "serde_json",
 ]
@@ -3975,7 +3981,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -5035,7 +5041,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbfbfff40aeccab00ec8a910b57ca8ecf4319b335c542f2edcd19dd25a1e2a00"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "form_urlencoded",
@@ -5342,7 +5348,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
- "base64",
+ "base64 0.22.1",
  "brotli",
  "bytes",
  "chrono",
@@ -5417,7 +5423,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "898bac3fa00d0ba57a4e8289837e965baa2dee8c3749f3b11d45a64b4223d9c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -5427,7 +5433,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8edd1efdd8ab23ba9cb9ace3d9987a72663d5d7c9f74fa00b51d6213645cf6c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -6277,7 +6283,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-channel",
@@ -6323,7 +6329,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -7056,7 +7062,7 @@ version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76a5c54c7310e7b8b9577c286d7e399ddd876c3e12b3ed917a8aabc4b96e9e8c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "hex",
@@ -7530,14 +7536,14 @@ dependencies = [
 
 [[package]]
 name = "temporalio-client"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "749e987bf8895c2c1e04d87c2cda31b81191fbfa555555210c81c774b943d4ea"
+checksum = "06a672ea7c8fb963e3da4224c74b4fb2b0d2085dbe55d9b735a24c70af68c68f"
 dependencies = [
  "anyhow",
  "async-trait",
  "backon",
- "base64",
+ "base64 0.23.1",
  "bon",
  "bytes",
  "derive_more",
@@ -7564,9 +7570,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-common"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5fb31f018bb56a490834e07d3a4cf03cacd076b9a41cbad8d0daa1bfb1abc2d"
+checksum = "49a8ab419d730698e89a027a9c80aaedd8da40f8b4a761ad5bf94abfd62ccbfe"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7607,9 +7613,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-common-wasm"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "554221c08d489f4aee18432b4d5bfbc6e3b78d6738251424ac717e91475d68ea"
+checksum = "08156363d4ae71b05dfacf68d3a6ed06f3fc997dca3b115924ab54235ab8e023"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7634,9 +7640,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-macros"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0204af3cafd33d1aac4bf6d998ba6c6070b1a1dc3e7331f8e3a1127bf0b8386"
+checksum = "43058fe5557a8d122704c136991510703ea3998ff83d5279d0e0924434164413"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7645,12 +7651,12 @@ dependencies = [
 
 [[package]]
 name = "temporalio-protos"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8188305170ff0998c1c99ec8a62ef305b8d580efd32fe8ac7023bafc5a4191c7"
+checksum = "43bea5d1e495f0c0177849e902d785380102a8fa7b0e1aaaa75307cf300243f6"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "derive_more",
  "http 1.4.2",
  "pbjson 0.9.0",
@@ -7668,9 +7674,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-sdk"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85efb98b1d7f198aa98b61a591f90bc64c04d537d749cb926bf084053a6afb0d"
+checksum = "099245859a89a43c9218ab0e3e37fab62a3bcbd2fa962ef409c8c783ed0c8679"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7697,9 +7703,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-sdk-core"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f4f99b384438aad4656344b27e6ee6cb05e8ee568210a23d86836046eda0c9b"
+checksum = "a976a260ae17083aaae5852d2c3b05d1cf86332f8edec1e3e1a167fffc498a52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7747,9 +7753,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-workflow"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b3dfd064fd82be4b0ffefdaa1e7a0e7a0b8d1722d96bd59e9791585702b96e6"
+checksum = "aa469b8e55b2ad6cc589b5596bd4ec4b2ac498800a38c5f1a69027d3fd751004"
 dependencies = [
  "anyhow",
  "bon",
@@ -7761,6 +7767,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_pcg",
  "serde",
+ "siphasher",
  "temporalio-common-wasm",
  "temporalio-macros",
  "thiserror 2.0.19",
@@ -8112,7 +8119,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "http 1.4.2",
  "http-body 1.1.0",
@@ -8134,7 +8141,7 @@ checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "flate2",
  "h2 0.4.15",
@@ -8509,7 +8516,7 @@ version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "cookie_store",
  "flate2",
  "log",
@@ -8530,7 +8537,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "http 1.4.2",
  "httparse",
  "log",
@@ -8638,7 +8645,7 @@ name = "vortex-events"
 version = "2.0.0-rc.1"
 source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "dbt-common",
  "dbt-env",
  "dbt-fusion-workspace-hack",

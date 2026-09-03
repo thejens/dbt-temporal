@@ -148,6 +148,13 @@ retries forever rather than an error.
   project loading. Passing the run's invocation id also puts them in one trace,
   since the layer derives `trace_id` from it.
 
+**Known gap:** the OTLP stack (`DBT_EXPORT_TO_OTLP=1`) is assembled by
+`FsTraceConfig::init`, which admits no filter of ours, so on that path foreign
+spans still reach the layer. The assertions are `debug_assert`s, so a release
+worker is unaffected; a **debug** build with OTLP export on will panic on the
+Temporal SDK's spans. Export needs those spans to reach dbt's consumers, so the
+fix is upstream's to make, not a filter we can widen.
+
 **Upstream angle:** the assertions want to be scoped to the layer's own filter,
 or the readback APIs want to degrade instead of panicking, so an embedder can
 host dbt alongside other instrumented libraries. Not filed — see the filing

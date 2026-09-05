@@ -4,6 +4,34 @@ use anyhow::{Context, Result};
 
 use crate::artifact_store::{ArtifactStore, LocalArtifactStore};
 use crate::config::DbtTemporalConfig;
+use crate::worker::engines::AdapterEngines;
+
+/// Build one engine per adapter the active target declares.
+///
+/// `configs` is the target's adapters in declaration order — one config each,
+/// since only an adapter's default connection is reachable — and
+/// `default_adapter` names the one unannotated nodes run on. Every engine gets
+/// its own relation cache and connection pool, which is what keeps a node routed
+/// to a non-default adapter off the default's warehouse.
+pub fn build_adapter_engines(
+    configs: &[dbt_schemas::schemas::profiles::DbConfig],
+    default_adapter: dbt_adapter::AdapterType,
+    quoting: dbt_schemas::schemas::common::ResolvedQuoting,
+    auth_override: Option<&Arc<dyn dbt_auth::Auth>>,
+) -> Result<AdapterEngines> {
+    let engines = configs
+        .iter()
+        .map(|config| {
+            let engine = build_adapter_engine(config, quoting, auth_override.map(Arc::clone))
+                .with_context(|| {
+                    format!("building the '{}' adapter engine", config.adapter_type())
+                })?;
+            Ok((config.adapter_type(), engine))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    AdapterEngines::new(engines, default_adapter)
+}
 
 /// Build an AdapterEngine from a DbConfig.
 pub fn build_adapter_engine(

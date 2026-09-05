@@ -2,7 +2,7 @@
 //! matrix in `duckdb_scenarios.rs`: empty raw SQL, an unresolvable
 //! materialization name, and the per-workflow env-override rebuild failure
 //! as it propagates through `execute_node_inner` (as opposed to calling
-//! `rebuild_adapter_engine_with_env` directly, covered in
+//! `rebuild_adapter_engines_with_env` directly, covered in
 //! `duckdb_profile_scenarios.rs`).
 
 #![allow(

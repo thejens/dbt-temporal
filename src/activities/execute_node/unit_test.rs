@@ -222,14 +222,9 @@ pub fn build_unit_test_sql(
         )?;
         let fixture_sql = match fixture {
             FixtureData::Sql(sql) => sql,
-            FixtureData::Rows(rows) => render_fixture_rows_sql(
-                state,
-                jinja_env,
-                node_context,
-                input_base,
-                &rows,
-                unique_id,
-            )?,
+            FixtureData::Rows(rows) => {
+                render_fixture_rows_sql(jinja_env, node_context, input_base, &rows, unique_id)?
+            }
         };
         fixture_ctes.push((cte_name, fixture_sql));
     }
@@ -393,15 +388,16 @@ fn parse_csv_rows(data: &str) -> Result<Vec<BTreeMap<String, YmlValue>>, anyhow:
 /// relation must already exist in the warehouse — the same requirement
 /// dbt-core imposes.
 fn render_fixture_rows_sql(
-    state: &WorkerState,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
     input_base: &dbt_schemas::schemas::nodes::NodeBaseAttributes,
     rows: &[BTreeMap<String, YmlValue>],
     unique_id: &str,
 ) -> Result<String, DbtTemporalError> {
+    // The relation is the mocked input's, so it renders in *its* adapter's
+    // dialect — the one the relation actually lives on.
     let relation = dbt_adapter::relation::do_create_relation(
-        state.resolver_state.adapter_type,
+        input_base.adapter,
         input_base.database.clone(),
         input_base.schema.clone(),
         Some(input_base.alias.clone()),

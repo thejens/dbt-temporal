@@ -20,7 +20,7 @@ temporal workflow start \
 
 1. **Model SQL / macros**: Each `execute_node` activity clones the shared Jinja environment and re-registers `env_var()` with a closure that checks the workflow's env map before falling back to process-level env vars. This means `{{ env_var('MY_SCHEMA') }}` in a model will resolve to the workflow's override if present.
 
-2. **Database connections**: At worker startup, profiles.yml is scanned for `env_var()` usage. If detected and a workflow provides `env` overrides, the profile is re-rendered with the workflow's env map and a fresh adapter engine (database connection) is built per workflow. If profiles.yml does not use `env_var()`, this step is skipped and the shared adapter engine is used.
+2. **Database connections**: At worker startup, profiles.yml is scanned for `env_var()` usage. If detected and a workflow provides `env` overrides, the profile is re-rendered with the workflow's env map and fresh adapter engines (database connections) are built per workflow — one per adapter the target declares, since credentials for a non-default adapter go stale under an override the same way. If profiles.yml does not use `env_var()`, this step is skipped and the shared engines are used.
 
 3. **Fallback**: Any env var not present in the workflow's `env` map falls through to the process environment. This means you only need to override the variables that differ between workflows.
 
@@ -59,14 +59,14 @@ temporal workflow start --type dbt_run --input '{
 
 Both workflows run on the same worker, share the parsed project state (DAG, macros, compiled SQL templates), but each gets its own database connection and env_var resolution.
 
-## When the adapter engine is rebuilt
+## When the adapter engines are rebuilt
 
 The per-workflow adapter engine rebuild only happens when **both** conditions are true:
 
 1. `profiles.yml` contains `env_var(` (detected once at worker startup)
 2. The workflow's `env` field is non-empty
 
-If either condition is false, the shared adapter engine from worker startup is used with zero overhead.
+If either condition is false, the shared engines from worker startup are used with zero overhead.
 
 ## Known limitations
 

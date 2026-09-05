@@ -126,6 +126,10 @@ pub async fn run_project_hooks_inner(
     // Shared with execute_node so hooks and nodes render against identical
     // globals; see `render_env` for what the per-workflow overrides cover.
     let phase = input.phase.to_string();
+    // Project hooks run on the target's default adapter. They are declared in
+    // `dbt_project.yml` at project level, not on a node, so there is no
+    // `+adapter` selection to honour — the same reason dbt runs them against the
+    // run's default connection.
     let mut render_env = render_env::prepare_render_env(
         state,
         &render_env::RenderOverrides {
@@ -134,6 +138,7 @@ pub async fn run_project_hooks_inner(
             vars: &input.vars,
             full_refresh: input.full_refresh,
         },
+        state.adapter_engines.default_type(),
         &phase,
     )?;
     let jinja_env = &mut render_env.jinja_env;

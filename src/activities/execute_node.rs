@@ -460,6 +460,10 @@ pub async fn execute_node_inner(
     // Private Jinja env + adapter for this activity, with the workflow's env
     // vars, --vars and --full-refresh applied. `render_env` must stay alive for
     // the whole activity: it owns the rebuilt engine's cancellation source.
+    // `base.adapter` is the node's `+adapter` selection when it made one and the
+    // run's default otherwise, so routing on it needs no fallback of its own —
+    // and an adapter the target does not declare fails here rather than running
+    // against the wrong warehouse.
     let mut render_env = render_env::prepare_render_env(
         state,
         &render_env::RenderOverrides {
@@ -468,7 +472,8 @@ pub async fn execute_node_inner(
             vars: &input.vars,
             full_refresh: input.full_refresh,
         },
-        "node",
+        base.adapter,
+        unique_id,
     )?;
     let jinja_env = &mut render_env.jinja_env;
     let env_schema = render_env.env_schema.clone();
@@ -517,10 +522,14 @@ pub async fn execute_node_inner(
     // context's `store_result`/`load_result` closures write to, so every later
     // result extraction (adapter_response, test failures, unit-test outcomes)
     // must read from this store and not one built alongside it.
+    //
+    // The adapter here shapes `this` and the column data types in the context,
+    // so it must be the node's own — the project-wide default would hand a node
+    // on another adapter a relation rendered in the wrong dialect.
     let (mut node_context, result_store) = dbt_jinja_utils::phases::run::build_run_node_context(
         node,
         &deprecated_config,
-        state.resolver_state.adapter_type,
+        base.adapter,
         agate_table,
         &base_context,
         &io_args,
@@ -618,7 +627,7 @@ pub async fn execute_node_inner(
             env_database.as_deref(),
             unique_id,
         ) {
-            apply_patched_relation(state, base, &patch, &mut node_context);
+            apply_patched_relation(base, &patch, &mut node_context);
         }
         None
     };

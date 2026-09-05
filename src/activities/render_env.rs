@@ -62,10 +62,17 @@ impl std::fmt::Debug for RenderEnv {
 
 /// Build the render environment for one activity invocation.
 ///
+/// `adapter_type` is the adapter the work runs on: a node's
+/// `NodeBaseAttributes::adapter` (already resolved to the target's default when
+/// the node selected none), or the default for work with no node behind it.
+/// Naming it is mandatory so no caller can drift onto the default engine by
+/// omission while its macros dispatch on a different dialect.
+///
 /// `context` names the caller in error messages ("node", "on_run_start", …).
 pub fn prepare_render_env(
     state: &WorkerState,
     overrides: &RenderOverrides<'_>,
+    adapter_type: dbt_adapter::AdapterType,
     context: &str,
 ) -> Result<RenderEnv, DbtTemporalError> {
     let mut jinja_env = (*state.jinja_env).clone();
@@ -82,18 +89,18 @@ pub fn prepare_render_env(
         && state.profile_uses_env_vars
     {
         let result =
-            crate::worker::rebuild_adapter_engine_with_env(state, overrides.target, overrides.env)
+            crate::worker::rebuild_adapter_engines_with_env(state, overrides.target, overrides.env)
                 .map_err(|e| {
                     DbtTemporalError::Configuration(format!(
-                        "rebuilding adapter engine for {context}: {e:#}"
+                        "rebuilding adapter engines for {context}: {e:#}"
                     ))
                 })?;
-        let engine = Arc::clone(&result.engine);
+        let engine = result.engines.get(adapter_type, context)?;
         let (schema, database) = (result.schema.clone(), result.database.clone());
         rebuild_guard = Some(result);
         (engine, Some(schema), Some(database))
     } else {
-        (Arc::clone(&state.adapter_engine), None, None)
+        (state.adapter_engines.get(adapter_type, context)?, None, None)
     };
 
     discard_stale_relation_cache(engine.as_ref());
@@ -157,6 +164,10 @@ pub fn prepare_render_env(
 /// Clearing per activity costs one schema listing per node instead of one per
 /// worker lifetime. That is the price of correctness here, and it restores the
 /// per-invocation freshness the cache was designed around.
+///
+/// The cache belongs to the engine, and an activity binds exactly one engine, so
+/// clearing the selected one is enough: every engine is cleared before each of
+/// its own uses, and none is cleared on another's behalf.
 fn discard_stale_relation_cache(engine: &dyn dbt_adapter::AdapterEngine) {
     engine.relation_cache().clear();
 }

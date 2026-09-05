@@ -117,7 +117,7 @@ impl Harness {
 
     /// Like [`build_files`](Self::build_files), but with full control over
     /// `profiles.yml` — e.g. to exercise `env_var()`-driven profile fields
-    /// (`rebuild_adapter_engine_with_env`). `profile_yml` must contain the
+    /// (`rebuild_adapter_engines_with_env`). `profile_yml` must contain the
     /// literal placeholder `{DB_PATH}` wherever the DuckDB file path goes;
     /// the harness substitutes its own managed temp path.
     pub async fn build_files_with_profile(files: &[(&str, &str)], profile_yml: &str) -> Self {
@@ -178,11 +178,14 @@ impl Harness {
             .await
             .expect("initialize duckdb project");
 
-        // Wrap the real DuckDB engine so tests can inject warehouse faults
-        // (connection drops, throttling, deadlocks) at the adapter boundary.
+        // Wrap every declared engine so tests can inject warehouse faults
+        // (connection drops, throttling, deadlocks) at the adapter boundary —
+        // including on a non-default adapter a node may route to.
         let faults = FaultHandle::default();
-        let inner_engine = Arc::clone(&state.adapter_engine);
-        state.adapter_engine = Arc::new(FaultInjectingEngine::new(inner_engine, faults.clone()));
+        state.adapter_engines = state.adapter_engines.map_engines(|engine| {
+            Arc::new(FaultInjectingEngine::new(Arc::clone(engine), faults.clone()))
+                as Arc<dyn dbt_adapter::AdapterEngine>
+        });
 
         let registry =
             ProjectRegistry::new(BTreeMap::from([(PROJECT.to_string(), Arc::new(state))]));
@@ -214,7 +217,7 @@ impl Harness {
     }
 
     /// The project's real `WorkerState` — for tests that need to call
-    /// worker-internal functions (e.g. `worker::profile::rebuild_adapter_engine_with_env`)
+    /// worker-internal functions (e.g. `worker::profile::rebuild_adapter_engines_with_env`)
     /// directly rather than through `execute_node`/hooks.
     pub fn state(&self) -> &dbt_temporal::worker_state::WorkerState {
         self.activities
@@ -229,8 +232,25 @@ impl Harness {
     /// reported success — a materialization can succeed on SQL that quietly
     /// computed the wrong thing.
     pub fn query_scalar(&self, sql: &str) -> String {
+        Self::query_scalar_on(self.state().adapter_engines.default_engine().as_ref(), sql)
+    }
+
+    /// Like [`query_scalar`](Self::query_scalar) but against a named adapter's
+    /// engine — for asserting that a node routed to a non-default adapter wrote
+    /// to *that* warehouse.
+    pub fn query_scalar_on_adapter(&self, adapter: dbt_adapter::AdapterType, sql: &str) -> String {
+        let engine = self
+            .state()
+            .adapter_engines
+            .get(adapter, "test assertion")
+            .unwrap_or_else(|e| panic!("no engine for {adapter}: {e}"));
+        Self::query_scalar_on(engine.as_ref(), sql)
+    }
+
+    /// Shared by the default-engine and named-adapter entry points; the
+    /// engine is the only thing that differs between them.
+    fn query_scalar_on(engine: &dyn dbt_adapter::AdapterEngine, sql: &str) -> String {
         let cts = CancellationTokenSource::new();
-        let engine = &self.state().adapter_engine;
         let mut conn = engine
             .new_connection(None, None)
             .expect("open duckdb connection");
@@ -254,7 +274,7 @@ impl Harness {
     }
 
     /// Like [`run_uid`](Self::run_uid), with per-workflow `env` overrides — for
-    /// exercising the `rebuild_adapter_engine_with_env` integration inside
+    /// exercising the `rebuild_adapter_engines_with_env` integration inside
     /// `execute_node_inner` (as opposed to calling the rebuild fn directly).
     pub async fn run_uid_with_env(
         &self,

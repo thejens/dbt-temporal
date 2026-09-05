@@ -23,6 +23,9 @@ struct Target {
     /// dbt catalog table type, e.g. `BASE TABLE` or `VIEW`.
     table_type: String,
     is_source: bool,
+    /// The adapter the relation lives on. Metadata has to be read from the
+    /// warehouse that holds it, and relation rendering is adapter-specific.
+    adapter: dbt_adapter::AdapterType,
 }
 
 /// A target enriched with warehouse columns: (name, type) in ordinal order.
@@ -85,6 +88,7 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
             quoting: base.quoting,
             table_type: table_type_label(&materialized),
             is_source: false,
+            adapter: base.adapter,
         });
     }
 
@@ -98,6 +102,7 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
             quoting: base.quoting,
             table_type: "BASE TABLE".to_string(),
             is_source: true,
+            adapter: base.adapter,
         });
     }
 
@@ -109,12 +114,49 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
 /// adapter exactly like dbt's own macros). Targets whose relations are
 /// missing from the warehouse come back empty and are dropped, matching
 /// dbt's catalog behavior.
+///
+/// Targets are grouped by the adapter they live on: a relation's metadata only
+/// exists on the warehouse that holds it, so a node built on a non-default
+/// adapter would otherwise come back column-less and silently vanish from the
+/// catalog. Each group pays for one Jinja environment and one adapter binding,
+/// which is why grouping beats per-target setup.
 fn fetch_columns<'a>(
     state: &WorkerState,
     targets: &'a [Target],
 ) -> Result<Vec<CatalogEntry<'a>>, anyhow::Error> {
+    let mut entries = Vec::new();
+    for adapter_type in adapters_in_use(targets) {
+        let group: Vec<&Target> = targets
+            .iter()
+            .filter(|target| target.adapter == adapter_type)
+            .collect();
+        entries.extend(fetch_columns_on(state, adapter_type, &group)?);
+    }
+    Ok(entries)
+}
+
+/// The distinct adapters the targets live on, in first-appearance order.
+fn adapters_in_use(targets: &[Target]) -> Vec<dbt_adapter::AdapterType> {
+    let mut seen: Vec<dbt_adapter::AdapterType> = Vec::new();
+    for target in targets {
+        if !seen.contains(&target.adapter) {
+            seen.push(target.adapter);
+        }
+    }
+    seen
+}
+
+/// Fetch columns for the targets that live on one adapter.
+fn fetch_columns_on<'a>(
+    state: &WorkerState,
+    adapter_type: dbt_adapter::AdapterType,
+    targets: &[&'a Target],
+) -> Result<Vec<CatalogEntry<'a>>, anyhow::Error> {
     let mut jinja_env = (*state.jinja_env).clone();
-    let adapter_impl = dbt_adapter::AdapterImpl::new(Arc::clone(&state.adapter_engine), None);
+    let engine = state
+        .adapter_engines
+        .get(adapter_type, "catalog generation")?;
+    let adapter_impl = dbt_adapter::AdapterImpl::new(engine, None);
     let adapter = Arc::new(dbt_adapter::Adapter::new(
         Arc::new(adapter_impl),
         None,
@@ -144,7 +186,7 @@ fn fetch_columns<'a>(
     let mut entries = Vec::new();
     for target in targets {
         let relation = dbt_adapter::relation::do_create_relation(
-            state.resolver_state.adapter_type,
+            adapter_type,
             target.database.clone(),
             target.schema.clone(),
             Some(target.identifier.clone()),
@@ -270,6 +312,7 @@ mod tests {
             quoting: dbt_schemas::schemas::common::ResolvedQuoting::trues(),
             table_type: table_type.to_string(),
             is_source,
+            adapter: dbt_adapter::AdapterType::Postgres,
         }
     }
 

@@ -42,7 +42,7 @@ flowchart TD
 - **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
 - **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
 - **store_failures & catalog.json** — test `store_failures` persists failing rows to the audit schema (created on demand); `WRITE_CATALOG=1` adds a partial `catalog.json` (warehouse column metadata) to each run's artifacts
-- **Source freshness** — the `source-freshness` command runs each source's freshness query (`loaded_at_field` or `loaded_at_query`) as a parallel activity, evaluates `warn_after`/`error_after`, fails the run on stale sources, and writes a `sources.json` artifact
+- **Freshness checks** — `source-freshness` measures sources; `freshness` also measures models that declare a freshness SLA. Each node's freshness query (`loaded_at_field` or `loaded_at_query`) runs as its own activity with no ordering between them, `warn_after`/`error_after` are evaluated per node, a node past `error_after` fails the run, and the results are written to `sources.json` (plus `freshness.json` for the unified command)
 - **dbt unit tests** — `unit_tests:` definitions run as activities in `dbt build`, executing the model's SQL against `given` fixtures (dict/CSV/SQL, inline or fixture files) and comparing to `expect` rows order-insensitively; a unit test runs before its model and a failure skips the model and everything downstream
 - **Per-workflow environment overrides** — each workflow can override `env_var()` values, including database connection settings, enabling parallel runs against different warehouses from a single worker
 - **Artifact storage** — write `run_results.json`, `manifest.json`, and a CLI-style run log to local disk, S3, or GCS
@@ -103,9 +103,11 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 }'
 ```
 
-All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, and `source-freshness` are also supported. `project` is auto-resolved when only one project is loaded.
+All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness`, and `freshness` are also supported. `project` is auto-resolved when only one project is loaded. `resource_types` / `exclude_resource_types` narrow any plan to (or away from) named resource types, the `--resource-type` / `--exclude-resource-type` equivalents.
 
 dbt Core v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres, Snowflake, BigQuery and Databricks accept. Adapters without it (DuckDB, for one) need a project-level `<adapter>__scalar_function_sql` override, the same dispatch hook dbt uses everywhere else.
+
+The two freshness commands differ in what they measure. `source-freshness` covers sources only. `freshness` covers sources **plus** models that declare an SLA — a `freshness:` config block with `warn_after` and/or `error_after`. A model's `build_after` is deliberately not an SLA: it is a scheduling rule for state-aware builds, so a `build_after`-only model is never measured. Neither command builds anything; both need a `loaded_at_field` or `loaded_at_query` on every node they measure (dbt's relation-metadata fallback needs an adapter metadata interface the worker does not drive, so nodes that declare a rule without either are skipped and named in a warning). A rule naming `count` without `period`, or the reverse, aborts the plan rather than reading as "no rule".
 
 Exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
 

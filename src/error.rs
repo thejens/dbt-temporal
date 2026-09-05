@@ -29,10 +29,18 @@ pub enum DbtTemporalError {
         failures: i64,
         diff: String,
     },
-    /// A source freshness check exceeded its error_after threshold —
-    /// non-retryable (the source won't get fresher by retrying).
+    /// A freshness check exceeded its error_after threshold — non-retryable
+    /// (the relation won't get fresher by retrying).
+    ///
+    /// Named after dbt's own `ErrorCode::StaleSource`, which dbt reuses for
+    /// stale models; `node_kind` is what tells the two apart in the message.
+    /// A stale node produces no `FreshnessOutcome`, so the measured timestamp
+    /// travels in this message — it is the only place it reaches
+    /// `run_results.json` and the run log.
     StaleSource {
         unique_id: String,
+        node_kind: &'static str,
+        max_loaded_at: String,
         age_secs: f64,
         max_allowed_secs: i64,
     },
@@ -70,12 +78,15 @@ impl fmt::Display for DbtTemporalError {
             } => write!(f, "unit test failed: {unique_id} ({failures} differing row(s))\n{diff}"),
             Self::StaleSource {
                 unique_id,
+                node_kind,
+                max_loaded_at,
                 age_secs,
                 max_allowed_secs,
             } => write!(
                 f,
-                "source freshness error: {unique_id} is stale \
-                 (age {age_secs:.0}s exceeds error_after {max_allowed_secs}s)"
+                "{node_kind} freshness error: {unique_id} is stale \
+                 (max_loaded_at {max_loaded_at}, age {age_secs:.0}s \
+                 exceeds error_after {max_allowed_secs}s)"
             ),
         }
     }

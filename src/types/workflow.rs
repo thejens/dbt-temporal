@@ -7,13 +7,30 @@ fn default_command() -> String {
     "build".to_string()
 }
 
+/// `dbt source freshness` — measures sources only, and always writes
+/// `sources.json`.
+pub const SOURCE_FRESHNESS_COMMAND: &str = "source-freshness";
+
+/// `dbt freshness` — measures sources *and* models carrying a freshness SLA,
+/// and additionally writes `freshness.json`.
+pub const FRESHNESS_COMMAND: &str = "freshness";
+
+/// Whether `command` measures freshness rather than building nodes.
+///
+/// Lives beside [`DbtRunInput`] rather than in the activity that runs the
+/// check: the planner, the node executor, the artifact writer and the workflow
+/// summary all branch on it, and the string is part of the input contract.
+pub fn is_freshness_command(command: &str) -> bool {
+    matches!(command, SOURCE_FRESHNESS_COMMAND | FRESHNESS_COMMAND)
+}
+
 /// Workflow input — what the user provides when starting the workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbtRunInput {
     /// Project name or path. Optional if only one project is loaded.
     pub project: Option<String>,
     /// dbt command: "run", "build", "test", "seed", "snapshot", "compile",
-    /// "list", or "source-freshness" (default: "build")
+    /// "list", "source-freshness", or "freshness" (default: "build")
     #[serde(default = "default_command")]
     pub command: String,
     /// --select filter
@@ -25,6 +42,16 @@ pub struct DbtRunInput {
     /// `empty`. Only meaningful alongside `select`/`exclude`.
     #[serde(default)]
     pub indirect_selection: Option<String>,
+    /// `--resource-type`: restrict the plan to these resource types
+    /// ("model", "source", "seed", "snapshot", "test", "unit_test", ...).
+    /// Empty means no restriction. Composes with the command's own node-type
+    /// filter — it can only narrow, never widen.
+    #[serde(default)]
+    pub resource_types: Vec<String>,
+    /// `--exclude-resource-type`: drop these resource types from the plan.
+    /// Applied after `resource_types`, so an excluded type loses.
+    #[serde(default)]
+    pub exclude_resource_types: Vec<String>,
     /// --vars overrides
     #[serde(default)]
     pub vars: BTreeMap<String, serde_json::Value>,
@@ -303,25 +330,30 @@ pub struct NodeExecutionResult {
     pub timing: Vec<TimingEntry>,
     /// For test nodes: number of failures.
     pub failures: Option<i64>,
-    /// For source nodes under `source-freshness`: the freshness check detail.
+    /// For nodes measured by `source-freshness` / `freshness`: the freshness
+    /// check detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freshness: Option<SourceFreshnessOutcome>,
+    pub freshness: Option<FreshnessOutcome>,
 }
 
-/// Detail of a completed source freshness check, carried on the node result
-/// so `store_artifacts` can assemble `sources.json` without re-resolving the
-/// source's criteria.
+/// Detail of a completed freshness check, carried on the node result so
+/// `store_artifacts` can assemble `sources.json` / `freshness.json` without
+/// re-resolving the node's criteria.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceFreshnessOutcome {
-    /// RFC3339 timestamp of `max(loaded_at_field)` in the source.
+pub struct FreshnessOutcome {
+    /// RFC3339 timestamp of `max(loaded_at_field)` in the relation.
     pub max_loaded_at: String,
     /// RFC3339 timestamp taken by the warehouse at check time.
     pub snapshotted_at: String,
     /// Age of the freshest row in seconds (snapshotted_at - max_loaded_at).
     pub max_loaded_at_time_ago_in_s: f64,
     /// `pass` | `warn` (dbt's FreshnessStatus; `error` aborts the activity
-    /// instead of producing an outcome).
+    /// instead of producing an outcome). `NodeStatus` has no warning state, so
+    /// this field is where a warn survives — see also the node `message`.
     pub status: String,
+    /// `source` or `model` — dbt tags freshness.json rows with the resource
+    /// type, and it is what separates the two artifacts.
+    pub resource_type: String,
     /// The warn_after/error_after criteria the check was evaluated against.
     pub criteria: dbt_schemas::schemas::common::FreshnessDefinition,
 }
@@ -342,6 +374,11 @@ pub struct StoreArtifactsInput {
     #[serde(default)]
     pub project: Option<String>,
     pub node_results: Vec<NodeExecutionResult>,
+    /// The command the run executed, so freshness runs can write the artifacts
+    /// dbt writes for them. `source-freshness` writes `sources.json` alone;
+    /// `freshness` writes `freshness.json` too.
+    #[serde(default)]
+    pub command: Option<String>,
     /// Inline manifest JSON, or None if stored via manifest_ref.
     pub manifest_json: Option<String>,
     pub manifest_ref: Option<String>,
@@ -533,10 +570,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn freshness_commands_are_recognised() {
+        assert!(is_freshness_command(SOURCE_FRESHNESS_COMMAND));
+        assert!(is_freshness_command(FRESHNESS_COMMAND));
+        assert!(!is_freshness_command("build"));
+        assert!(!is_freshness_command("run"));
+        // Near-misses must not slip through: the spellings are exact.
+        assert!(!is_freshness_command("source freshness"));
+        assert!(!is_freshness_command(""));
+    }
+
+    #[test]
     fn dbt_run_input_json_round_trip() -> anyhow::Result<()> {
         let input = DbtRunInput {
             project: Some("waffle".into()),
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "run".into(),
             select: Some("+stg_customers".into()),
@@ -611,6 +661,8 @@ mod tests {
         let input = DbtRunInput {
             project: Some("proj".into()),
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "build".into(),
             select: Some("tag:nightly".into()),

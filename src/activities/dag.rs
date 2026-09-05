@@ -220,6 +220,21 @@ pub fn inject_unit_test_gates(
     }
 }
 
+/// A dependency map in which no node waits for any other.
+///
+/// The freshness commands measure relations that already exist; they neither
+/// build anything nor read a node's upstream, so the project DAG carries no
+/// meaning for them. Reusing [`build_dependency_map`] would be actively wrong:
+/// a model with an SLA that reads a freshness-checked source would wait on it,
+/// and a *stale* source would then skip the model instead of measuring it —
+/// dbt reports a status for every node the command selected.
+pub fn independent_nodes(selected_ids: &[String]) -> BTreeMap<String, BTreeSet<String>> {
+    selected_ids
+        .iter()
+        .map(|id| (id.clone(), BTreeSet::new()))
+        .collect()
+}
+
 /// Compute topological levels from a dependency map using Kahn's algorithm.
 /// Returns levels where each level's nodes have no deps on nodes in the same or later levels.
 pub fn topological_levels(
@@ -382,6 +397,35 @@ mod tests {
         let d = deps(&[("a", &[]), ("b", &[]), ("c", &[])]);
         let levels = topological_levels(&d).unwrap();
         assert_eq!(levels, vec![vec!["a", "b", "c"]]);
+    }
+
+    #[test]
+    fn test_independent_nodes_flattens_a_real_dependency() {
+        // An SLA-carrying model and the upstream it reads share a freshness
+        // plan; both must be measured, so the plan must not order one behind
+        // the other.
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.p.raw_orders", &[]);
+        add_model(&mut nodes, "model.p.stg_orders", &["model.p.raw_orders"]);
+        let selected = vec![
+            "model.p.raw_orders".to_string(),
+            "model.p.stg_orders".to_string(),
+        ];
+
+        let graph_deps = build_dependency_map(&nodes, &selected);
+        assert_eq!(topological_levels(&graph_deps).unwrap().len(), 2);
+
+        let flat = independent_nodes(&selected);
+        assert!(flat.values().all(BTreeSet::is_empty));
+        assert_eq!(
+            topological_levels(&flat).unwrap(),
+            vec![vec!["model.p.raw_orders", "model.p.stg_orders"]]
+        );
+    }
+
+    #[test]
+    fn test_independent_nodes_empty_selection() {
+        assert!(independent_nodes(&[]).is_empty());
     }
 
     #[test]

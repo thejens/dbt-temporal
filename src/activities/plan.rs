@@ -1,17 +1,20 @@
 use std::collections::BTreeMap;
 
 use anyhow::Context as _;
+use dbt_common::io_args::ClapResourceType;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
 
-use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo};
+use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo, is_freshness_command};
 use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
 use super::dag::{
-    build_dependency_map, inject_test_gates, inject_unit_test_gates, topological_levels,
+    build_dependency_map, independent_nodes, inject_test_gates, inject_unit_test_gates,
+    topological_levels,
 };
+use super::execute_node::freshness;
 use super::indirect::{IndirectSelection, expand_indirect_selection};
 use super::selectors::apply_selectors;
 
@@ -35,10 +38,17 @@ pub fn select_command_node_ids(
     state: &WorkerState,
     input: &DbtRunInput,
 ) -> Result<Vec<String>, anyhow::Error> {
+    let command = input.command.as_str();
+    let include_types =
+        parse_resource_types(&input.resource_types).context("invalid --resource-type")?;
+    let exclude_types = parse_resource_types(&input.exclude_resource_types)
+        .context("invalid --exclude-resource-type")?;
+    let freshness_command = is_freshness_command(command);
+    let nodes = &state.resolver_state.nodes;
     let mut skipped_macro_defs: Vec<String> = Vec::new();
-    let selected_ids: Vec<String> = state
-        .resolver_state
-        .nodes
+    let mut unmeasurable_slas: Vec<String> = Vec::new();
+    let mut invalid_rules: Vec<String> = Vec::new();
+    let selected_ids: Vec<String> = nodes
         .iter()
         .filter(|(id, node)| {
             let rt = node.resource_type();
@@ -50,18 +60,27 @@ pub fn select_command_node_ids(
             if is_ephemeral {
                 return false;
             }
-            if !command_includes_node_type(input.command.as_str(), rt) {
+            if !command_includes_node_type(command, rt) {
                 return false;
             }
-            if rt == NodeType::Source {
-                return state
-                    .resolver_state
-                    .nodes
-                    .sources
-                    .get(*id)
-                    .is_some_and(|s| {
-                        super::execute_node::freshness::source_has_freshness_check(s)
-                    });
+            if !resource_type_allowed(rt, &include_types, &exclude_types) {
+                return false;
+            }
+            if freshness_command {
+                // A freshness plan holds only nodes we can actually measure:
+                // criteria with a usable rule plus a loaded_at field/query.
+                let Some(freshness_node) = freshness::as_freshness_node(nodes, id.as_str(), rt)
+                else {
+                    return false;
+                };
+                if let Err(e) = freshness::validate_freshness_rules(freshness_node) {
+                    invalid_rules.push(e.to_string());
+                    return false;
+                }
+                if freshness::declares_unmeasurable_sla(freshness_node) {
+                    unmeasurable_slas.push((*id).clone());
+                }
+                return freshness::node_has_freshness_check(freshness_node);
             }
             if rt == NodeType::Test
                 && node
@@ -87,7 +106,24 @@ pub fn select_command_node_ids(
         );
     }
 
-    warn_unsupported_resource_types(state, input.command.as_str());
+    // A half-filled rule aborts the whole command rather than silently
+    // dropping one node, matching dbt: it validates every selected node's rules
+    // up front, before any warehouse query runs.
+    if !invalid_rules.is_empty() {
+        anyhow::bail!("invalid freshness criteria:\n{}", invalid_rules.join("\n"));
+    }
+
+    if !unmeasurable_slas.is_empty() {
+        warn!(
+            count = unmeasurable_slas.len(),
+            ids = ?unmeasurable_slas,
+            "skipping freshness nodes that declare warn_after/error_after but no \
+             loaded_at_field or loaded_at_query — dbt would fall back to relation \
+             metadata, which dbt-temporal does not query"
+        );
+    }
+
+    warn_unsupported_resource_types(state, command);
     warn_parse_time_vars(state, &input.vars);
 
     if selected_ids.is_empty() {
@@ -337,11 +373,19 @@ pub async fn plan_project_inner(
     // Compute topological levels from the dependency graph.
     // Tests act as gates: non-test downstream nodes must wait for all tests on their
     // upstream model to pass before starting. If a test fails, downstreams are skipped.
-    let mut deps = build_dependency_map(&state.resolver_state.nodes, &selected_ids);
-    // Unit test rewiring must run before data-test gates so unit tests
-    // inherit the tested model's original inputs, not gate edges.
-    inject_unit_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
-    inject_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
+    //
+    // The freshness commands are the exception: they have no task graph at all,
+    // so every measured node goes into one level.
+    let deps = if is_freshness_command(&input.command) {
+        independent_nodes(&selected_ids)
+    } else {
+        let mut deps = build_dependency_map(&state.resolver_state.nodes, &selected_ids);
+        // Unit test rewiring must run before data-test gates so unit tests
+        // inherit the tested model's original inputs, not gate edges.
+        inject_unit_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
+        inject_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
+        deps
+    };
     let levels = topological_levels(&deps)?;
 
     // Priority keys from critical-path depth: nodes with longer downstream
@@ -512,6 +556,32 @@ fn raw_code_is_generic_test_macro_def(raw_code: &str) -> bool {
     matches!(after_tag.chars().next(), Some(c) if c.is_whitespace() || c == '(')
 }
 
+/// Parse `--resource-type` / `--exclude-resource-type` values.
+///
+/// Routed through dbt's own `ClapResourceType` rather than a local table so
+/// the accepted spellings cannot drift from the CLI's, and so an unknown value
+/// is rejected with serde's "expected one of ..." listing rather than a bare
+/// "invalid".
+fn parse_resource_types(raw: &[String]) -> Result<Vec<NodeType>, anyhow::Error> {
+    raw.iter()
+        .map(|value| {
+            let parsed: ClapResourceType =
+                serde_json::from_value(serde_json::Value::String(value.clone()))
+                    .with_context(|| format!("resource type '{value}'"))?;
+            Ok(NodeType::from(&parsed))
+        })
+        .collect()
+}
+
+/// Whether `rt` survives `--resource-type` / `--exclude-resource-type`.
+///
+/// Both lists only ever narrow the command's own node-type filter: an empty
+/// include list means "no restriction", and an exclusion always wins. Applied
+/// to every command, not just freshness — dbt treats them the same way.
+fn resource_type_allowed(rt: NodeType, include: &[NodeType], exclude: &[NodeType]) -> bool {
+    (include.is_empty() || include.contains(&rt)) && !exclude.contains(&rt)
+}
+
 /// Decide whether a node of resource type `rt` belongs in the plan for `command`.
 ///
 /// `compile` renders SQL templates without executing — seeds are CSV (no SQL),
@@ -523,6 +593,10 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
         // `dbt source freshness`: checks sources only. Sources without
         // freshness criteria are filtered out separately in the planner.
         "source-freshness" => matches!(rt, NodeType::Source),
+        // `dbt freshness`: sources plus models carrying a freshness SLA.
+        // Which of those are actually measurable — and which declare a rule
+        // with no way to measure it — is decided in the planner.
+        "freshness" => matches!(rt, NodeType::Source | NodeType::Model),
         "build" => matches!(
             rt,
             NodeType::Model
@@ -741,8 +815,54 @@ mod tests {
 
     #[test]
     fn unknown_command_excludes_everything() {
-        assert!(!command_includes_node_type("freshness", NodeType::Model));
+        assert!(!command_includes_node_type("materialize", NodeType::Model));
         assert!(!command_includes_node_type("", NodeType::Model));
+    }
+
+    #[test]
+    fn freshness_commands_cover_the_node_types_they_measure() {
+        // `dbt source freshness` predates model freshness and stays
+        // sources-only; the unified spelling adds SLA-carrying models.
+        assert!(command_includes_node_type("source-freshness", NodeType::Source));
+        assert!(!command_includes_node_type("source-freshness", NodeType::Model));
+        assert!(command_includes_node_type("freshness", NodeType::Source));
+        assert!(command_includes_node_type("freshness", NodeType::Model));
+        for rt in [
+            NodeType::Seed,
+            NodeType::Snapshot,
+            NodeType::Test,
+            NodeType::UnitTest,
+        ] {
+            assert!(!command_includes_node_type("freshness", rt), "{rt:?} is not measurable");
+        }
+        // Sources never take part in a build.
+        assert!(!command_includes_node_type("build", NodeType::Source));
+    }
+
+    #[test]
+    fn resource_types_only_narrow_the_command_filter() {
+        let models = parse_resource_types(&["model".to_string()]).expect("valid");
+        let sources = parse_resource_types(&["source".to_string()]).expect("valid");
+        assert_eq!(models, vec![NodeType::Model]);
+
+        // Empty include list means "no restriction".
+        assert!(resource_type_allowed(NodeType::Source, &[], &[]));
+        assert!(resource_type_allowed(NodeType::Model, &models, &[]));
+        assert!(!resource_type_allowed(NodeType::Source, &models, &[]));
+        // Exclusion always wins, even over an explicit include.
+        assert!(!resource_type_allowed(NodeType::Source, &sources, &sources));
+        assert!(!resource_type_allowed(NodeType::Source, &[], &sources));
+    }
+
+    #[test]
+    fn resource_types_use_dbts_own_spellings() {
+        assert_eq!(
+            parse_resource_types(&["unit_test".to_string()]).expect("valid"),
+            vec![NodeType::UnitTest]
+        );
+        let err = parse_resource_types(&["sources".to_string()]).expect_err("plural is not a type");
+        // serde names the valid spellings, which is the useful half of the message.
+        assert!(format!("{err:#}").contains("source"), "{err:#}");
     }
 
     #[test]

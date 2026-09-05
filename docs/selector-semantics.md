@@ -95,35 +95,59 @@ for you.
 
 # Supported selector methods
 
-dbt-temporal parses the full dbt selector grammar (via `dbt-common`) but
-evaluates a subset of the methods. Anything outside this list is **rejected**
-at plan time with an error naming the method.
+dbt-temporal parses the full dbt selector grammar (via `dbt-common`) and
+evaluates every method decidable from the parsed manifest, plus the `state:`
+comparison against a previous manifest. The four that need data the worker does
+not have at plan time are **rejected** with an error naming the method.
+
+Values are matched the way dbt matches them: verbatim when the value holds no
+pattern characters, and as a shell glob (`*`, `?`, `[a-z]`, `[!a-z]`, and `**`
+as a whole path component) when it does.
 
 | Method | Supported | Notes |
 |---|---|---|
-| *(bare name)* | yes | `fqn` — exact node name, or dotted FQN prefix, `*` wildcards |
-| `tag:` | yes | exact tag match |
+| *(bare name)* | yes | `fqn` — node name, unique id, or dotted FQN prefix; versioned models answer to `name`, `name.v2` and `name_v2` |
+| `tag:` | yes | |
 | `path:` | yes | whole-component path prefix (a file, or a directory and everything under it) |
-| `package:` | yes | exact package name |
-| `resource_type:` | yes | `model`, `test`, `seed`, `snapshot`, `unit_test`, … |
-| `config.materialized:` | yes | the only `config.` sub-selector |
-| `state:new` | yes | requires `state_manifest_ref` |
-| `state:modified[.*]` | yes | all `modified.<sub>` forms coarsen to the full modified set |
-| `config.<other>:` | **no** | |
-| `state:old`, `state:unmodified` | **no** | no backing set is computed |
-| `file:` | **no** | note a bare `foo.sql` value parses as `file:` |
-| `source:`, `exposure:`, `metric:`, `saved_query:`, `semantic_model:`, `function:` | **no** | those resource types have no execution path either |
-| `test_name:`, `test_type:`, `group:`, `access:`, `version:`, `result:`, `source_status:`, `column:` | **no** | |
+| `file:` | yes | file name or stem; a bare `foo.sql` value parses as this |
+| `package:` | yes | `this` resolves to the root project |
+| `resource_type:` | yes | `model`, `test`, `seed`, `snapshot`, `unit_test`, …, plus `relation` for anything that is not a test or check |
+| `config.<key>:` | yes | any key in the rendered config, `config.meta.owner:` style nesting included; a list-valued key matches on any element |
+| `access:`, `group:` | yes | exact match, as in dbt |
+| `test_name:` | yes | a generic test answers to the macro behind it (`not_null`), not its generated node name |
+| `test_type:` | yes | `unit`, `data`, `singular`, `generic` |
+| `version:` | yes | `latest`, `prerelease`, `old`, `none`, read from the model's declared version |
+| `source:` | yes | `<source>`, `<source>.<table>`, `<package>.<source>.<table>` |
+| `exposure:`, `metric:`, `saved_query:`, `semantic_model:`, `function:`, `unit_test:` | yes | `<name>` or `<package>.<name>` |
+| `state:new`, `state:modified[.<sub>]` | yes | requires `state_manifest_ref`; all `modified.<sub>` forms coarsen to the full modified set |
+| `state:old`, `state:unmodified` | yes | |
+| `result:` | **no** | needs `run_results.json` from a previous run |
+| `source_status:` | **no** | needs `sources.json` from a previous source freshness run |
+| `column:` | **no** | dbt-internal column lineage, not a run selector |
+| `selector:` | **no** | names a `selectors.yml` definition, which is not read |
 
 Graph operators (`+model`, `model+`, `N+model`, `@model`), unions (space),
 intersections (comma) and nested excludes all work with any supported method.
+
+A selector may name a resource type the command cannot execute. The command's
+own node-type filter runs first, so `--select exposure:weekly` under `run`
+narrows to nothing and fails with "no nodes matched" — but `--select
++exposure:weekly` selects the models that exposure is built from, and
+`--select source:raw+` selects everything downstream of a source. Naming a
+non-executable resource as a *graph seed* is the point of supporting these
+methods.
+
+A supported method whose value it cannot read is rejected the same way an
+unsupported method is: `exposure:a.b.c` names no exposure, `test_type:integration`
+names no test type, and `config:materialized` names no config key. Silently
+matching nothing would hide the typo.
 
 ## Why rejection rather than "matches nothing"
 
 An unevaluable method contributes an empty match set. Alone that surfaces as
 "no nodes matched", but in the two positions that matter it is silent:
 
-- inside a union (`--select "tag:nightly source:raw"`) it drops the nodes the
+- inside a union (`--select "tag:nightly result:error"`) it drops the nodes the
   second half asked for, and the run reports success having built less than
   requested;
 - in `--exclude` it excludes nothing, so the run builds *more* than requested.

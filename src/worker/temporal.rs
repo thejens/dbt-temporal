@@ -8,7 +8,8 @@ use temporalio_common::worker::{
     VersioningBehavior, WorkerDeploymentOptions, WorkerDeploymentVersion,
 };
 use temporalio_sdk::WorkerOptions;
-use temporalio_sdk::runtime::{FixedSizeSlotSupplier, PollerBehavior, TunerBuilder, WorkerTuner};
+use temporalio_sdk::runtime::worker_tuner::{FixedSizeSlotSupplier, TunerHolder, WorkerTuner};
+use temporalio_sdk::runtime::{AutoscalingOptions, PollerBehavior};
 use tracing::info;
 
 use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
@@ -184,11 +185,13 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
         // dbt levels are bursty: a wide level schedules many activities at once,
         // then the queue goes quiet. Autoscaling opens more poll calls under
         // backlog so task pickup isn't throttled by poll round-trips.
-        let behavior = PollerBehavior::Autoscaling {
-            minimum: pa.minimum,
-            maximum: pa.maximum,
-            initial: pa.initial,
-        };
+        let behavior = PollerBehavior::Autoscaling(
+            AutoscalingOptions::builder()
+                .minimum(pa.minimum)
+                .maximum(pa.maximum)
+                .initial(pa.initial)
+                .build(),
+        );
         opts.workflow_task_poller_behavior = Some(behavior);
         opts.activity_task_poller_behavior = Some(behavior);
         info!(
@@ -203,7 +206,12 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
 }
 
 /// Build a `WorkerTuner` based on the tuning configuration.
-fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync> {
+///
+/// Nexus slots are sized alongside workflow-task slots: this worker serves no
+/// Nexus operations, so the number is never reached, but the supplier is
+/// required and a value tied to the configured concurrency ages better than a
+/// literal.
+fn build_tuner(config: &DbtTemporalConfig) -> WorkerTuner {
     match &config.worker_tuning {
         WorkerTuningConfig::Fixed {
             max_concurrent_workflow_tasks,
@@ -219,17 +227,19 @@ fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync>
                 max_cached_workflows = config.max_cached_workflows,
                 "worker tuning: fixed slot limits"
             );
-            let mut builder = TunerBuilder::default();
-            builder.workflow_slot_supplier(Arc::new(FixedSizeSlotSupplier::new(
-                *max_concurrent_workflow_tasks,
-            )));
-            builder.activity_slot_supplier(Arc::new(FixedSizeSlotSupplier::new(
-                *max_concurrent_activities,
-            )));
-            builder.local_activity_slot_supplier(Arc::new(FixedSizeSlotSupplier::new(
-                *max_concurrent_local_activities,
-            )));
-            Arc::new(builder.build())
+            TunerHolder::builder()
+                .workflow_task_slot_supplier(FixedSizeSlotSupplier::new(
+                    *max_concurrent_workflow_tasks,
+                ))
+                .activity_task_slot_supplier(FixedSizeSlotSupplier::new(*max_concurrent_activities))
+                .local_activity_task_slot_supplier(FixedSizeSlotSupplier::new(
+                    *max_concurrent_local_activities,
+                ))
+                .nexus_task_slot_supplier(FixedSizeSlotSupplier::new(
+                    *max_concurrent_workflow_tasks,
+                ))
+                .build()
+                .into()
         }
         WorkerTuningConfig::ResourceBased {
             target_mem_usage,
@@ -237,14 +247,25 @@ fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync>
             activity_min_slots,
             activity_max_slots,
         } => {
-            use temporalio_sdk::runtime::{ResourceBasedTuner, ResourceSlotOptions};
+            use temporalio_sdk::runtime::worker_tuner::{
+                ResourceBasedSlotOptions, ResourceBasedTuner, ResourceBasedTunerOptions,
+            };
 
-            let mut tuner = ResourceBasedTuner::new(*target_mem_usage, *target_cpu_usage);
-            tuner.with_activity_slots_options(ResourceSlotOptions::new(
-                *activity_min_slots,
-                *activity_max_slots,
-                Duration::from_millis(50),
-            ));
+            let tuner = ResourceBasedTuner::builder()
+                .tuner_options(
+                    ResourceBasedTunerOptions::builder()
+                        .target_memory_usage(*target_mem_usage)
+                        .target_cpu_usage(*target_cpu_usage)
+                        .build(),
+                )
+                .activity_task_slot_options(
+                    ResourceBasedSlotOptions::builder()
+                        .minimum_slots(*activity_min_slots)
+                        .maximum_slots(*activity_max_slots)
+                        .ramp_throttle(Duration::from_millis(50))
+                        .build(),
+                )
+                .build();
             info!(
                 target_mem = target_mem_usage,
                 target_cpu = target_cpu_usage,
@@ -255,7 +276,7 @@ fn build_tuner(config: &DbtTemporalConfig) -> Arc<dyn WorkerTuner + Send + Sync>
                 max_cached_workflows = config.max_cached_workflows,
                 "worker tuning: resource-based slot management"
             );
-            Arc::new(tuner)
+            tuner.into()
         }
     }
 }
@@ -485,11 +506,13 @@ mod tests {
             initial: 8,
         });
         let opts = build_worker_options(&config);
-        let expected = PollerBehavior::Autoscaling {
-            minimum: 2,
-            maximum: 64,
-            initial: 8,
-        };
+        let expected = PollerBehavior::Autoscaling(
+            AutoscalingOptions::builder()
+                .minimum(2)
+                .maximum(64)
+                .initial(8)
+                .build(),
+        );
         assert_eq!(opts.workflow_task_poller_behavior, Some(expected));
         assert_eq!(opts.activity_task_poller_behavior, Some(expected));
     }

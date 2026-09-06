@@ -7,7 +7,7 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 > **Status**: Not production-ready. dbt-temporal depends on the dbt Fusion engine,
 > now developed in [dbt-core](https://github.com/dbt-labs/dbt-core) as dbt Core v2,
 > pinned to a 2026-09-03 `main` revision (`2.0.0-rc.1`), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.8.0`). Several
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.0.0`). Several
 > [workarounds](docs/workarounds.md) are needed to make the Fusion engine work in
 > a long-lived worker context. Consider this a proof of concept — largely
 > developed by [Claude Code](https://claude.ai/claude-code) with no guarantees of

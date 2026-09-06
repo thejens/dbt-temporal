@@ -87,7 +87,7 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | [`node_helpers.rs`](../src/activities/node_helpers.rs) | Materialization template lookup + rendering helpers |
 | [`node_serialization.rs`](../src/activities/node_serialization.rs) | Serialization helpers for passing nodes across activity boundaries |
 | [`dag.rs`](../src/activities/dag.rs) | DAG construction and topological level computation |
-| [`selectors.rs`](../src/activities/selectors.rs) | Node selector evaluation (`--select` / `--exclude`) |
+| [`selectors/`](../src/activities/selectors/) | Node selector evaluation (`--select` / `--exclude`) |
 | **Artifact Store** (`src/artifact_store/`) | |
 | [`mod.rs`](../src/artifact_store/mod.rs) | `ArtifactStore` trait |
 | [`local.rs`](../src/artifact_store/local.rs) | Local filesystem backend |

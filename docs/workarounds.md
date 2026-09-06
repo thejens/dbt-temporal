@@ -208,7 +208,7 @@ approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
 
 Each entry records the rev it was last confirmed against. The current pin is
-`53d3af25` (2026-09-03, `2.0.0-rc.1`); anything confirmed against an older rev
+`6f725fbe` (2026-09-06, `2.0.0-rc.1`); anything confirmed against an older rev
 needs re-checking before it is filed or acted on.
 
 **2026-07-08 audit:** a duplicate check turned up prior filings against

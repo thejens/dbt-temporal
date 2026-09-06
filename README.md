@@ -6,12 +6,12 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 
 > **Status**: Not production-ready. dbt-temporal depends on the dbt Fusion engine,
 > now developed in [dbt-core](https://github.com/dbt-labs/dbt-core) as dbt Core v2,
-> pinned to a 2026-07-06 `main` revision (`2.0.0-alpha`), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.5.0`), which is
-> pre-1.0. Several [workarounds](docs/workarounds.md) are needed to make the
-> Fusion engine work in a long-lived worker context. Consider this a proof of
-> concept — largely developed by [Claude Code](https://claude.ai/claude-code) with
-> no guarantees of code quality.
+> pinned to a 2026-09-03 `main` revision (`2.0.0-rc.1`), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`0.8.0`). Several
+> [workarounds](docs/workarounds.md) are needed to make the Fusion engine work in
+> a long-lived worker context. Consider this a proof of concept — largely
+> developed by [Claude Code](https://claude.ai/claude-code) with no guarantees of
+> code quality.
 
 > **License**: dbt-temporal itself is [MIT-licensed](LICENSE). Its two main
 > dependencies are permissively licensed as well — dbt Core v2 is **Apache 2.0**
@@ -39,11 +39,14 @@ flowchart TD
 
 - **Parallel DAG execution** — nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors
 - **Multi-project** — load multiple dbt projects into one worker; select which to run per workflow invocation
+- **Multi-adapter targets** — a profile target may declare several adapters; the worker builds one engine per declared adapter and routes each node by its `+adapter` selection, falling back to the target's default. A node naming an undeclared adapter fails permanently rather than running against the wrong warehouse
 - **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
 - **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
 - **store_failures & catalog.json** — test `store_failures` persists failing rows to the audit schema (created on demand); `WRITE_CATALOG=1` adds a partial `catalog.json` (warehouse column metadata) to each run's artifacts
 - **Freshness checks** — `source-freshness` measures sources; `freshness` also measures models that declare a freshness SLA. Each node's freshness query (`loaded_at_field` or `loaded_at_query`) runs as its own activity with no ordering between them, `warn_after`/`error_after` are evaluated per node, a node past `error_after` fails the run, and the results are written to `sources.json` (plus `freshness.json` for the unified command)
+- **Project checks** — SQL under `check-paths` (`checks/` by default) queries the project's own metadata (`dbt.models`, `dbt.checks`, …) and gates the build. Checks are evaluated after planning and before any hook fires, so a project that fails its gate performs no side effects; `warn` severity reports and proceeds, and a check that cannot execute is an error whatever its severity
 - **dbt unit tests** — `unit_tests:` definitions run as activities in `dbt build`, executing the model's SQL against `given` fixtures (dict/CSV/SQL, inline or fixture files) and comparing to `expect` rows order-insensitively; a unit test runs before its model and a failure skips the model and everything downstream
+- **Selector coverage** — 20 of dbt's 24 selector methods are evaluated, with dbt's own glob rules. Methods that need artifacts this worker does not have (`result:`, `source_status:`) are rejected by name rather than silently matching nothing. See [selector semantics](docs/selector-semantics.md)
 - **Per-workflow environment overrides** — each workflow can override `env_var()` values, including database connection settings, enabling parallel runs against different warehouses from a single worker
 - **Artifact storage** — write `run_results.json`, `manifest.json`, and a CLI-style run log to local disk, S3, or GCS
 - **Observability** — live node status in Temporal memos, per-node activity names in the Gantt chart, and custom search attributes for filtering

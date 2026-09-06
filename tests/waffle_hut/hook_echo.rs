@@ -38,10 +38,15 @@ impl HookEchoWorkflow {
     }
 
     #[run(name = "hook_echo")]
+    // `unused_async` and `unused_async_trait_impl` are the same complaint under
+    // two names introduced in different clippy releases; `unknown_lints` keeps
+    // the older toolchain from rejecting the newer name.
     #[allow(
-        clippy::needless_pass_by_ref_mut, // #[run] macro requires &mut self.
-        clippy::future_not_send,          // WorkflowContext uses Rc internally.
-        clippy::unused_async              // #[run] macro requires async fn.
+        unknown_lints,
+        clippy::needless_pass_by_ref_mut,  // #[run] macro requires &mut self.
+        clippy::future_not_send,           // WorkflowContext uses Rc internally.
+        clippy::unused_async,              // #[run] macro requires async fn.
+        clippy::unused_async_trait_impl
     )]
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<serde_json::Value> {
         let input = ctx.state(|s| s.input.clone());

@@ -207,13 +207,17 @@ Found while building error-classification/retry tests. **Filing requires
 approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
 
+Each entry records the rev it was last confirmed against. The current pin is
+`53d3af25` (2026-09-03, `2.0.0-rc.1`); anything confirmed against an older rev
+needs re-checking before it is filed or acted on.
+
 **2026-07-08 audit:** a duplicate check turned up prior filings against
 `dbt-labs/dbt-core` under the `thejens` account that predate this doc and
 were never reconciled into it:
 
 - [#14245](https://github.com/dbt-labs/dbt-core/issues/14245) `[FEAT] ResultStore` — open, matches item 1 above.
 - [#14244](https://github.com/dbt-labs/dbt-core/issues/14244) `RunConfig` missing `call()` — **closed, fixed upstream in preview.134**
-  (`dbt-labs/fs#7600`). Confirmed fixed at our pinned rev `37ba42bd`
+  (`dbt-labs/fs#7600`). Confirmed fixed at rev `37ba42bd`
   (`RunConfig` now implements `fn call`) — the `NoopConfig` swap workaround in
   `src/activities/execute_node.rs` (see `todo/upstream-dbt-fusion-api.md` item 2)
   is dead code and should be removed.
@@ -229,7 +233,7 @@ were never reconciled into it:
   only ever raised as a *comment* on the now-closed
   [#14148](https://github.com/dbt-labs/dbt-core/issues/14148), which fixed a
   narrower case (query-comment macros) but not the general run-phase gap.
-  Confirmed still missing at `37ba42bd`.
+  Confirmed still missing at rev `37ba42bd`; not re-verified since.
 
   **2026-07-08: already fixed upstream, one day after our pin — no filing
   needed.** Built `dbt-sa-cli` from latest main (`e4c0c1ef`, 2026-07-07) and
@@ -259,7 +263,7 @@ change needed). `#14552` closed on a reporter's own repro confirmation
 ("Tried repro. Its already fixed!") — not independently re-verified against
 source, but no reason to doubt a third-party repro.
 
-### Confirmed against the current pinned rev (`37ba42bd`)
+### Confirmed against rev `37ba42bd` — not re-verified since
 
 **DuckDB adapter never populates SQLSTATE, and collapses every error to one
 `AdapterErrorKind`.** `dbt_common::AdapterError::sqlstate()` returns the
@@ -291,8 +295,8 @@ directly as a fallback signal.
 
 ### From an earlier rev (`2928c13`, ~2026-06) — re-verify before filing
 
-Observed two bumps back; confirm each still reproduces against `37ba42bd`
-before filing (upstream cleanup may have already addressed some of these).
+Observed several bumps back; confirm each still reproduces against the current
+pin before filing (upstream cleanup may have already addressed some of these).
 
 - **`State::lookup` on a missing macro name recurses without bound and
   overflows the stack.** A genuine crash bug — highest filing priority in

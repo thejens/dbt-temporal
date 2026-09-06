@@ -53,7 +53,10 @@ coverage-html:
 	@echo "Open target/llvm-cov/html/index.html"
 
 clippy:
-	cargo clippy -- -D warnings
+	# --all-targets so test and example code is linted too: the pre-commit
+	# hook already lints them, and without this a contributor without hooks
+	# installed gets a green `make lint` on code CI would reject.
+	cargo clippy --all-targets --all-features -- -D warnings
 
 fmt:
 	cargo fmt --check

@@ -199,6 +199,13 @@ pub struct ExecutionPlan {
     /// requires Temporal server >= 1.31 to take effect).
     #[serde(default)]
     pub priority_scheduling: bool,
+    /// Whether the project declares any check under `checks/`.
+    ///
+    /// The workflow schedules the check gate only when this is set, so a
+    /// project with no checks issues no command for it — which is also what
+    /// keeps histories recorded before the gate existed replaying cleanly.
+    #[serde(default)]
+    pub has_project_checks: bool,
 }
 
 /// Metadata about a single dbt node.

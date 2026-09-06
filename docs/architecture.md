@@ -38,15 +38,47 @@ flowchart TD
 
 3. **`resolve_config` activity**: Loads `dbt_temporal.yml` from the project directory (if present) and returns the resolved hook and retry configuration for this run.
 
-4. **`run_project_hooks` activity (`on-run-start`)**: If `dbt_project.yml` declares `on-run-start`, render those Jinja templates against the full compile+run context (with `execute=true` and per-workflow env overrides applied). Failure aborts the run before any node executes.
+4. **`run_project_checks` activity**: If the project declares checks under `check-paths` (`checks/` by default), evaluate every one of them against the metadata index built at startup and stop the run if any is fatal. Scheduled only when the project has checks, and placed before the hooks so a project that fails its gate performs no side effects on the way to finding out. See [Project checks](#project-checks).
 
-5. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter. A periodic heartbeat ticker runs alongside the work so the Temporal UI's last-heartbeat stays current and dead workers are detected within `heartbeat_timeout`.
+5. **`run_project_hooks` activity (`on-run-start`)**: If `dbt_project.yml` declares `on-run-start`, render those Jinja templates against the full compile+run context (with `execute=true` and per-workflow env overrides applied). Failure aborts the run before any node executes.
 
-6. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
+6. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter. A periodic heartbeat ticker runs alongside the work so the Temporal UI's last-heartbeat stays current and dead workers are detected within `heartbeat_timeout`.
 
-7. **`run_project_hooks` activity (`on-run-end`)**: Always fires (even after failure), with the standard `results` Jinja list populated from `node_results`. Errors are recorded in `DbtRunOutput.hook_errors` but do not flip the run's success status.
+7. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
+
+8. **`run_project_hooks` activity (`on-run-end`)**: Always fires (even after failure), with the standard `results` Jinja list populated from `node_results`. Errors are recorded in `DbtRunOutput.hook_errors` but do not flip the run's success status.
 
 Parallel execution is natural: all nodes in the same topological level are independent, so Temporal dispatches them as concurrent activities.
+
+## Project checks
+
+A project check is a SQL file under `check-paths` (`checks/` by default) that
+queries the project's own metadata rather than the warehouse: `dbt.models`,
+`dbt.checks`, `dbt.node_columns` and the rest of the `dbt.*` vocabulary. A
+project declaring checks must pin that vocabulary with `info_schema.version` in
+`dbt_project.yml`.
+
+Those relations are parquet, not warehouse tables. The worker builds them once
+per project at startup, inside `initialize_project`: the parse epochs are
+written under `<root>/private/metadata/parse/`, then ingested into the index
+under `<root>/private/index/`. Their only input is the resolved project, which
+this worker parses once and holds for its lifetime — so nothing a workflow does
+can invalidate the index, and the per-run gate is a pure read.
+
+**Verdicts.** A check reports `pass`, `fail`, `warn`, `error` or `skipped`.
+`fail` and `error` stop the run; `warn` reports its rows and lets the build
+proceed. A check that cannot execute is an `error` whatever its declared
+severity — what it would have found is unknown, so anything else would be a
+guess.
+
+**Scoping.** A run's selection scopes each check's *rows*; it never decides
+whether a check runs. Scoping applies only when the run actually named
+`--select` or `--exclude`: an unselected run's default node set is not a
+statement about which violations matter, and a check keyed on groups or macros
+would otherwise have every violation filtered away into a vacuous pass. When a
+scope matches nothing a check can report on, the verdict is `skipped` rather
+than `pass` — a green result must not stand in for a check that examined
+nothing.
 
 ## Project Structure
 

@@ -448,6 +448,10 @@ pub async fn plan_project_inner(
 
     let has_on_run_start = !state.resolver_state.operations.on_run_start.is_empty();
     let has_on_run_end = !state.resolver_state.operations.on_run_end.is_empty();
+    let has_project_checks = state
+        .project_checks
+        .as_ref()
+        .is_some_and(|checks| !checks.checks.is_empty());
 
     Ok(ExecutionPlan {
         project: state.project_name.clone(),
@@ -461,6 +465,7 @@ pub async fn plan_project_inner(
         has_on_run_start,
         has_on_run_end,
         priority_scheduling: activities.priority_scheduling.0,
+        has_project_checks,
     })
 }
 

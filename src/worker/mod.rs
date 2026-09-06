@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod engines;
 pub mod profile;
+pub mod project_checks;
 pub mod temporal;
 
 use std::collections::BTreeMap;
@@ -449,6 +450,17 @@ async fn initialize_project_inner(
         "SQL caches populated"
     );
 
+    // Build the project-check index before the resolve output goes: the epochs
+    // are written from the in-memory resolved state into a directory this
+    // worker owns, so the two are independent, but keeping them adjacent means
+    // one place decides what survives the parse.
+    //
+    // A failure here is fatal rather than degraded. The alternative is a worker
+    // that starts with no index and reports every check as unevaluable on every
+    // run — a gate that never passes is worse than one that never starts.
+    let project_checks = project_checks::build(&io, &dbt_state, &resolver_state)
+        .context("building the project-check index")?;
+
     // Clean up the resolve output — everything is in memory now.
     if let Err(e) = std::fs::remove_dir_all(&out_dir) {
         tracing::warn!(path = %out_dir.display(), error = %e, "failed to clean up resolve output");
@@ -559,6 +571,7 @@ async fn initialize_project_inner(
         has_custom_schema_name_macro,
         cancellation_source: cts,
         auth_override,
+        project_checks,
     })
 }
 

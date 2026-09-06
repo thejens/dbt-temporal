@@ -22,6 +22,7 @@ use dbt_schemas::schemas::common::ResolvedQuoting;
 use dbt_schemas::schemas::profiles::{DbConfig, DuckDbConfig};
 use dbt_temporal::activities::DbtActivities;
 use dbt_temporal::activities::execute_node::execute_node_inner;
+use dbt_temporal::activities::project_checks::run_project_checks_inner;
 use dbt_temporal::activities::project_hooks::run_project_hooks_inner;
 use dbt_temporal::config::{
     DbtTemporalConfig, PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig,
@@ -29,7 +30,7 @@ use dbt_temporal::config::{
 };
 use dbt_temporal::error::DbtTemporalError;
 use dbt_temporal::project_registry::ProjectRegistry;
-use dbt_temporal::types::{NodeExecutionResult, NodeStatus};
+use dbt_temporal::types::{NodeExecutionResult, NodeStatus, ProjectChecksOutput};
 use dbt_temporal::worker::initialize_project;
 use tempfile::TempDir;
 
@@ -364,6 +365,21 @@ impl Harness {
             .unwrap_or_else(|e| panic!("model {model} should succeed: {e:#}"));
         assert_eq!(result.status, NodeStatus::Success, "{result:?}");
         result
+    }
+
+    /// Evaluate the project's checks against the index built at startup.
+    ///
+    /// `scope` is the run's selected node set, or `None` when no selector
+    /// narrowed the run — which is what decides whether zero rows is a pass or
+    /// a vacuous skip.
+    pub fn project_checks(&self, scope: Option<&[&str]>) -> ProjectChecksOutput {
+        let input = serde_json::from_value(serde_json::json!({
+            "project": PROJECT,
+            "invocation_id": uuid::Uuid::new_v4().to_string(),
+            "scope": scope.map(|ids| ids.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()),
+        }))
+        .unwrap();
+        run_project_checks_inner(&self.activities, &input).expect("project checks should evaluate")
     }
 
     /// Run the `on-run-start` (or `on-run-end`, with empty `node_results`)

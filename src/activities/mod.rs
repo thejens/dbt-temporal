@@ -10,6 +10,7 @@ pub mod node_helpers;
 pub mod node_serialization;
 pub mod node_telemetry;
 pub mod plan;
+pub mod project_checks;
 pub mod project_hooks;
 pub mod render_env;
 pub mod retry;
@@ -31,8 +32,9 @@ use crate::config::{
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
     DbtRunInput, ExecutionPlan, LoadSegmentStateInput, NodeExecutionInput, NodeExecutionResult,
-    ProjectHooksInput, ResolveConfigInput, ResolvedProjectConfig, RunSegmentState,
-    SaveSegmentStateInput, StoreArtifactsInput, StoreArtifactsOutput,
+    ProjectChecksInput, ProjectChecksOutput, ProjectHooksInput, ResolveConfigInput,
+    ResolvedProjectConfig, RunSegmentState, SaveSegmentStateInput, StoreArtifactsInput,
+    StoreArtifactsOutput,
 };
 
 /// Shared state for all dbt activities, replacing the old `app_data()` DI pattern.
@@ -143,6 +145,24 @@ impl DbtActivities {
     ) -> Result<RunSegmentState, ActivityError> {
         segment_state::load_segment_state_inner(&self, input)
             .await
+            .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))
+    }
+
+    /// The parse-time quality gate. Permanent on failure: every outcome a
+    /// check can have, including "could not be evaluated", comes back in the
+    /// output, so an error here means the project could not be resolved at all
+    /// — which retrying will not fix.
+    #[activity(name = "run_project_checks")]
+    // Must be async for #[activity] macro; nothing here awaits. Both lint names
+    // are listed because they were introduced in different clippy releases, and
+    // `unknown_lints` keeps the older toolchain from rejecting the newer name.
+    #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub async fn run_project_checks(
+        self: Arc<Self>,
+        _ctx: ActivityContext,
+        input: ProjectChecksInput,
+    ) -> Result<ProjectChecksOutput, ActivityError> {
+        project_checks::run_project_checks_inner(&self, &input)
             .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))
     }
 

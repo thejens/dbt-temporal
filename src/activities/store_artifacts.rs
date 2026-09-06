@@ -4,7 +4,9 @@ use tracing::{info, warn};
 
 use crate::artifact_store::ArtifactStore;
 use crate::error::DbtTemporalError;
-use crate::types::{StoreArtifactsInput, StoreArtifactsOutput};
+use crate::types::{
+    SOURCE_FRESHNESS_COMMAND, StoreArtifactsInput, StoreArtifactsOutput, is_freshness_command,
+};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -124,17 +126,35 @@ pub async fn store_artifacts_inner(
         None
     };
 
-    // Freshness runs additionally produce a sources.json artifact, mirroring
-    // `dbt source freshness`. Only sources that completed the check carry an
-    // outcome; stale sources fail their activity and appear in run_results
-    // with the error message instead.
-    if input.node_results.iter().any(|r| r.freshness.is_some()) {
-        let sources_json = build_sources_json(&input).context("serializing sources.json")?;
-        let path = store
-            .store(&input.invocation_id, "sources.json", sources_json.as_bytes())
-            .await
-            .map_err(|e| store_io_error("storing sources.json", e))?;
-        info!(path = %path, "stored sources.json");
+    // Freshness runs additionally produce dbt's freshness artifacts. Only nodes
+    // that completed the check carry an outcome; a stale node fails its
+    // activity and appears in run_results with the error message instead.
+    if let Some(command) = input.command.as_deref()
+        && is_freshness_command(command)
+    {
+        let sources_only = command == SOURCE_FRESHNESS_COMMAND;
+        // `dbt source freshness` writes sources.json unconditionally, an empty
+        // result set included. The unified spelling only rewrites it when the
+        // run actually measured a source, so a model-only freshness run does
+        // not clobber a good artifact with an empty one.
+        if sources_only || input.node_results.iter().any(is_source_result) {
+            let sources_json =
+                build_freshness_json(&input, true).context("serializing sources.json")?;
+            let path = store
+                .store(&input.invocation_id, "sources.json", sources_json.as_bytes())
+                .await
+                .map_err(|e| store_io_error("storing sources.json", e))?;
+            info!(path = %path, "stored sources.json");
+        }
+        if !sources_only {
+            let freshness_json =
+                build_freshness_json(&input, false).context("serializing freshness.json")?;
+            let path = store
+                .store(&input.invocation_id, "freshness.json", freshness_json.as_bytes())
+                .await
+                .map_err(|e| store_io_error("storing freshness.json", e))?;
+            info!(path = %path, "stored freshness.json");
+        }
     }
 
     Ok(StoreArtifactsOutput {
@@ -190,14 +210,35 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
     serde_json::to_string_pretty(&run_results).map_err(Into::into)
 }
 
-/// Build the `sources.json` content from freshness-bearing node results.
-fn build_sources_json(input: &StoreArtifactsInput) -> Result<String, anyhow::Error> {
+/// Whether a node result belongs to a source.
+///
+/// Keyed on the unique_id prefix, which is how dbt itself separates sources
+/// from models when it only has the id to go on — a resolved node is not in
+/// reach here, only the results the workflow accumulated.
+fn is_source_result(result: &crate::types::NodeExecutionResult) -> bool {
+    result.unique_id.starts_with("source.")
+}
+
+/// Build the `sources.json` / `freshness.json` content from freshness-bearing
+/// node results.
+///
+/// `sources_only` picks between the two: `sources.json` keeps the shape
+/// `dbt source freshness` has always written (sources, no `resource_type`),
+/// while `freshness.json` carries every measured node and tags each row with
+/// its resource type.
+fn build_freshness_json(
+    input: &StoreArtifactsInput,
+    sources_only: bool,
+) -> Result<String, anyhow::Error> {
     let results: Vec<serde_json::Value> = input
         .node_results
         .iter()
         .filter_map(|r| {
             let f = r.freshness.as_ref()?;
-            Some(serde_json::json!({
+            if sources_only && !is_source_result(r) {
+                return None;
+            }
+            let mut row = serde_json::json!({
                 "unique_id": r.unique_id,
                 "max_loaded_at": f.max_loaded_at,
                 "snapshotted_at": f.snapshotted_at,
@@ -207,7 +248,16 @@ fn build_sources_json(input: &StoreArtifactsInput) -> Result<String, anyhow::Err
                 "adapter_response": r.adapter_response,
                 "timing": r.timing,
                 "execution_time": r.execution_time,
-            }))
+            });
+            // `resource_type` is what separates the two artifacts —
+            // `sources.json`'s shape must not change.
+            if !sources_only && let Some(obj) = row.as_object_mut() {
+                obj.insert(
+                    "resource_type".to_owned(),
+                    serde_json::Value::String(f.resource_type.clone()),
+                );
+            }
+            Some(row)
         })
         .collect();
     let total: std::time::Duration = input
@@ -248,28 +298,48 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_sources_json_includes_only_freshness_results() -> anyhow::Result<()> {
-        let mut fresh = sample_result("source.p.s.orders", NodeStatus::Success, 0.4);
-        fresh.freshness = Some(crate::types::SourceFreshnessOutcome {
+    fn with_freshness(unique_id: &str, resource_type: &str, status: &str) -> NodeExecutionResult {
+        let mut result = sample_result(unique_id, NodeStatus::Success, 0.4);
+        result.freshness = Some(crate::types::FreshnessOutcome {
             max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
             snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
             max_loaded_at_time_ago_in_s: 3600.0,
-            status: "pass".into(),
+            status: status.into(),
+            resource_type: resource_type.into(),
             criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
         });
-        let input = StoreArtifactsInput {
+        result
+    }
+
+    fn freshness_input(
+        command: &str,
+        node_results: Vec<NodeExecutionResult>,
+    ) -> StoreArtifactsInput {
+        StoreArtifactsInput {
             invocation_id: "inv-9".into(),
             project: None,
-            node_results: vec![fresh, sample_result("model.p.m", NodeStatus::Success, 1.0)],
+            command: Some(command.into()),
+            node_results,
             manifest_json: None,
             manifest_ref: None,
             run_log: None,
-        };
+        }
+    }
 
-        let parsed: serde_json::Value = serde_json::from_str(&build_sources_json(&input)?)?;
+    #[test]
+    fn sources_json_includes_only_source_freshness_results() -> anyhow::Result<()> {
+        let input = freshness_input(
+            "freshness",
+            vec![
+                with_freshness("source.p.s.orders", "source", "pass"),
+                with_freshness("model.p.stg_orders", "model", "warn"),
+                sample_result("model.p.m", NodeStatus::Success, 1.0),
+            ],
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&build_freshness_json(&input, true)?)?;
         let results = parsed["results"].as_array().expect("results array");
-        assert_eq!(results.len(), 1, "non-freshness results must be excluded");
+        assert_eq!(results.len(), 1, "models and plain results must be excluded");
         assert_eq!(results[0]["unique_id"], "source.p.s.orders");
         assert_eq!(results[0]["status"], "pass");
         assert!(
@@ -281,6 +351,31 @@ mod tests {
                 < f64::EPSILON
         );
         assert!(results[0]["criteria"].is_object());
+        assert!(
+            results[0].get("resource_type").is_none(),
+            "sources.json's shape must not gain resource_type"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn freshness_json_carries_models_and_resource_types() -> anyhow::Result<()> {
+        let input = freshness_input(
+            "freshness",
+            vec![
+                with_freshness("source.p.s.orders", "source", "pass"),
+                with_freshness("model.p.stg_orders", "model", "warn"),
+                sample_result("model.p.m", NodeStatus::Success, 1.0),
+            ],
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_freshness_json(&input, false)?)?;
+        let results = parsed["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2, "both measured nodes belong in freshness.json");
+        assert_eq!(results[0]["resource_type"], "source");
+        assert_eq!(results[1]["resource_type"], "model");
+        assert_eq!(results[1]["status"], "warn");
         Ok(())
     }
 
@@ -289,6 +384,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-123".into(),
             project: None,
+            command: None,
             node_results: vec![
                 sample_result("model.a", NodeStatus::Success, 1.5),
                 sample_result("model.b", NodeStatus::Error, 0.3),
@@ -327,6 +423,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-empty".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: None,
@@ -387,6 +484,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-1".into(),
             project: None,
+            command: None,
             node_results: vec![sample_result("model.a", NodeStatus::Success, 0.1)],
             manifest_json: Some("{\"manifest\":\"yes\"}".to_string()),
             manifest_ref: None,
@@ -416,6 +514,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-2".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: Some("/already/stored/manifest.json".to_string()),
@@ -435,6 +534,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-3".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: None,
             manifest_ref: None,
@@ -456,6 +556,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-log".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,
@@ -482,6 +583,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-skiplog".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,
@@ -511,6 +613,7 @@ mod tests {
         let input = StoreArtifactsInput {
             invocation_id: "inv-noop".into(),
             project: None,
+            command: None,
             node_results: vec![],
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,

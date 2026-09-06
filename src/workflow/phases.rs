@@ -205,14 +205,20 @@ pub async fn load_segment_state(
 }
 
 /// Build the input for `store_artifacts` from the plan + run accumulators.
+///
+/// `command` travels with the results because the artifact set is
+/// command-specific: only a freshness run writes `sources.json` /
+/// `freshness.json`, and which of the two it writes depends on the spelling.
 pub fn build_store_artifacts_input(
     plan: &ExecutionPlan,
+    command: &str,
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
 ) -> StoreArtifactsInput {
     StoreArtifactsInput {
         invocation_id: plan.invocation_id.clone(),
         project: Some(plan.project.clone()),
+        command: Some(command.to_string()),
         node_results: all_results.to_vec(),
         manifest_json: plan.manifest_json.clone(),
         manifest_ref: plan.manifest_ref.clone(),
@@ -439,6 +445,7 @@ pub async fn run_on_run_start(
 pub async fn store_run_artifacts(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
+    command: &str,
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
     timeouts: &TimeoutConfig,
@@ -449,7 +456,7 @@ pub async fn store_run_artifacts(
     let artifacts: StoreArtifactsOutput = ctx
         .execute_activity(
             DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, all_results, log_lines),
+            build_store_artifacts_input(plan, command, all_results, log_lines),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(
                 timeouts.store_artifacts_secs,
             )),
@@ -588,6 +595,8 @@ mod tests {
         DbtRunInput {
             project: Some("shop".to_string()),
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "build".to_string(),
             select: None,
@@ -846,7 +855,7 @@ mod tests {
             ..empty_plan()
         };
         let log_lines = vec!["line one".to_string(), "line two".to_string()];
-        let store_input = build_store_artifacts_input(&plan, &[], &log_lines);
+        let store_input = build_store_artifacts_input(&plan, "build", &[], &log_lines);
         assert_eq!(store_input.invocation_id, "inv-store");
         assert_eq!(store_input.manifest_json.as_deref(), Some("{\"k\":1}"));
         assert!(store_input.manifest_ref.is_none());
@@ -861,7 +870,7 @@ mod tests {
             manifest_ref: Some("/path/to/manifest.json".to_string()),
             ..empty_plan()
         };
-        let store_input = build_store_artifacts_input(&plan, &[], &[]);
+        let store_input = build_store_artifacts_input(&plan, "build", &[], &[]);
         assert!(store_input.manifest_json.is_none());
         assert_eq!(store_input.manifest_ref.as_deref(), Some("/path/to/manifest.json"));
         // Empty log_lines join to empty string — still wrapped in Some.

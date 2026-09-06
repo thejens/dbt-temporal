@@ -219,6 +219,31 @@ pub fn build_summary_lines(
     ]
 }
 
+/// The extra summary line a freshness run closes with.
+///
+/// dbt grades a freshness check `pass` / `warn` / `error`, but `NodeStatus`
+/// carries only the two outcomes an activity can have. A warn therefore rides
+/// on the node's `FreshnessOutcome`, and without this line the run log would
+/// report a warned node as a plain pass — the one number an SLA run exists to
+/// show.
+pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
+    let with_status = |status: &str| {
+        results
+            .iter()
+            .filter(|r| r.freshness.as_ref().is_some_and(|f| f.status == status))
+            .count()
+    };
+    let pass = with_status("pass");
+    let warn = with_status("warn");
+    // A node past error_after fails its activity and produces no outcome, so
+    // the error count comes from the node status rather than from the outcomes.
+    let error = results
+        .iter()
+        .filter(|r| r.status == NodeStatus::Error)
+        .count();
+    format!("Freshness. PASS={pass} WARN={warn} ERROR={error} TOTAL={}", results.len())
+}
+
 /// Seconds between two deterministic workflow timestamps, or 0.0 if either
 /// is missing (workflow_time() is None outside of an executing workflow).
 ///
@@ -647,6 +672,8 @@ mod tests {
         let input = DbtRunInput {
             project: None,
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "build".into(),
             select: None,
@@ -675,6 +702,8 @@ mod tests {
         let input = DbtRunInput {
             project: Some("waffle".into()),
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "compile".into(),
             select: Some("+stg_customers".into()),
@@ -710,6 +739,8 @@ mod tests {
         let input = DbtRunInput {
             project: None,
             indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
             resume_from: None,
             command: "run".into(),
             select: None,
@@ -932,6 +963,34 @@ mod tests {
     fn build_summary_lines_singular_for_one_node() {
         let lines = build_summary_lines(1, 0.5, 1, 0, 0);
         assert_eq!(lines[0], "Finished running 1 node in 0.50s.");
+    }
+
+    #[test]
+    fn freshness_summary_separates_warn_from_pass() {
+        let measured = |unique_id: &str, status: &str| {
+            let mut result = skipped_result(unique_id, "");
+            result.status = NodeStatus::Success;
+            result.freshness = Some(crate::types::FreshnessOutcome {
+                max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
+                snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
+                max_loaded_at_time_ago_in_s: 3600.0,
+                status: status.into(),
+                resource_type: "source".into(),
+                criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
+            });
+            result
+        };
+        let results = vec![
+            measured("source.p.s.a", "pass"),
+            measured("source.p.s.b", "warn"),
+            // A stale node fails its activity and carries no outcome.
+            error_result("model.p.c", "stale"),
+        ];
+        assert_eq!(
+            build_freshness_summary_line(&results),
+            "Freshness. PASS=1 WARN=1 ERROR=1 TOTAL=3"
+        );
+        assert_eq!(build_freshness_summary_line(&[]), "Freshness. PASS=0 WARN=0 ERROR=0 TOTAL=0");
     }
 
     // --- short_activity_error ---

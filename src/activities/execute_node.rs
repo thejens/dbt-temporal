@@ -23,7 +23,9 @@ use yml_to_value::yml_value_to_minijinja_with_jinja;
 
 use crate::error::DbtTemporalError;
 
-use crate::types::{NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
+use crate::types::{
+    FRESHNESS_COMMAND, NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry,
+};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -452,6 +454,13 @@ pub async fn execute_node_inner(
     let rt = node.resource_type();
     info!(node = %unique_id, resource_type = rt.as_str_name(), "executing node");
 
+    // Measured, not built. Sources only ever appear in freshness plans; the
+    // unified `freshness` command additionally measures models carrying an
+    // SLA. Neither compiles model SQL nor materializes anything, so both skip
+    // straight from context building to the freshness query.
+    let measures_freshness =
+        rt == NodeType::Source || (rt == NodeType::Model && input.command == FRESHNESS_COMMAND);
+
     let start_instant = std::time::Instant::now();
 
     // --- COMPILE PHASE ---
@@ -638,7 +647,7 @@ pub async fn execute_node_inner(
     // (e.g. in `get_create_view_as_sql(target_relation, sql)`). Unit tests
     // have no raw SQL of their own (their path is the defining YAML); their
     // input SQL is assembled below from the tested model + fixtures.
-    let raw_sql_result = if matches!(rt, NodeType::UnitTest | NodeType::Source) {
+    let raw_sql_result = if rt == NodeType::UnitTest || measures_freshness {
         Ok(String::new())
     } else {
         resolve_raw_sql(state, common, rt, &node_path)
@@ -699,9 +708,9 @@ pub async fn execute_node_inner(
     }
 
     match raw_sql_result {
-        Ok(_) if matches!(rt, NodeType::UnitTest | NodeType::Source) => {
-            // Unit test SQL is assembled above; sources have no runnable SQL
-            // of their own (freshness queries come from macros).
+        Ok(_) if rt == NodeType::UnitTest || measures_freshness => {
+            // Unit test SQL is assembled above; freshness nodes have no
+            // runnable SQL of their own (their queries come from macros).
         }
         Ok(raw_sql) if !raw_sql.trim().is_empty() => {
             // Use the model's original file path as the rendering filename so any
@@ -823,28 +832,33 @@ pub async fn execute_node_inner(
     // --- EXECUTE PHASE ---
     let execute_start = chrono::Utc::now();
 
-    // Sources only appear in `source-freshness` plans: run the freshness
-    // check instead of a materialization and return early. A stale source
-    // (error_after exceeded) fails the activity as non-retryable.
-    if rt == NodeType::Source {
-        let source = state
-            .resolver_state
-            .nodes
-            .sources
-            .get(unique_id)
-            .ok_or_else(|| {
-                DbtTemporalError::ProjectNotFound(format!("source not found: {unique_id}"))
-            })?;
-        let verdict = freshness::run_freshness_check(source, jinja_env, &node_context)?;
+    // Run the freshness check instead of a materialization and return early.
+    // A stale node (error_after exceeded) fails the activity as non-retryable;
+    // a warning succeeds, because `NodeStatus` has no warning state — the
+    // "warn" survives on the outcome and in the node message, which is what
+    // the run log and run_results.json show.
+    if measures_freshness {
+        let freshness_node = freshness::as_freshness_node(
+            &state.resolver_state.nodes,
+            unique_id,
+            rt,
+        )
+        .ok_or_else(|| {
+            DbtTemporalError::ProjectNotFound(format!("freshness node not found: {unique_id}"))
+        })?;
+        let verdict = freshness::run_freshness_check(freshness_node, jinja_env, &node_context)?;
         let execute_end = chrono::Utc::now();
         let execution_time = start_instant.elapsed().as_secs_f64();
         let outcome = match verdict {
             freshness::FreshnessVerdict::Stale {
+                max_loaded_at,
                 age_secs,
                 max_allowed_secs,
             } => {
                 return Err(DbtTemporalError::StaleSource {
                     unique_id: unique_id.clone(),
+                    node_kind: rt.as_static_ref(),
+                    max_loaded_at,
                     age_secs,
                     max_allowed_secs,
                 }
@@ -854,7 +868,7 @@ pub async fn execute_node_inner(
                 warn!(
                     node = %unique_id,
                     age_secs = outcome.max_loaded_at_time_ago_in_s,
-                    "source freshness warning (warn_after exceeded)"
+                    "freshness warning (warn_after exceeded)"
                 );
                 outcome
             }
@@ -866,7 +880,7 @@ pub async fn execute_node_inner(
             outcome.max_loaded_at_time_ago_in_s,
             outcome.max_loaded_at
         );
-        info!(node = %unique_id, message = %message, "source freshness check complete");
+        info!(node = %unique_id, message = %message, "freshness check complete");
         return Ok(NodeExecutionResult {
             unique_id: unique_id.clone(),
             status: NodeStatus::Success,

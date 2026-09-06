@@ -27,11 +27,12 @@ use temporalio_sdk::{
 
 use crate::types::{
     DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState, RunSegmentState,
-    RunStatusSnapshot, TimeoutConfig,
+    RunStatusSnapshot, TimeoutConfig, is_freshness_command,
 };
 
 use self::helpers::{
-    build_effective_env, build_summary_lines, elapsed_secs, format_final_details, upsert_memo_state,
+    build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
+    format_final_details, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
@@ -213,12 +214,18 @@ impl DbtRunWorkflow {
             return Err(WorkflowTermination::cancelled());
         }
 
-        append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()));
+        append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()), &input.command);
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
-        let (artifacts, log_path) =
-            store_run_artifacts(ctx, &plan, &levels.all_results, &levels.log_lines, &timeouts)
-                .await?;
+        let (artifacts, log_path) = store_run_artifacts(
+            ctx,
+            &plan,
+            &input.command,
+            &levels.all_results,
+            &levels.log_lines,
+            &timeouts,
+        )
+        .await?;
 
         run_on_run_end(
             ctx,
@@ -409,7 +416,10 @@ fn build_segment_state(
 }
 
 /// Append the CLI-style run summary (pass/error/skip tallies) to the run log.
-fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) {
+///
+/// A freshness run gets one line more: its three-way grading does not fit the
+/// pass/error/skip tally.
+fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64, command: &str) {
     let count_status = |s: NodeStatus| levels.all_results.iter().filter(|r| r.status == s).count();
     let pass = count_status(NodeStatus::Success);
     let error = count_status(NodeStatus::Error);
@@ -417,6 +427,11 @@ fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64) 
     levels
         .log_lines
         .extend(build_summary_lines(levels.total_nodes, elapsed, pass, error, skip));
+    if is_freshness_command(command) {
+        levels
+            .log_lines
+            .push(build_freshness_summary_line(&levels.all_results));
+    }
 }
 
 #[cfg(test)]

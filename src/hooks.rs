@@ -525,6 +525,8 @@ mod tests {
             input: crate::types::DbtRunInput {
                 project: None,
                 indirect_selection: None,
+                resource_types: Vec::new(),
+                exclude_resource_types: Vec::new(),
                 resume_from: None,
                 command: "build".to_string(),
                 select: None,

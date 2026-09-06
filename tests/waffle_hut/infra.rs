@@ -602,6 +602,8 @@ pub fn make_input(
     DbtRunInput {
         project: None,
         indirect_selection: None,
+        resource_types: Vec::new(),
+        exclude_resource_types: Vec::new(),
         resume_from: None,
         command: command.to_string(),
         select: select.map(String::from),
@@ -628,6 +630,8 @@ pub fn make_input_with_env(
     DbtRunInput {
         project: project.map(String::from),
         indirect_selection: None,
+        resource_types: Vec::new(),
+        exclude_resource_types: Vec::new(),
         resume_from: None,
         command: command.to_string(),
         select: None,

@@ -10,6 +10,7 @@ use dbt_schemas::state::ResolverState;
 
 use crate::types::{HooksConfig, RetryConfig, TimeoutConfig};
 use crate::worker::engines::AdapterEngines;
+use crate::worker::project_checks::ProjectChecks;
 
 /// Holds the parsed dbt project state, shared across all activities on a worker.
 ///
@@ -73,6 +74,13 @@ pub struct WorkerState {
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,
+    /// The project's enabled checks and the metadata index they query, or
+    /// `None` when the project declares no enabled checks.
+    ///
+    /// Built at startup because its only input is the resolved project: the
+    /// index cannot go stale while the worker lives, so every run's gate is a
+    /// pure read of it.
+    pub project_checks: Option<ProjectChecks>,
 }
 
 impl std::fmt::Debug for WorkerState {

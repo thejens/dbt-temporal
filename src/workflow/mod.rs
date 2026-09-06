@@ -37,8 +37,8 @@ use self::helpers::{
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
     HookPolicy, build_list_output, load_segment_state, plan_and_announce, resolve_project_config,
-    run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks, save_segment_state,
-    store_run_artifacts, upsert_terminal_status, write_command_memo,
+    run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks, run_project_checks,
+    save_segment_state, store_run_artifacts, upsert_terminal_status, write_command_memo,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -135,6 +135,13 @@ impl DbtRunWorkflow {
         let hooks = project_config.hooks;
         let retry_config = project_config.retry;
         let timeouts = project_config.timeouts;
+
+        // The gate runs before any hook fires: a project that fails its checks
+        // must not have executed side effects on the way to finding out. A
+        // resumed run skips it, having already passed in its first segment.
+        if resumed.is_none() {
+            run_project_checks(ctx, &input, &plan, &timeouts).await?;
+        }
 
         // Effective env: workflow input env (with `_` set to the serialised
         // input), extended by pre_run hook extra_env. Used in NodeExecutionInput
@@ -454,6 +461,7 @@ mod continuation_tests {
             has_on_run_start: false,
             has_on_run_end: false,
             priority_scheduling: false,
+            has_project_checks: false,
         }
     }
 

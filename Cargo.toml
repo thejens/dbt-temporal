@@ -69,6 +69,16 @@ dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e
 dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
+# Project checks query the project's own metadata, never the warehouse, so the
+# worker has to reproduce the two artifacts dbt puts between a resolved project
+# and its check gate. `dbt-metadata` serialises the resolved state into parse
+# epochs; `dbt-index-core` ingests those into the index parquet and owns the
+# parse-safe `dbt.*` view definitions. Both are leaf data crates, and the views
+# are a shared contract: `info_schema()` — already in the tree via
+# dbt-jinja-utils — renders check SQL against exactly those names, so a
+# hand-rolled equivalent would diverge silently rather than fail to compile.
+dbt-metadata = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
+dbt-index-core = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-yaml = "0.9.6"
 

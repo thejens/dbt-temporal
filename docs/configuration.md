@@ -149,7 +149,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_ENDPOINT=http://minio:9000 A
 When `WRITE_RUN_LOG` is enabled (the default), each workflow run writes a `log.txt` to the artifact store containing high-level, dbt-CLI-style output:
 
 ```
-Running with dbt-temporal=0.4.0
+Running with dbt-temporal=0.4.1
 Found 5 models, 3 tests, 2 seeds
 Concurrency: 3 parallel levels
 

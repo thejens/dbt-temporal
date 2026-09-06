@@ -59,7 +59,7 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | [`src/project_registry.rs`](../src/project_registry.rs) | Multi-project registry + lookup |
 | [`src/hooks.rs`](../src/hooks.rs) | Lifecycle hooks (child workflows) |
 | [`src/health.rs`](../src/health.rs) | Health file tracker + HTTP health server |
-| [`src/telemetry_compat.rs`](../src/telemetry_compat.rs) | Tracing layer that injects `TelemetryAttributes` into every span (dbt-fusion compatibility) |
+| [`src/tracing_setup.rs`](../src/tracing_setup.rs) | Process-wide tracing init; both stacks carry dbt's `TelemetryDataLayer` |
 | **Config** (`src/config/`) | |
 | [`mod.rs`](../src/config/mod.rs) | `DbtTemporalConfig`, `WorkerTuningConfig` (from env vars) |
 | [`discovery.rs`](../src/config/discovery.rs) | Project directory discovery + remote source detection |

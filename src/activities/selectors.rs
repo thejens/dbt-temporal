@@ -195,6 +195,13 @@ fn collect_unsupported(expr: &SelectExpression, errors: &mut Vec<String>) {
 /// Kept adjacent to `matches_base_criteria` — the two must agree, or a method
 /// passes validation and then silently matches nothing.
 fn criterion_support_error(criteria: &SelectionCriteria) -> Option<String> {
+    // A selector value that is not a scalar (a mapping or sequence written under
+    // a `selectors.yml` definition) carries no string to match against, and every
+    // arm below compares strings. Reject it here rather than let it through to
+    // match nothing.
+    let Some(value) = criteria.value.as_str() else {
+        return Some(format!("{} (non-scalar value)", criteria.method));
+    };
     match criteria.method {
         MethodName::Tag
         | MethodName::Fqn
@@ -205,11 +212,10 @@ fn criterion_support_error(criteria: &SelectionCriteria) -> Option<String> {
         // manifest. `state:old` / `state:unmodified` parse fine but have no
         // backing set, so they would match nothing.
         MethodName::State => {
-            let v = criteria.value.as_str();
-            if v == "new" || v == "modified" || v.starts_with("modified.") {
+            if value == "new" || value == "modified" || value.starts_with("modified.") {
                 None
             } else {
-                Some(format!("state:{v}"))
+                Some(format!("state:{value}"))
             }
         }
         MethodName::Config => match criteria.method_args.first().map(String::as_str) {
@@ -461,10 +467,15 @@ fn matches_base_criteria(
     state: Option<&StateSelector>,
     criteria: &SelectionCriteria,
 ) -> bool {
+    // Non-scalar values are rejected by `criterion_support_error` before selection
+    // runs; nothing here can match one.
+    let Some(value) = criteria.value.as_str() else {
+        return false;
+    };
     match criteria.method {
         MethodName::State => {
             let Some(state) = state else { return false };
-            match criteria.value.as_str() {
+            match value {
                 "new" => state.new.contains(unique_id),
                 // `modified.<subselector>` (body/configs/…) all coarsen to the
                 // full modified set — over-selecting is safe for CI builds.
@@ -474,24 +485,24 @@ fn matches_base_criteria(
                 _ => false,
             }
         }
-        MethodName::Tag => node.common().tags.contains(&criteria.value),
-        MethodName::Fqn => fqn_matches(&node.common().fqn, &node.common().name, &criteria.value),
-        MethodName::Path => path_matches(&node.common().original_file_path, &criteria.value),
+        MethodName::Tag => node.common().tags.iter().any(|tag| tag == value),
+        MethodName::Fqn => fqn_matches(&node.common().fqn, &node.common().name, value),
+        MethodName::Path => path_matches(&node.common().original_file_path, value),
         MethodName::ResourceType => {
             // `as_str_name()` returns the proto enum constant ("NODE_TYPE_TEST");
             // dbt-style selectors pass the bare name ("test"). Normalize both ends.
             let raw = node.resource_type().as_str_name();
             let bare = raw.strip_prefix("NODE_TYPE_").unwrap_or(raw);
-            bare.eq_ignore_ascii_case(&criteria.value)
+            bare.eq_ignore_ascii_case(value)
         }
-        MethodName::Package => node.common().package_name == criteria.value,
+        MethodName::Package => node.common().package_name == value,
         MethodName::Config
             if criteria.method_args.first().map(String::as_str) == Some("materialized") =>
         {
             node.base()
                 .materialized
                 .to_string()
-                .eq_ignore_ascii_case(&criteria.value)
+                .eq_ignore_ascii_case(value)
         }
         _ => false,
     }

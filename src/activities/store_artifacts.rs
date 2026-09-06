@@ -155,8 +155,14 @@ async fn generate_and_store_catalog(
         .registry
         .get(input.project.as_deref())
         .context("resolving project for catalog generation")?;
+    // Catalog generation queries the warehouse through the adapter, which emits
+    // dbt telemetry spans; those need an `Invocation` root above them. Scoped to
+    // the synchronous build so no span guard is held across the store `await`.
     let catalog_json =
-        super::catalog::build_catalog_json(state, &input.node_results, &input.invocation_id)?;
+        super::node_telemetry::invocation_span(&input.invocation_id, "dbt docs generate")
+            .in_scope(|| {
+                super::catalog::build_catalog_json(state, &input.node_results, &input.invocation_id)
+            })?;
     store
         .store(&input.invocation_id, "catalog.json", catalog_json.as_bytes())
         .await

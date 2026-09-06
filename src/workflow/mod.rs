@@ -210,7 +210,7 @@ impl DbtRunWorkflow {
         if levels.was_cancelled {
             upsert_terminal_status(ctx, &plan, "cancelled")?;
             ctx.set_current_details("cancelled".to_string());
-            return Err(WorkflowTermination::Cancelled);
+            return Err(WorkflowTermination::cancelled());
         }
 
         append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()));

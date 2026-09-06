@@ -106,6 +106,15 @@ pub async fn run_project_hooks_inner(
 ) -> Result<(), anyhow::Error> {
     let state = activities.registry.get(Some(&input.project))?;
 
+    // Hooks render Jinja and run SQL, so they need an `Invocation` root span for
+    // the same reason node execution does. Sharing the run's invocation id puts
+    // them in the same trace as the nodes they bracket.
+    let _invocation = super::node_telemetry::invocation_span(
+        &input.invocation_id,
+        &format!("dbt {}", input.phase),
+    )
+    .entered();
+
     info!(
         phase = %input.phase,
         project = %input.project,

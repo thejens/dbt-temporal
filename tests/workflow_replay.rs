@@ -91,12 +91,25 @@ async fn committed_histories_replay_against_current_workflow() -> Result<()> {
         fixture_dir().display()
     );
 
+    // One replay worker for every fixture: `replay_workflows` returns outcomes in
+    // input order, each carrying the eagerly fetched history it replayed. A
+    // fixture that is incompatible with current workflow code reports a
+    // `replay_failure` rather than erroring the batch, so every fixture is
+    // exercised even when an earlier one fails.
     let replayer = replayer()?;
-    for (name, history) in fixtures {
-        let events = history.events().len();
-        replayer.replay_workflow(history).await.with_context(|| {
-            format!("replaying {name} ({events} events) against current workflow code")
-        })?;
+    let (names, histories): (Vec<String>, Vec<WorkflowHistory>) = fixtures.into_iter().unzip();
+    let results = replayer
+        .replay_workflows(histories)
+        .await
+        .context("replaying committed histories")?;
+
+    for (name, result) in names.iter().zip(results) {
+        if let Some(failure) = result.replay_failure {
+            let events = result.history.events().len();
+            anyhow::bail!(
+                "replaying {name} ({events} events) against current workflow code: {failure}"
+            );
+        }
     }
     Ok(())
 }

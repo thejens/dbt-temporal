@@ -39,8 +39,7 @@ pub fn spawn_health_touch(path: PathBuf) -> tokio::task::JoinHandle<()> {
 async fn is_healthy(path: &Path) -> bool {
     fs::metadata(path).await.is_ok_and(|m| {
         m.modified()
-            .ok()
-            .is_some_and(|mtime| mtime.elapsed().unwrap_or(Duration::MAX) < STALE_THRESHOLD)
+            .is_ok_and(|mtime| mtime.elapsed().unwrap_or(Duration::MAX) < STALE_THRESHOLD)
     })
 }
 

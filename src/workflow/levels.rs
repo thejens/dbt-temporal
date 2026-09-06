@@ -325,11 +325,12 @@ async fn execute_one_level(
         // fairness_key gives concurrent runs proportional dispatch on a
         // shared queue instead of FIFO starvation.
         let priority = if state.plan.priority_scheduling {
-            Some(temporalio_common::Priority {
-                priority_key: state.plan.nodes.get(&unique_id).and_then(|n| n.priority),
-                fairness_key: Some(truncate_fairness_key(&state.plan.invocation_id)),
-                fairness_weight: None,
-            })
+            Some(
+                temporalio_common::Priority::builder()
+                    .maybe_priority_key(state.plan.nodes.get(&unique_id).and_then(|n| n.priority))
+                    .fairness_key(truncate_fairness_key(&state.plan.invocation_id))
+                    .build(),
+            )
         } else {
             None
         };

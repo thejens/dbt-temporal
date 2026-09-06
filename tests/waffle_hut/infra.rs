@@ -13,22 +13,16 @@ use temporalio_common::data_converters::RawValue;
 use temporalio_common::protos::coresdk::AsJsonPayloadExt;
 use temporalio_sdk_core::ephemeral_server::TemporalDevServerConfig;
 
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
 use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig};
-use dbt_temporal::telemetry_compat::DbtTelemetryCompatLayer;
 use dbt_temporal::types::{DbtRunInput, DbtRunOutput};
 
-/// Initialize tracing with the dbt-fusion telemetry compatibility layer.
+/// Initialize tracing with dbt's telemetry data layer.
 ///
-/// Without `DbtTelemetryCompatLayer`, dbt-fusion's adapter code crashes (SIGSEGV)
-/// when it tries to access `TelemetryAttributes` from span extensions.
+/// dbt's adapter and loader code reads span start info and `TelemetryAttributes`
+/// straight out of span extensions and panics when they are absent, so the data
+/// layer has to be in the stack even though these tests export no telemetry.
 pub fn init_tracing() {
-    let _ = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer().with_test_writer())
-        .with(DbtTelemetryCompatLayer)
-        .try_init();
+    dbt_temporal::tracing_setup::init_for_tests();
 }
 
 // ---------- Seed data ----------
@@ -715,11 +709,7 @@ pub async fn run_dbt_workflow(
         .context("waiting for workflow result")?;
 
     if std::env::var("DBT_TEMPORAL_RECORD_HISTORIES").is_ok() {
-        let history = handle
-            .fetch_history(WorkflowFetchHistoryOptions::default())
-            .await
-            .context("fetching history for replay fixture")?;
-        write_history_fixture(&history)?;
+        write_history_fixture(handle.fetch_history(WorkflowFetchHistoryOptions::default())).await?;
     }
 
     let payload = raw_value
@@ -748,13 +738,24 @@ pub fn history_fixture_dir() -> PathBuf {
 /// code they exist to test, which defeats the point — their value is that they
 /// were produced by an *older* build. Regenerate deliberately, and only when a
 /// workflow change makes the recorded shape genuinely unreachable.
-fn write_history_fixture(history: &temporalio_client::WorkflowHistory) -> Result<()> {
+async fn write_history_fixture(history: temporalio_client::WorkflowHistory) -> Result<()> {
     let dir = history_fixture_dir();
     std::fs::create_dir_all(&dir).context("creating history fixture dir")?;
+    // Draining the stream once gives both the event count for the file name and
+    // the events to encode; re-wrapping is cheaper than fetching the pages twice.
+    let events = history
+        .into_events()
+        .await
+        .context("fetching history for replay fixture")?;
     // Name by event count so distinct run shapes land in distinct files
     // instead of the last test overwriting every earlier one.
-    let path = dir.join(format!("dbt_run_{}_events.json.gz", history.events().len()));
-    let json = history.to_json().context("encoding history JSON")?;
+    let path = dir.join(format!("dbt_run_{}_events.json.gz", events.len()));
+    let json = temporalio_client::WorkflowHistory::from(
+        temporalio_common::protos::temporal::api::history::v1::History { events },
+    )
+    .to_json()
+    .await
+    .context("encoding history JSON")?;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     std::io::Write::write_all(&mut encoder, &json).context("compressing history fixture")?;
     let compressed = encoder.finish().context("finishing history fixture gzip")?;

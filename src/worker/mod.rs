@@ -303,9 +303,33 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
 }
 
 /// Load and parse a single dbt project, returning initialized WorkerState.
+///
+/// Runs under an `Invocation` root span: loading a project is a dbt invocation
+/// in its own right, and dbt's telemetry data layer requires every span it sees
+/// to descend from one.
+pub async fn initialize_project(
+    project_dir: &std::path::Path,
+    config: &DbtTemporalConfig,
+    auth_override: Option<Arc<dyn dbt_auth::Auth>>,
+) -> Result<WorkerState> {
+    use tracing::Instrument as _;
+
+    let span = dbt_common::tracing::create_root_info_span(dbt_telemetry::Invocation {
+        invocation_id: uuid::Uuid::new_v4().to_string(),
+        raw_command: "dbt parse".to_owned(),
+        eval_args: None,
+        process_info: None,
+        metrics: None,
+        parent_span_id: None,
+    });
+    // Boxed: the loader future is ~44KB, and this is called once per project at
+    // startup, so the heap allocation is free next to keeping it on the stack.
+    Box::pin(initialize_project_inner(project_dir, config, auth_override).instrument(span)).await
+}
+
 #[allow(clippy::too_many_lines, clippy::large_futures)]
 // Loads dbt config, profile, manifest, and resolver state — sequential initialization steps.
-pub async fn initialize_project(
+async fn initialize_project_inner(
     project_dir: &std::path::Path,
     config: &DbtTemporalConfig,
     auth_override: Option<Arc<dyn dbt_auth::Auth>>,
@@ -431,7 +455,7 @@ pub async fn initialize_project(
 
     // Build adapter engine from profile, using resolved quoting from the project.
     let adapter_engine = adapter::build_adapter_engine(
-        &dbt_state.dbt_profile.db_config,
+        dbt_state.dbt_profile.default_db_config(),
         resolver_state.root_project_quoting,
         auth_override.clone(),
     )?;
@@ -468,7 +492,6 @@ pub async fn initialize_project(
     let materialization_resolver =
         Arc::new(dbt_schemas::materialization_resolver::MaterializationResolver::new(
             &resolver_state.macros.macros,
-            resolver_state.adapter_type,
             &resolver_state.root_project_name,
         ));
 

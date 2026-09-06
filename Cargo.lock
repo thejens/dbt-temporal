@@ -4,13 +4,13 @@ version = 4
 
 [[package]]
 name = "adbc-record-replay"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "adbc_core",
  "arrow",
  "arrow-schema",
- "base64",
+ "base64 0.22.1",
  "dashmap",
  "dbt-adbc",
  "dbt-fusion-workspace-hack",
@@ -294,7 +294,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "atoi",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "comfy-table",
  "half",
@@ -1066,6 +1066,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,7 +1178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee04c4c84f1f811b017f2fbb7dd8815c976e7ca98593de9c1e2afad0f636bff4"
 dependencies = [
  "async-stream",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "bollard-buildkit-proto",
  "bollard-stubs",
@@ -1229,7 +1235,7 @@ version = "1.52.1-rc.29.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f0a8ca8799131c1837d1282c3f81f31e76ceb0ce426e04a7fe1ccee3287c066"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bollard-buildkit-proto",
  "bytes",
  "prost 0.14.4",
@@ -1934,7 +1940,7 @@ dependencies = [
  "ahash",
  "arrow",
  "arrow-ipc",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "half",
  "hashbrown 0.14.5",
@@ -2022,8 +2028,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-adapter"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "adbc-record-replay",
  "adbc_core",
@@ -2032,28 +2038,30 @@ dependencies = [
  "arrow-ipc",
  "arrow-json",
  "arrow-schema",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "crossbeam-skiplist",
  "crossbeam-utils",
  "dashmap",
  "dbt-adapter-core",
+ "dbt-adapter-engine",
  "dbt-adapter-sql",
  "dbt-adbc",
  "dbt-agate",
  "dbt-auth",
- "dbt-cloud-config",
  "dbt-common",
- "dbt-csv",
  "dbt-env",
  "dbt-frontend-common",
  "dbt-fusion-workspace-hack",
  "dbt-handles",
+ "dbt-platform-auth",
  "dbt-schema-store",
  "dbt-schemas",
+ "dbt-sql-keywords",
  "dbt-sql-utils",
  "dbt-telemetry",
  "dbt-tracing",
+ "dbt-tracked-stmt",
  "dbt-yaml",
  "fancy-regex",
  "flate2",
@@ -2079,8 +2087,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-adapter-core"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "serde",
@@ -2088,9 +2096,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbt-adapter-engine"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
+dependencies = [
+ "dbt-adbc",
+ "dbt-base",
+ "dbt-fusion-workspace-hack",
+ "futures",
+ "tokio",
+ "tracing",
+ "tracy-client",
+]
+
+[[package]]
 name = "dbt-adapter-sql"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow-schema",
  "dbt-adapter-core",
@@ -2100,8 +2122,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-adbc"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "adbc_core",
  "adbc_driver_manager",
@@ -2109,11 +2131,9 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "atomic-wait",
- "base64",
- "dbt-base",
+ "base64 0.22.1",
  "dbt-fusion-workspace-hack",
  "dirs",
- "futures",
  "getrandom 0.2.17",
  "http 1.4.2",
  "ini",
@@ -2125,7 +2145,6 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "siphasher",
- "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracy-client",
@@ -2136,8 +2155,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-agate"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2170,11 +2189,11 @@ dependencies = [
 
 [[package]]
 name = "dbt-auth"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "adbc_core",
- "base64",
+ "base64 0.22.1",
  "dbt-adbc",
  "dbt-fusion-workspace-hack",
  "dbt-yaml",
@@ -2192,16 +2211,16 @@ dependencies = [
 
 [[package]]
 name = "dbt-base"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
 ]
 
 [[package]]
 name = "dbt-classification-types"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "im",
@@ -2211,8 +2230,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-cloud-config"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "dbt-schemas",
@@ -2222,8 +2241,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-common"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -2240,7 +2259,6 @@ dependencies = [
  "dbt-tracing",
  "dbt-tui-progress",
  "dbt-yaml",
- "dialoguer",
  "dirs",
  "dunce",
  "hex",
@@ -2272,8 +2290,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-csv"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -2288,8 +2306,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-dag"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-common",
  "dbt-fusion-workspace-hack",
@@ -2301,8 +2319,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-deps"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -2334,8 +2352,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-env"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "dbt-schemas",
@@ -2343,8 +2361,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-error"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2353,6 +2371,7 @@ dependencies = [
  "dbt-frontend-common",
  "dbt-fusion-workspace-hack",
  "dbt-proc-macros",
+ "dbt-runtime",
  "dbt-tracing",
  "dbt-yaml",
  "dunce",
@@ -2372,8 +2391,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-frontend-common"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2404,16 +2423,16 @@ checksum = "a8430f049d5c7bbc7a95ae1bd10e769c4008cc6df873faab785eedbbae3ad902"
 
 [[package]]
 name = "dbt-handles"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
 ]
 
 [[package]]
 name = "dbt-ident"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "serde",
@@ -2422,8 +2441,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-jinja-ctx"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2440,8 +2459,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-jinja-filters"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "minijinja",
@@ -2449,8 +2468,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-jinja-utils"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "chrono",
@@ -2484,8 +2503,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-jinja-vars"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "chrono",
  "dbt-fusion-workspace-hack",
@@ -2499,8 +2518,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-lexer-bigquery"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-fusion-workspace-hack",
@@ -2508,8 +2527,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-lexer-databricks"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-fusion-workspace-hack",
@@ -2517,8 +2536,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-lexer-redshift"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-fusion-workspace-hack",
@@ -2526,8 +2545,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-lexer-snowflake"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-fusion-workspace-hack",
@@ -2535,8 +2554,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-lexer-trino"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-fusion-workspace-hack",
@@ -2544,8 +2563,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-loader"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2582,11 +2601,12 @@ dependencies = [
 
 [[package]]
 name = "dbt-parser"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "csv",
  "dbt-adapter",
  "dbt-adapter-core",
  "dbt-common",
@@ -2615,9 +2635,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbt-platform-auth"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
+dependencies = [
+ "base64 0.22.1",
+ "dbt-fusion-workspace-hack",
+ "dbt-schemas",
+ "dbt-yaml",
+ "dirs",
+ "open",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dbt-proc-macros"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "proc-macro2",
@@ -2627,8 +2669,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-profile"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "dbt-jinja-filters",
@@ -2643,14 +2685,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbt-runtime"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "dbt-runtime-macros",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dbt-runtime-macros"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
+dependencies = [
+ "dbt-fusion-workspace-hack",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "dbt-schema-store"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "arrow-schema",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bimap",
  "dbt-common",
  "dbt-fusion-workspace-hack",
@@ -2665,8 +2729,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-schemas"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "blake3",
  "chrono",
@@ -2701,8 +2765,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-selector-parser"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-common",
  "dbt-fusion-workspace-hack",
@@ -2711,16 +2775,16 @@ dependencies = [
 
 [[package]]
 name = "dbt-sql-keywords"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
 ]
 
 [[package]]
 name = "dbt-sql-utils"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-antlr4",
  "dbt-frontend-common",
@@ -2735,8 +2799,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-telemetry"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow-schema",
  "dbt-fusion-workspace-hack",
@@ -2816,8 +2880,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-tracing"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2846,9 +2910,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbt-tracked-stmt"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
+dependencies = [
+ "adbc_core",
+ "arrow-array",
+ "arrow-schema",
+ "crossbeam-skiplist",
+ "dbt-adbc",
+ "dbt-base",
+ "dbt-fusion-workspace-hack",
+]
+
+[[package]]
 name = "dbt-tui-progress"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "console",
  "counter",
@@ -2861,8 +2939,8 @@ dependencies = [
 
 [[package]]
 name = "dbt-vortex"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "prost 0.14.4",
@@ -2969,18 +3047,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialoguer"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25f104b501bf2364e78d0d3974cbc774f738f5865306ed128e1e0d7499c0ad96"
-dependencies = [
- "console",
- "shell-words",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3043,7 +3109,7 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29547a1dc60885a552306986316bc9701ba120c1a8db6769fa68691529ad373d"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
  "serde_json",
 ]
@@ -3915,7 +3981,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -4228,6 +4294,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
 name = "is-macro"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4237,6 +4312,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
 ]
 
 [[package]]
@@ -4690,7 +4775,7 @@ dependencies = [
 [[package]]
 name = "minijinja"
 version = "2.5.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "aho-corasick",
  "dashmap",
@@ -4710,7 +4795,7 @@ dependencies = [
 [[package]]
 name = "minijinja-contrib"
 version = "2.5.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4731,7 +4816,7 @@ dependencies = [
 [[package]]
 name = "minijinja-typecheck-builtins"
 version = "0.0.0"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "dbt-yaml",
@@ -4956,7 +5041,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbfbfff40aeccab00ec8a910b57ca8ecf4319b335c542f2edcd19dd25a1e2a00"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "form_urlencoded",
@@ -4997,6 +5082,16 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "open"
+version = "5.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c603ab8300cf18bc3b14146b19fe3dfcc4843ae5a400cd0e7a30b95aa366634"
+dependencies = [
+ "is-wsl",
+ "libc",
+]
 
 [[package]]
 name = "openssl-probe"
@@ -5253,7 +5348,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
- "base64",
+ "base64 0.22.1",
  "brotli",
  "bytes",
  "chrono",
@@ -5328,7 +5423,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "898bac3fa00d0ba57a4e8289837e965baa2dee8c3749f3b11d45a64b4223d9c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -5338,7 +5433,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8edd1efdd8ab23ba9cb9ace3d9987a72663d5d7c9f74fa00b51d6213645cf6c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -5846,8 +5941,8 @@ dependencies = [
 
 [[package]]
 name = "proto-rust"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "chrono",
  "dbt-fusion-workspace-hack",
@@ -5858,8 +5953,8 @@ dependencies = [
 
 [[package]]
 name = "proto-rust-macros"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "proc-macro2",
@@ -6188,7 +6283,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-channel",
@@ -6234,7 +6329,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -6967,7 +7062,7 @@ version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76a5c54c7310e7b8b9577c286d7e399ddd876c3e12b3ed917a8aabc4b96e9e8c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "hex",
@@ -7045,12 +7140,6 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
-
-[[package]]
-name = "shell-words"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shellexpand"
@@ -7447,14 +7536,14 @@ dependencies = [
 
 [[package]]
 name = "temporalio-client"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "749e987bf8895c2c1e04d87c2cda31b81191fbfa555555210c81c774b943d4ea"
+checksum = "06a672ea7c8fb963e3da4224c74b4fb2b0d2085dbe55d9b735a24c70af68c68f"
 dependencies = [
  "anyhow",
  "async-trait",
  "backon",
- "base64",
+ "base64 0.23.1",
  "bon",
  "bytes",
  "derive_more",
@@ -7481,9 +7570,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-common"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5fb31f018bb56a490834e07d3a4cf03cacd076b9a41cbad8d0daa1bfb1abc2d"
+checksum = "49a8ab419d730698e89a027a9c80aaedd8da40f8b4a761ad5bf94abfd62ccbfe"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7524,9 +7613,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-common-wasm"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "554221c08d489f4aee18432b4d5bfbc6e3b78d6738251424ac717e91475d68ea"
+checksum = "08156363d4ae71b05dfacf68d3a6ed06f3fc997dca3b115924ab54235ab8e023"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7551,9 +7640,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-macros"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0204af3cafd33d1aac4bf6d998ba6c6070b1a1dc3e7331f8e3a1127bf0b8386"
+checksum = "43058fe5557a8d122704c136991510703ea3998ff83d5279d0e0924434164413"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7562,12 +7651,12 @@ dependencies = [
 
 [[package]]
 name = "temporalio-protos"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8188305170ff0998c1c99ec8a62ef305b8d580efd32fe8ac7023bafc5a4191c7"
+checksum = "43bea5d1e495f0c0177849e902d785380102a8fa7b0e1aaaa75307cf300243f6"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "derive_more",
  "http 1.4.2",
  "pbjson 0.9.0",
@@ -7585,9 +7674,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-sdk"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85efb98b1d7f198aa98b61a591f90bc64c04d537d749cb926bf084053a6afb0d"
+checksum = "099245859a89a43c9218ab0e3e37fab62a3bcbd2fa962ef409c8c783ed0c8679"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7614,9 +7703,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-sdk-core"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f4f99b384438aad4656344b27e6ee6cb05e8ee568210a23d86836046eda0c9b"
+checksum = "a976a260ae17083aaae5852d2c3b05d1cf86332f8edec1e3e1a167fffc498a52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7664,9 +7753,9 @@ dependencies = [
 
 [[package]]
 name = "temporalio-workflow"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b3dfd064fd82be4b0ffefdaa1e7a0e7a0b8d1722d96bd59e9791585702b96e6"
+checksum = "aa469b8e55b2ad6cc589b5596bd4ec4b2ac498800a38c5f1a69027d3fd751004"
 dependencies = [
  "anyhow",
  "bon",
@@ -7678,6 +7767,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_pcg",
  "serde",
+ "siphasher",
  "temporalio-common-wasm",
  "temporalio-macros",
  "thiserror 2.0.19",
@@ -8029,7 +8119,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "http 1.4.2",
  "http-body 1.1.0",
@@ -8051,7 +8141,7 @@ checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "flate2",
  "h2 0.4.15",
@@ -8426,7 +8516,7 @@ version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "cookie_store",
  "flate2",
  "log",
@@ -8447,7 +8537,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "http 1.4.2",
  "httparse",
  "log",
@@ -8534,8 +8624,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vortex-client"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
  "dbt-fusion-workspace-hack",
  "http 1.4.2",
@@ -8552,10 +8642,10 @@ dependencies = [
 
 [[package]]
 name = "vortex-events"
-version = "2.0.0-beta.1"
-source = "git+https://github.com/dbt-labs/dbt-core?rev=ec4e4b46263a3240b1bc87c1b54206dff167ad12#ec4e4b46263a3240b1bc87c1b54206dff167ad12"
+version = "2.0.0-rc.1"
+source = "git+https://github.com/dbt-labs/dbt-core?rev=53d3af2502d74e33d5d7191c90c85ba8ea27ccca#53d3af2502d74e33d5d7191c90c85ba8ea27ccca"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "dbt-common",
  "dbt-env",
  "dbt-fusion-workspace-hack",

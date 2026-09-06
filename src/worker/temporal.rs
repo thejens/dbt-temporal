@@ -145,10 +145,12 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     // that started it rather than migrating onto changed workflow code mid-DAG.
     // A dbt run is finite, so pinned executions drain on their own.
     let deployment = if let Some(ref name) = config.deployment_name {
-        WorkerDeploymentOptions::new(WorkerDeploymentVersion {
-            deployment_name: name.clone(),
-            build_id,
-        })
+        WorkerDeploymentOptions::new(
+            WorkerDeploymentVersion::builder()
+                .deployment_name(name.clone())
+                .build_id(build_id)
+                .build(),
+        )
         .use_worker_versioning(true)
         .default_versioning_behavior(VersioningBehavior::Pinned)
         .build()

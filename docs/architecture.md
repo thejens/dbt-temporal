@@ -133,5 +133,5 @@ nothing.
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `0.8.0` | Workflow orchestration |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `1.0.0` | Workflow orchestration |
 | [dbt Core v2 (Fusion engine)](https://github.com/dbt-labs/dbt-core) | Git rev pinned in [Cargo.toml](../Cargo.toml) (2026-09-03 `main`, `2.0.0-rc.1`) | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

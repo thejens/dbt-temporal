@@ -62,10 +62,10 @@ impl HookEchoWorkflow {
 }
 
 /// Build a Temporal worker with `HookEchoWorkflow` registered on the given
-/// task queue. Uses its own `Runtime` (multiple `new_assume_tokio` calls
+/// task queue. Uses its own `Runtime` (multiple `from_current_tokio` calls
 /// are safe — they share the ambient tokio runtime).
 pub async fn build_hook_worker(temporal_addr: &str, task_queue: &str) -> Result<Worker> {
-    let runtime = Runtime::new_assume_tokio(
+    let runtime = Runtime::from_current_tokio(
         RuntimeOptions::builder()
             .telemetry_options(TelemetryOptions::builder().build())
             .build()

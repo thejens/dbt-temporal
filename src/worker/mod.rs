@@ -139,7 +139,7 @@ pub async fn connect_and_register(
         .telemetry_options(telemetry_options)
         .build()
         .map_err(|e| anyhow::anyhow!("building Temporal runtime options: {e}"))?;
-    let runtime = Runtime::new_assume_tokio(runtime_options)?;
+    let runtime = Runtime::from_current_tokio(runtime_options)?;
 
     // Connect to Temporal (new Connection + Client API)
     let tls_options = temporal::build_tls_options(config)?;

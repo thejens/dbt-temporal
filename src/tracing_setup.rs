@@ -34,8 +34,8 @@ use tracing_subscriber::{EnvFilter, Layer as _};
 
 use dbt_common::io_args::{FsCommand, LogFormat};
 use dbt_common::tracing::{
-    FsTraceConfig, TelemetryHandle, dbt_data_layer_config, dbt_process_span_attributes,
-    init_tracing_with_data_layer,
+    FsTraceConfig, FsTraceConfigBuilder, TelemetryHandle, dbt_data_layer_config,
+    dbt_process_span_attributes, init_tracing_with_data_layer,
 };
 use dbt_tracing::init::BaseSubscriber;
 use dbt_tracing::layer::{ConsumerLayer, MiddlewareLayer};
@@ -155,10 +155,12 @@ fn init_dbt_pipeline() -> Result<TelemetryHandle> {
     let log_format = parse_log_format("DBT_LOG_FORMAT")?.unwrap_or(LogFormat::Default);
     let config = fs_trace_config(max_log_verbosity, log_format);
 
-    let (handle, _config_provider) = config
-        .init()
-        .context("initializing dbt telemetry pipeline")?;
-    Ok(handle)
+    // The provider is derived from the config, so it has to be taken before
+    // `init` consumes it.
+    let config_provider = config.create_config_provider();
+    config
+        .init(config_provider)
+        .context("initializing dbt telemetry pipeline")
 }
 
 /// The worker's `FsTraceConfig`: OTLP export on, no file sinks. The worker is
@@ -166,29 +168,18 @@ fn init_dbt_pipeline() -> Result<TelemetryHandle> {
 /// Invocation root spans opened inside activities — this process-level
 /// invocation id only labels worker-lifecycle telemetry.
 fn fs_trace_config(max_log_verbosity: LevelFilter, log_format: LogFormat) -> FsTraceConfig {
-    FsTraceConfig::new(
-        "dbt-temporal",
-        FsCommand::Unset,
-        None, // project_dir — multi-project worker; no single project root
-        None, // target_path
-        None, // log_path
-        max_log_verbosity,
-        LevelFilter::OFF, // no dbt.log file — worker logs go to the console/collector
-        None,             // no jsonl telemetry file
-        None,             // no parquet telemetry file
-        uuid::Uuid::new_v4(),
-        None, // parent_span_id
-        true, // export_to_otlp
-        log_format,
-        false, // enable_query_log
-        std::collections::HashSet::default(),
-        false, // show_all_deprecations
-        dbt_common::warn_error_options::WarnErrorOptions::default(),
-        false, // skip_fusion_only_upgrades — only set when replaying recorded runs
-        None,  // log_file_name
-        0,     // log_file_max_bytes
-    )
-    .with_command_name("dbt-temporal")
+    // Everything left unset keeps the builder's default: no project dir (this
+    // worker serves many projects, so there is no single root), no file sinks,
+    // no query log, and no parent span.
+    FsTraceConfigBuilder::new("dbt-temporal", "dbt-temporal")
+        .with_command(FsCommand::Unset)
+        .with_max_log_verbosity(max_log_verbosity)
+        // No dbt.log file — worker logs go to the console or the collector.
+        .with_max_file_log_verbosity(LevelFilter::OFF)
+        .with_invocation_id(uuid::Uuid::new_v4())
+        .with_export_to_otlp(true)
+        .with_log_format(log_format)
+        .build()
 }
 
 /// Parse a `LevelFilter` from an env var (`error|warn|info|debug|trace|off`).

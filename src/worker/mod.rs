@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod engines;
 pub mod profile;
 pub mod temporal;
 
@@ -25,7 +26,7 @@ use crate::workflow::DbtRunWorkflow;
 #[allow(clippy::redundant_pub_crate)]
 pub(crate) use self::adapter::build_artifact_store;
 #[allow(clippy::redundant_pub_crate)]
-pub(crate) use self::profile::rebuild_adapter_engine_with_env;
+pub(crate) use self::profile::rebuild_adapter_engines_with_env;
 
 /// Build a fully configured Temporal worker (without starting it).
 ///
@@ -453,12 +454,29 @@ async fn initialize_project_inner(
         tracing::warn!(path = %out_dir.display(), error = %e, "failed to clean up resolve output");
     }
 
-    // Build adapter engine from profile, using resolved quoting from the project.
-    let adapter_engine = adapter::build_adapter_engine(
-        dbt_state.dbt_profile.default_db_config(),
+    // One engine per adapter the active target declares, so a node's `+adapter`
+    // selection reaches the warehouse it names rather than the default's.
+    // Declaration order comes straight from the profile's `IndexMap`, and only
+    // an adapter's default connection is reachable.
+    let target_configs: Vec<dbt_schemas::schemas::profiles::DbConfig> = dbt_state
+        .dbt_profile
+        .adapters
+        .values()
+        .map(|adapter| adapter.config().clone())
+        .collect();
+    let adapter_engines = adapter::build_adapter_engines(
+        &target_configs,
+        dbt_state.dbt_profile.default_adapter,
         resolver_state.root_project_quoting,
-        auth_override.clone(),
+        auth_override.as_ref(),
     )?;
+    if target_configs.len() > 1 {
+        info!(
+            project = %project_name,
+            adapters = ?adapter_engines,
+            "target declares several adapters — nodes route by their `+adapter` selection"
+        );
+    }
 
     // Collect package names for Jinja context.
     let packages: std::collections::BTreeSet<String> = dbt_state
@@ -521,7 +539,7 @@ async fn initialize_project_inner(
         project_name,
         resolver_state: Arc::new(resolver_state),
         jinja_env,
-        adapter_engine,
+        adapter_engines,
         io_args: io,
         packages,
         default_hooks,

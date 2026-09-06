@@ -32,7 +32,7 @@ flowchart TD
 
 ## How It Works
 
-1. **Worker startup**: Optionally fetches dbt projects from a remote model store (git repo or cloud storage). Then loads one or more dbt projects (dbt-loader -> dbt-parser -> adapter engine per project) into a `ProjectRegistry`. Each project gets its own `WorkerState` with isolated adapter connections.
+1. **Worker startup**: Optionally fetches dbt projects from a remote model store (git repo or cloud storage). Then loads one or more dbt projects (dbt-loader -> dbt-parser -> one adapter engine per adapter the project's target declares) into a `ProjectRegistry`. Each project gets its own `WorkerState` with isolated adapter connections.
 
 2. **`plan_project` activity**: Applies `--select`/`--exclude` filters, builds topological levels from the DAG, and serializes the manifest.
 
@@ -69,8 +69,10 @@ Parallel execution is natural: all nodes in the same topological level are indep
 | [`hooks.rs`](../src/types/hooks.rs) | Hook and retry config types (`HooksConfig`, `RetryConfig`, …) |
 | **Worker** (`src/worker/`) | |
 | [`mod.rs`](../src/worker/mod.rs) | `build_worker`, `run_worker`, project initialization, Temporal registration |
-| [`adapter.rs`](../src/worker/adapter.rs) | `build_adapter_engine`, `build_artifact_store` |
-| [`profile.rs`](../src/worker/profile.rs) | `rebuild_adapter_engine_with_env` (per-workflow env overrides) |
+| [`adapter.rs`](../src/worker/adapter.rs) | `build_adapter_engine`, `build_adapter_engines`, `build_artifact_store` |
+| [`engines.rs`](../src/worker/engines.rs) | `AdapterEngines` — the per-adapter engine registry nodes route through |
+| [`profile/mod.rs`](../src/worker/profile/mod.rs) | `rebuild_adapter_engines_with_env` (per-workflow env overrides) |
+| [`profile/render.rs`](../src/worker/profile/render.rs) | Re-rendering `profiles.yml` with a workflow's env map |
 | [`temporal.rs`](../src/worker/temporal.rs) | TLS options + worker config construction |
 | **Workflow** (`src/workflow/`) | |
 | [`mod.rs`](../src/workflow/mod.rs) | `dbt_run_workflow` |

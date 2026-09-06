@@ -2847,6 +2847,7 @@ dependencies = [
  "dbt-jinja-utils",
  "dbt-loader",
  "dbt-parser",
+ "dbt-profile",
  "dbt-schemas",
  "dbt-telemetry",
  "dbt-tracing",

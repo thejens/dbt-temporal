@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dbt_adapter::AdapterEngine;
 use dbt_common::cancellation::CancellationTokenSource;
 use dbt_common::io_args::IoArgs;
 use dbt_jinja_utils::jinja_environment::JinjaEnv;
@@ -10,6 +9,7 @@ use dbt_schemas::materialization_resolver::MaterializationResolver;
 use dbt_schemas::state::ResolverState;
 
 use crate::types::{HooksConfig, RetryConfig, TimeoutConfig};
+use crate::worker::engines::AdapterEngines;
 
 /// Holds the parsed dbt project state, shared across all activities on a worker.
 ///
@@ -22,8 +22,10 @@ pub struct WorkerState {
     pub resolver_state: Arc<ResolverState>,
     /// Jinja environment configured for all phases.
     pub jinja_env: Arc<JinjaEnv>,
-    /// Adapter engine for warehouse operations (default, from worker startup).
-    pub adapter_engine: Arc<dyn AdapterEngine>,
+    /// One warehouse engine per adapter the active target declares, built at
+    /// worker startup. Nodes route by `NodeBaseAttributes::adapter`; work with
+    /// no node behind it (project hooks, catalog generation) uses the default.
+    pub adapter_engines: AdapterEngines,
     /// I/O args (project dir, output dir, invocation ID).
     pub io_args: IoArgs,
     /// Set of all package names in the project.
@@ -69,7 +71,7 @@ pub struct WorkerState {
     /// ref to this source; if the source is dropped the token fires).
     pub cancellation_source: CancellationTokenSource,
     /// Optional auth override for the adapter engine.
-    /// When set, `rebuild_adapter_engine_with_env` uses this instead of the default auth.
+    /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,
 }
 
@@ -80,6 +82,7 @@ impl std::fmt::Debug for WorkerState {
             .field("packages", &self.packages)
             .field("profiles_path", &self.profiles_path)
             .field("default_target", &self.default_target)
+            .field("adapter_engines", &self.adapter_engines)
             .finish_non_exhaustive()
     }
 }

@@ -27,13 +27,52 @@ Projects are discovered using a fallback chain:
 
 If none are set, the current working directory is used (either as a project if it contains `dbt_project.yml`, or scanned for subdirs).
 
-**Multi-project**: When multiple projects are loaded, specify which one to run via the `project` field in the workflow input. If only one project is loaded, it is auto-selected and `project` can be omitted. Each project gets its own adapter engine and parsed state — they are fully isolated. Duplicate project names (from `dbt_project.yml`) across sources are detected at startup and cause a fatal error.
+**Multi-project**: When multiple projects are loaded, specify which one to run via the `project` field in the workflow input. If only one project is loaded, it is auto-selected and `project` can be omitted. Each project gets its own adapter engines and parsed state — they are fully isolated. Duplicate project names (from `dbt_project.yml`) across sources are detected at startup and cause a fatal error.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DBT_PROFILES_DIR` | project dir | Path to profiles.yml |
 | `DBT_TARGET` | from profile | Target override |
 | `GITHUB_TOKEN` | - | Auth token for private git repos over HTTPS. Falls back to `GIT_TOKEN`. |
+
+## Multiple Adapters per Target
+
+A profile target may declare more than one adapter, as a list of connections with
+one marked `default: true`:
+
+```yaml
+analytics:
+  target: prod
+  outputs:
+    prod:
+      - type: snowflake
+        default: true
+        account: abc123
+        ...
+      - type: bigquery
+        method: service-account
+        ...
+```
+
+The worker builds one engine per declared adapter at startup and routes each node
+to the engine its `+adapter` config names:
+
+```yaml
+models:
+  analytics:
+    reporting:
+      +adapter: bigquery
+```
+
+Nodes that select no adapter run on the target's default, so single-adapter
+projects are unaffected. A node naming an adapter the target does not declare
+fails as a configuration error rather than falling back to the default — the
+fallback would write it to the wrong warehouse. Project hooks (`on-run-start` /
+`on-run-end`) are declared at project level, not on a node, so they always run on
+the default adapter.
+
+Per-workflow `env` overrides re-render every declared adapter, not just the
+default (see [env-overrides.md](env-overrides.md)).
 
 ## Remote Project Sources
 

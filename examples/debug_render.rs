@@ -67,7 +67,9 @@ async fn main() -> anyhow::Result<()> {
     // ---- Set up Jinja env (same as execute_node) ----
     let mut jinja_env = (*state.jinja_env).clone();
 
-    let adapter_engine = Arc::clone(&state.adapter_engine);
+    // Route on the node's own adapter, as `execute_node` does, so what this
+    // script renders is what the activity would render.
+    let adapter_engine = state.adapter_engines.get(base.adapter, unique_id)?;
     let adapter_impl = dbt_adapter::AdapterImpl::new(adapter_engine, None);
     let adapter = Arc::new(dbt_adapter::Adapter::new(
         Arc::new(adapter_impl),

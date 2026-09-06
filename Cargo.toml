@@ -48,6 +48,10 @@ dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d7
 # name is `fs_deps`, so imports read `fs_deps::private_package::*`.
 dbt-deps = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
+# The profiles.yml resolver dbt-loader itself uses. Needed directly so that
+# per-workflow env-override rebuilds read a target the same way the startup
+# load did, including the multi-adapter connection-list shape.
+dbt-profile = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }
 dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "53d3af2502d74e33d5d7191c90c85ba8ea27ccca" }

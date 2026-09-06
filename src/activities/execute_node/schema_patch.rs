@@ -211,7 +211,7 @@ pub fn apply_schema_map_to_context(
 
     if (new_schema.is_some() || new_database.is_some())
         && let Ok(relation) = dbt_adapter::relation::do_create_relation(
-            state.resolver_state.adapter_type,
+            base.adapter,
             effective_database.to_string(),
             effective_schema.to_string(),
             Some(base.alias.clone()),
@@ -237,7 +237,6 @@ pub fn apply_schema_map_to_context(
 ///
 /// Used in the default-macro path after `compute_patched_relation`.
 pub fn apply_patched_relation(
-    state: &WorkerState,
     base: &NodeBaseAttributes,
     patch: &PatchedRelation,
     node_context: &mut BTreeMap<String, minijinja::Value>,
@@ -254,7 +253,7 @@ pub fn apply_patched_relation(
     };
 
     if let Ok(relation) = dbt_adapter::relation::do_create_relation(
-        state.resolver_state.adapter_type,
+        base.adapter,
         patched_database.to_string(),
         patched_schema.to_string(),
         Some(base.alias.clone()),

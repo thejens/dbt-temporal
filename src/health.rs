@@ -8,6 +8,17 @@ use tracing::{info, warn};
 const TOUCH_INTERVAL: Duration = Duration::from_secs(15);
 const STALE_THRESHOLD: Duration = Duration::from_mins(1);
 
+/// How long one probe may hold a connection. A liveness probe that has not
+/// finished by now has already been failed by whatever is polling it, so the
+/// only thing a longer wait buys is a socket and a task held open by a client
+/// that may never send or read anything.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many probes may be in flight at once. Beyond this, connections wait in
+/// the OS accept backlog rather than each getting a task of its own — every
+/// slot is released within `PROBE_TIMEOUT`, so the queue drains on its own.
+const MAX_CONCURRENT_PROBES: usize = 64;
+
 /// Touch the health file once (create or update mtime).
 pub async fn touch(path: &Path) -> std::io::Result<()> {
     if path.exists() {
@@ -61,10 +72,30 @@ pub fn spawn_health_server(port: u16, path: PathBuf) -> tokio::task::JoinHandle<
 }
 
 async fn run_health_server(listener: tokio::net::TcpListener, path: PathBuf) {
+    run_health_server_with(listener, path, PROBE_TIMEOUT, MAX_CONCURRENT_PROBES).await;
+}
+
+/// The server loop, with its two bounds as parameters so tests can drive them
+/// without waiting out the production deadline.
+async fn run_health_server_with(
+    listener: tokio::net::TcpListener,
+    path: PathBuf,
+    probe_timeout: Duration,
+    max_concurrent: usize,
+) {
     let port = listener.local_addr().map_or(0, |a| a.port());
     info!(port, "health HTTP server listening");
 
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
     loop {
+        // Claim the slot before accepting, so a saturated server leaves the
+        // next connection in the OS backlog instead of allocating a task for
+        // it. The semaphore is never closed, so acquiring cannot fail.
+        let Ok(permit) = std::sync::Arc::clone(&slots).acquire_owned().await else {
+            return;
+        };
+
         let (stream, _) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
@@ -76,7 +107,13 @@ async fn run_health_server(listener: tokio::net::TcpListener, path: PathBuf) {
         let path = path.clone();
         // Per-connection task so a slow probe client doesn't stall accept.
         tokio::spawn(async move {
-            handle_health_connection(stream, &path).await;
+            let _permit = permit;
+            if tokio::time::timeout(probe_timeout, handle_health_connection(stream, &path))
+                .await
+                .is_err()
+            {
+                tracing::debug!("health probe exceeded its deadline; dropping the connection");
+            }
         });
     }
 }
@@ -244,6 +281,64 @@ mod tests {
         assert!(resp.contains("stale"), "got: {resp}");
 
         handle.abort();
+        Ok(())
+    }
+
+    /// A client that connects and then says nothing must not hold a socket and
+    /// a task for as long as it likes. The deadline drops the connection, which
+    /// the client sees as a clean close rather than a hang.
+    #[tokio::test]
+    async fn a_silent_client_is_dropped_at_the_deadline() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("dbtt-srv-idle-{}.tmp", uuid::Uuid::new_v4()));
+        touch(&path).await?;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server_path = path.clone();
+        let handle = tokio::spawn(async move {
+            run_health_server_with(listener, server_path, Duration::from_millis(50), 4).await;
+        });
+
+        // Connect and send nothing at all.
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf),
+        )
+        .await;
+
+        assert!(read.is_ok(), "the server must close the connection, not hold it open");
+
+        handle.abort();
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    /// The slot a probe holds has to come back afterwards — a leaked permit
+    /// would wedge the server after `max_concurrent` probes, and a liveness
+    /// endpoint that stops answering is worse than none.
+    #[tokio::test]
+    async fn probe_slots_are_released_for_the_next_probe() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("dbtt-srv-slot-{}.tmp", uuid::Uuid::new_v4()));
+        touch(&path).await?;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let server_path = path.clone();
+        let handle = tokio::spawn(async move {
+            run_health_server_with(listener, server_path, Duration::from_secs(5), 1).await;
+        });
+
+        for probe in 0..3 {
+            let resp = tokio::time::timeout(Duration::from_secs(2), http_get(addr))
+                .await
+                .map_err(|_| anyhow::anyhow!("probe {probe} never got a slot"))??;
+            assert!(resp.contains("200 OK"), "probe {probe} got: {resp}");
+        }
+
+        handle.abort();
+        std::fs::remove_file(&path).ok();
         Ok(())
     }
 

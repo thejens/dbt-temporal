@@ -87,17 +87,13 @@ pub fn init_for_tests() {
 /// subscriber, so narrowing it never starves the data layer of the spans dbt
 /// reads back.
 fn console_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        // The workflow future logs an error for every unhandled query
-        // (e.g. __stack_trace from the Temporal UI) and drops it.
-        // Suppress the module entirely; its other warnings (WFT
-        // failures, panics) are already surfaced in the Temporal UI.
-        .add_directive(
-            "temporalio_sdk::workflow_future=off"
-                .parse()
-                .unwrap_or_else(|_| unreachable!("static directive always parses")),
-        )
+    // No module suppression here. This used to silence
+    // `temporalio_sdk::workflow_future` wholesale, for an error it logged on
+    // every unhandled query (`__stack_trace` from the Temporal UI). The pinned
+    // SDK no longer logs that; the only non-debug record left in that module is
+    // the `Workflow task failed for <run>: <failure>` warning, which is the one
+    // line that explains why a workflow is wedged.
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
 
 /// Install dbt's data layer, with `console` composed onto it, as the global

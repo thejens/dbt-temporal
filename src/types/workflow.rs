@@ -177,9 +177,12 @@ pub struct ExecutionPlan {
     pub levels: Vec<Vec<String>>,
     /// Metadata per node, keyed by unique_id.
     pub nodes: BTreeMap<String, NodeInfo>,
-    /// Inline manifest JSON (if < 3MB).
+    /// Inline manifest JSON. Planning no longer produces one — the manifest is
+    /// stored during planning and referenced by `manifest_ref` — but a workflow
+    /// that started before that change replays a plan from its history that
+    /// still carries it, and `store_artifacts` must keep honouring those.
     pub manifest_json: Option<String>,
-    /// Artifact store reference for large manifests.
+    /// Artifact store reference for the manifest stored during planning.
     pub manifest_ref: Option<String>,
     /// Workflow run identifier (= Temporal workflow ID).
     pub invocation_id: String,
@@ -386,8 +389,10 @@ pub struct StoreArtifactsInput {
     /// `freshness` writes `freshness.json` too.
     #[serde(default)]
     pub command: Option<String>,
-    /// Inline manifest JSON, or None if stored via manifest_ref.
+    /// Inline manifest JSON, carried only by runs that planned before the
+    /// manifest moved to the artifact store; see `ExecutionPlan::manifest_json`.
     pub manifest_json: Option<String>,
+    /// Artifact store reference for the manifest stored during planning.
     pub manifest_ref: Option<String>,
     /// CLI-style run log to store as `log.txt` (if run-log writing is enabled).
     #[serde(default)]

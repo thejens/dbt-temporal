@@ -50,6 +50,60 @@ async fn rebuild_adapter_engines_with_env_override_picks_up_the_new_schema() {
     );
 }
 
+/// A profile with two static targets and no `env_var()` anywhere, so
+/// `profile_uses_env_vars` is false. Both targets address the same DuckDB file
+/// — only the schema differs — so a run against either is queryable from the
+/// harness.
+const TWO_STATIC_TARGETS_PROFILE: &str = "spike:\n  target: dev\n  outputs:\n    dev:\n      \
+     type: duckdb\n      path: \"{DB_PATH}\"\n      schema: main\n      threads: 1\n    \
+     prod:\n      type: duckdb\n      path: \"{DB_PATH}\"\n      schema: prod_schema\n      \
+     threads: 1\n";
+
+/// A `--target` override must re-resolve the profile even when nothing in it
+/// reads `env_var()`. Gating the rebuild on env vars alone left a static
+/// multi-target profile silently running every workflow against the startup
+/// target.
+#[tokio::test]
+async fn target_override_applies_to_a_profile_without_env_vars() {
+    let model =
+        &[("models/reads_target.sql", "select '{{ target.name }}|{{ target.schema }}' as t")];
+    let harness = Harness::build_files_with_profile(model, TWO_STATIC_TARGETS_PROFILE).await;
+    assert!(
+        !harness.state().profile_uses_env_vars,
+        "fixture must have no env_var() for this to test the target path"
+    );
+
+    let compiled = harness
+        .run_uid_with_target("model.spike.reads_target", "prod")
+        .await
+        .expect("run under the prod target")
+        .compiled_code
+        .expect("compiled sql");
+
+    assert!(
+        compiled.contains("prod|prod_schema"),
+        "target override should reach the render context: {compiled}"
+    );
+}
+
+/// Naming the target the worker already started on is not an override: it must
+/// not pay for a profile re-render and a fresh connection pool.
+#[tokio::test]
+async fn target_matching_the_startup_target_reuses_the_startup_engine() {
+    let model =
+        &[("models/same_target.sql", "select '{{ target.name }}|{{ target.schema }}' as t")];
+    let harness = Harness::build_files_with_profile(model, TWO_STATIC_TARGETS_PROFILE).await;
+
+    let compiled = harness
+        .run_uid_with_target("model.spike.same_target", "dev")
+        .await
+        .expect("run under the startup target")
+        .compiled_code
+        .expect("compiled sql");
+
+    assert!(compiled.contains("dev|main"), "startup target unchanged: {compiled}");
+}
+
 /// RAII guard restoring a process env var to its prior state on drop (even on
 /// panic) — needed because dbt-fusion's own startup profile loader reads
 /// `env_var()` straight from the process env, so the var must exist while

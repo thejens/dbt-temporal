@@ -286,6 +286,25 @@ impl Harness {
             .await
     }
 
+    /// Like [`run_uid`](Self::run_uid), with a `--target` override — the path
+    /// that re-resolves the profile against a different `outputs:` block, with
+    /// no `env` override involved.
+    pub async fn run_uid_with_target(
+        &self,
+        unique_id: &str,
+        target: &str,
+    ) -> Result<NodeExecutionResult, anyhow::Error> {
+        let input = serde_json::from_value(serde_json::json!({
+            "unique_id": unique_id,
+            "invocation_id": uuid::Uuid::new_v4().to_string(),
+            "project": PROJECT,
+            "command": "build",
+            "target": target,
+        }))
+        .unwrap();
+        execute_node_inner(&self.activities, input).await
+    }
+
     /// Like [`run_uid`](Self::run_uid), with the full set of per-workflow
     /// overrides — `env`, `--vars` and `--full-refresh`.
     pub async fn run_uid_with_overrides(

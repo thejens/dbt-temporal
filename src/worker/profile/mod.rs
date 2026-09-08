@@ -82,16 +82,30 @@ pub fn rebuild_adapter_engines_with_env(
     })
 }
 
-/// Heuristic: does this profiles.yml mention `env_var(` anywhere in the
-/// raw file? A substring match deliberately, not a YAML walk:
+/// Heuristic: does this profiles.yml call `env_var` anywhere in the raw file?
+/// A textual match deliberately, not a YAML walk:
 ///
 /// - The cost of a false positive is one extra adapter rebuild per workflow.
 /// - The cost of a false negative is silently stale credentials at runtime.
 ///
-/// So we lean toward the harmless direction. Strings that *mention* the
-/// substring (comments, doc keys) trigger the rebuild — that's fine.
+/// So we lean toward the harmless direction in every uncertain case. Strings
+/// that merely *mention* the call (comments, doc keys) trigger the rebuild,
+/// whitespace before the paren still counts because Jinja accepts
+/// `env_var ('KEY')`, and a profile that cannot be read is assumed to use them:
+/// an unreadable file here says nothing about what it contains, and guessing
+/// "no dependencies" would pin every later run to startup credentials.
 pub fn profile_uses_env_vars(profiles_path: &Path) -> bool {
-    std::fs::read_to_string(profiles_path).is_ok_and(|content| content.contains("env_var("))
+    std::fs::read_to_string(profiles_path).map_or(true, |content| mentions_env_var(&content))
+}
+
+/// True when `content` contains an `env_var` call — the identifier followed by
+/// its opening paren, with any Jinja-legal whitespace between them.
+fn mentions_env_var(content: &str) -> bool {
+    #[allow(clippy::expect_used)]
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\benv_var\s*\(").expect("env_var call regex")
+    });
+    RE.is_match(content)
 }
 
 /// Write a throwaway `profiles.yml` into its own temp directory, for the tests
@@ -145,9 +159,45 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_uses_env_vars_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/nonexistent-dbtt-test/profiles.yml");
+    fn test_profile_uses_env_vars_detects_whitespace_before_paren() -> Result<()> {
+        let path = write_temp_profiles(
+            r#"my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var ('DB_HOST', 'localhost') }}"
+"#,
+        )?;
+        assert!(profile_uses_env_vars(&path));
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    /// A name that merely ends in `env_var` is not a call, and must not cost
+    /// every workflow an adapter rebuild.
+    #[test]
+    fn test_profile_uses_env_vars_ignores_longer_identifier() -> Result<()> {
+        let path = write_temp_profiles(
+            r"my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: my_env_variable
+",
+        )?;
         assert!(!profile_uses_env_vars(&path));
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    /// Unreadable says nothing about the contents: assume env vars are in play
+    /// rather than pinning the run to startup credentials.
+    #[test]
+    fn test_profile_uses_env_vars_missing_file_assumes_usage() {
+        let path = std::path::PathBuf::from("/tmp/nonexistent-dbtt-test/profiles.yml");
+        assert!(profile_uses_env_vars(&path));
     }
 
     /// The contract of the `Debug` impl: a rebuild is logged by the target it

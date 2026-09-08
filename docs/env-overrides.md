@@ -61,12 +61,14 @@ Both workflows run on the same worker, share the parsed project state (DAG, macr
 
 ## When the adapter engines are rebuilt
 
-The per-workflow adapter engine rebuild only happens when **both** conditions are true:
+The per-workflow adapter engine rebuild happens when the workflow can resolve to a different profile than the worker started on — either of:
 
-1. `profiles.yml` contains `env_var(` (detected once at worker startup)
-2. The workflow's `env` field is non-empty
+- The workflow's `target` names a target other than the profile's default. A different `outputs:` block means different credentials, schema and database, whether or not the profile reads env vars.
+- `profiles.yml` calls `env_var` (detected once at worker startup) **and** the workflow's `env` field is non-empty.
 
-If either condition is false, the shared engines from worker startup are used with zero overhead.
+If neither holds, the shared engines from worker startup are used with zero overhead.
+
+The startup scan is deliberately generous: it matches `env_var` followed by its opening paren with any whitespace between, it counts mentions in comments, and it assumes usage if the file cannot be read. A false positive costs one rebuild per workflow; a false negative would silently pin every run to startup credentials.
 
 ## Known limitations
 

@@ -81,13 +81,17 @@ pub fn prepare_render_env(
     override_vars(&mut jinja_env, overrides.vars);
     override_flags(&mut jinja_env, overrides.full_refresh);
 
-    // Rebuild the adapter engine only when profiles.yml actually reads env
-    // vars — a rebuild re-renders the profile and opens fresh connections, so
-    // it is not worth doing when nothing in the profile can change.
+    // Rebuild the adapter engine only when this workflow can resolve to a
+    // different profile than the worker's startup one — a rebuild re-renders
+    // the profile and opens fresh connections, so it is not worth doing when
+    // nothing can change. Two things change it: a `target` that names another
+    // `outputs:` block (different credentials, schema and database, whether or
+    // not the profile reads env vars), and `env` overrides on a profile that
+    // reads env vars at all.
+    let target_changed = overrides.target.is_some_and(|t| t != state.default_target);
+    let env_changed = !overrides.env.is_empty() && state.profile_uses_env_vars;
     let mut rebuild_guard = None;
-    let (engine, env_schema, env_database) = if !overrides.env.is_empty()
-        && state.profile_uses_env_vars
-    {
+    let (engine, env_schema, env_database) = if target_changed || env_changed {
         let result =
             crate::worker::rebuild_adapter_engines_with_env(state, overrides.target, overrides.env)
                 .map_err(|e| {

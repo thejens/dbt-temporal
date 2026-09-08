@@ -170,6 +170,72 @@ async fn warn_severity_test_does_not_fail_the_run() {
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
 }
 
+/// `error_if` is a threshold, and dbt evaluates it in the warehouse. Deciding
+/// from the failure count alone failed this test at 2 failures even though it
+/// is configured to tolerate 100.
+#[tokio::test]
+async fn a_test_below_its_error_if_threshold_does_not_fail() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id union all select 2 as id"),
+        (
+            "tests/tolerates_some.sql",
+            "{{ config(error_if='>100') }}\nselect * from {{ ref('m') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("m").await;
+
+    let result = harness
+        .run_uid("test.spike.tolerates_some")
+        .await
+        .expect("2 failures is under the configured threshold of 100");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    assert_eq!(result.failures, Some(2), "the count is still reported: {result:?}");
+}
+
+/// The same threshold in the other direction, so the test above cannot pass by
+/// the verdict being ignored altogether.
+#[tokio::test]
+async fn a_test_above_its_error_if_threshold_fails() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id union all select 2 as id"),
+        (
+            "tests/tolerates_one.sql",
+            "{{ config(error_if='>1') }}\nselect * from {{ ref('m') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("m").await;
+
+    let err = harness.run_err_uid("test.spike.tolerates_one").await;
+    assert!(
+        matches!(err, DbtTemporalError::TestFailure { failures, .. } if failures == 2),
+        "expected TestFailure with 2 failing rows, got: {err:?}"
+    );
+}
+
+/// `warn_if` below `error_if` warns without failing, and the count survives on
+/// the result either way.
+#[tokio::test]
+async fn a_test_between_its_warn_and_error_thresholds_warns() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id union all select 2 as id"),
+        (
+            "tests/warns_only.sql",
+            "{{ config(warn_if='>1', error_if='>100') }}\nselect * from {{ ref('m') }}",
+        ),
+    ])
+    .await;
+    harness.run_ok("m").await;
+
+    let result = harness
+        .run_uid("test.spike.warns_only")
+        .await
+        .expect("over warn_if but under error_if must not fail the run");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    assert_eq!(result.failures, Some(2), "{result:?}");
+}
+
 #[tokio::test]
 async fn store_failures_test_persists_rows_and_still_fails() {
     // `store_failures` writes the failing rows to an audit schema (created on

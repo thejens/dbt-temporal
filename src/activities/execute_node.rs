@@ -30,7 +30,7 @@ use crate::types::{
 use super::DbtActivities;
 use super::heartbeat;
 use super::node_helpers::{
-    extract_adapter_response, extract_test_failures, inject_ephemeral_ctes, render_materialization,
+    extract_adapter_response, extract_test_outcome, inject_ephemeral_ctes, render_materialization,
 };
 use super::node_serialization::{build_agate_table, get_node_config_yml, get_sql_header};
 use super::render_env;
@@ -973,14 +973,16 @@ pub async fn execute_node_inner(
         None
     };
 
-    // For test nodes, extract failure count from the result table (not rows_affected).
-    // The test materialization wraps the query in get_test_sql() which returns a single row
-    // with a `failures` column. rows_affected is always 1 (one row returned), not the count.
-    let failures = if rt == NodeType::Test {
-        extract_test_failures(&result_store)
+    // For test nodes, read the result table the test materialization stored
+    // (not rows_affected, which is always 1 — one row returned, not the count).
+    // It carries the failure count and the two verdicts the warehouse computed
+    // from `warn_if` / `error_if`.
+    let test_outcome = if rt == NodeType::Test {
+        Some(extract_test_outcome(&result_store)?)
     } else {
         None
     };
+    let failures = test_outcome.map(|o| o.failures);
 
     // Build a human-readable message from the adapter response for the Temporal UI.
     // Falls back to materialization type when the adapter doesn't return metadata
@@ -997,11 +999,14 @@ pub async fn execute_node_inner(
         "node execution complete"
     );
 
-    // For test nodes, failures > 0 means the test found failing rows.
-    // Tests with severity: warn produce warnings but don't fail the activity.
-    if let Some(n) = failures
-        && n > 0
-    {
+    // The test's verdict, on dbt's terms: it fails only when its severity is
+    // `error` *and* the `error_if` expression the warehouse evaluated came back
+    // true, and otherwise `warn_if` decides whether it warns. The failure count
+    // decides nothing by itself — a test configured `error_if: ">100"` is
+    // passing at 100 failures, and only the SQL knows that.
+    //
+    // Mirrors upstream `reported_test_verdict_from_components`.
+    if let Some(outcome) = test_outcome {
         use dbt_schemas::schemas::common::Severity;
         let severity = state
             .resolver_state
@@ -1011,14 +1016,20 @@ pub async fn execute_node_inner(
             .and_then(|t| t.deprecated_config.severity.as_ref())
             .cloned()
             .unwrap_or_default();
-        if matches!(severity, Severity::Warn) {
-            warn!(node = %unique_id, failures = n, "test warning (severity: warn)");
-        } else {
+        if matches!(severity, Severity::Error) && outcome.should_error {
             return Err(DbtTemporalError::TestFailure {
                 unique_id: unique_id.clone(),
-                failures: n,
+                failures: outcome.failures,
             }
             .into());
+        }
+        if outcome.should_warn {
+            warn!(
+                node = %unique_id,
+                failures = outcome.failures,
+                severity = ?severity,
+                "test warning"
+            );
         }
     }
 

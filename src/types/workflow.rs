@@ -124,6 +124,13 @@ pub struct RunResumeState {
     /// 1 for the first continuation, incrementing after that. Reported in the
     /// run log so a multi-segment run is legible in the Temporal UI.
     pub segment: u32,
+    /// The value a `set_fail_fast` update left on the predecessor, if one ran.
+    /// Carried in the successor's input rather than in the spilled segment
+    /// state so it is read after the checkpoint activity returns: an update
+    /// accepted while that activity was outstanding would otherwise be
+    /// acknowledged and then dropped.
+    #[serde(default)]
+    pub fail_fast_override: Option<bool>,
 }
 
 /// Input to `save_segment_state`.

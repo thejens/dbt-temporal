@@ -57,15 +57,16 @@ pub struct DbtRunWorkflow {
 impl DbtRunWorkflow {
     #[init]
     fn new(_ctx: &WorkflowContextView, input: DbtRunInput) -> Self {
+        let fail_fast_override = inherited_fail_fast_override(&input);
         let status = RunStatusSnapshot {
             phase: "initializing".to_string(),
-            fail_fast: input.fail_fast,
+            fail_fast: fail_fast_override.unwrap_or(input.fail_fast),
             ..RunStatusSnapshot::default()
         };
         Self {
             input,
             status,
-            fail_fast_override: None,
+            fail_fast_override,
         }
     }
 
@@ -369,6 +370,9 @@ async fn continue_run_as_new(
         state_ref,
         next_level,
         segment,
+        // Read after the checkpoint activity returned, so an update accepted
+        // while it was outstanding is still carried.
+        fail_fast_override: ctx.state(|s| s.fail_fast_override),
     });
 
     ctx.set_current_details(format!(
@@ -385,6 +389,19 @@ async fn continue_run_as_new(
     Err(ctx
         .continue_as_new(next_input, ContinueAsNewOptions::default())
         .expect_err("continue_as_new always returns Err"))
+}
+
+/// The fail-fast override a continuation inherits from its predecessor.
+///
+/// `set_fail_fast` lives on workflow state, which a continue-as-new discards.
+/// Without this the successor starts at `None` and silently reverts to the
+/// original input's `fail_fast`, undoing an update the caller was told had
+/// been applied.
+fn inherited_fail_fast_override(input: &DbtRunInput) -> Option<bool> {
+    input
+        .resume_from
+        .as_ref()
+        .and_then(|r| r.fail_fast_override)
 }
 
 /// Segment number for the continuation this run is about to start.
@@ -490,8 +507,52 @@ mod continuation_tests {
                 state_ref: "ref".to_string(),
                 next_level: 4,
                 segment: 3,
+                fail_fast_override: None,
             })),
             4
+        );
+    }
+
+    fn resume_state(fail_fast_override: Option<bool>) -> RunResumeState {
+        RunResumeState {
+            invocation_id: "inv".to_string(),
+            state_ref: "ref".to_string(),
+            next_level: 1,
+            segment: 1,
+            fail_fast_override,
+        }
+    }
+
+    fn input_resuming_from(resume: Option<RunResumeState>) -> DbtRunInput {
+        let mut input: DbtRunInput =
+            serde_json::from_value(serde_json::json!({ "command": "run" })).unwrap();
+        input.resume_from = resume;
+        input
+    }
+
+    /// `set_fail_fast` lives on workflow state, which continue-as-new discards.
+    /// The successor has to read the accepted value back out of its input, or
+    /// an update the caller was told had been applied silently reverts.
+    #[test]
+    fn a_continuation_inherits_the_accepted_fail_fast_update() {
+        assert_eq!(
+            inherited_fail_fast_override(&input_resuming_from(Some(resume_state(Some(true))))),
+            Some(true)
+        );
+        assert_eq!(
+            inherited_fail_fast_override(&input_resuming_from(Some(resume_state(Some(false))))),
+            Some(false),
+            "disabling fail-fast mid-run must survive too"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_predecessor_has_no_inherited_override() {
+        assert_eq!(inherited_fail_fast_override(&input_resuming_from(None)), None);
+        assert_eq!(
+            inherited_fail_fast_override(&input_resuming_from(Some(resume_state(None)))),
+            None,
+            "a predecessor that was never updated leaves the input's own setting alone"
         );
     }
 

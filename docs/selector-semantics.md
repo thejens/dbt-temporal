@@ -119,7 +119,8 @@ as a whole path component) when it does.
 | `version:` | yes | `latest`, `prerelease`, `old`, `none`, read from the model's declared version |
 | `source:` | yes | `<source>`, `<source>.<table>`, `<package>.<source>.<table>` |
 | `exposure:`, `metric:`, `saved_query:`, `semantic_model:`, `function:`, `unit_test:` | yes | `<name>` or `<package>.<name>` |
-| `state:new`, `state:modified[.<sub>]` | yes | requires `state_manifest_ref`; all `modified.<sub>` forms coarsen to the full modified set |
+| `state:new`, `state:modified[.body]` | yes | requires `state_manifest_ref`; compares node bodies, falling back to file checksums. `state:modified` warns that it reads only those two |
+| `state:modified.configs`, `.relation`, `.persisted_descriptions`, `.macros`, `.contract` | **no** | names a dimension this comparison does not read; answering with the body comparison would select the wrong nodes |
 | `state:old`, `state:unmodified` | yes | |
 | `result:` | **no** | needs `run_results.json` from a previous run |
 | `source_status:` | **no** | needs `sources.json` from a previous source freshness run |

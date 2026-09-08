@@ -45,6 +45,11 @@ impl StateSelector {
     /// modified — rebuilding too much is safer than silently skipping a
     /// changed node.
     ///
+    /// Only bodies and checksums. dbt's `state:modified` is the union of that
+    /// with config, relation, contract, description and macro changes, so this
+    /// selects a subset — `StateSet::parse` warns about it, and refuses the
+    /// `modified.<sub>` forms that name a dimension not read here.
+    ///
     /// `modified` and `existing` partition the same way `state:modified` and
     /// `state:unmodified` do in dbt, so the conservatism above lands on the
     /// same side of both selectors.
@@ -72,13 +77,26 @@ impl StateSelector {
     }
 }
 
+/// Stand-in dbt-fusion puts in `raw_code` when it did not load a node's body.
+///
+/// Two of these are equal to each other and to nothing real, so comparing them
+/// answers "unmodified" for every such node — including one whose checksum has
+/// moved. Both sides have to hold actual source before the body comparison
+/// means anything.
+const RAW_CODE_PLACEHOLDER: &str = "--placeholder--";
+
+/// Raw code worth comparing, or `None` when the node carries no real body.
+fn comparable_raw_code(raw: Option<&str>) -> Option<&str> {
+    raw.filter(|s| !s.is_empty() && *s != RAW_CODE_PLACEHOLDER)
+}
+
 /// Compare one current node against its previous-manifest entry.
 fn node_is_modified(node: &dyn InternalDbtNodeAttributes, prev: &serde_json::Value) -> bool {
     use dbt_schemas::schemas::common::DbtChecksum;
 
     if let (Some(cur_raw), Some(prev_raw)) = (
-        node.common().raw_code.as_deref(),
-        prev.get("raw_code").and_then(serde_json::Value::as_str),
+        comparable_raw_code(node.common().raw_code.as_deref()),
+        comparable_raw_code(prev.get("raw_code").and_then(serde_json::Value::as_str)),
     ) {
         return cur_raw != prev_raw;
     }
@@ -208,6 +226,65 @@ mod tests {
             StateSelector::from_previous_manifest(&nodes, &changed)
                 .modified
                 .contains("model.shop.csum")
+        );
+    }
+
+    /// dbt-fusion writes `--placeholder--` into `raw_code` when it did not load
+    /// a node's body. Two placeholders compare equal, so the body comparison
+    /// used to answer "unmodified" for every such node and never look at the
+    /// checksum that had actually moved — a CI build skipping a changed node.
+    #[test]
+    fn a_placeholder_body_falls_through_to_the_checksum() {
+        let mut nodes = Nodes::default();
+        let mut model = model_with_code("model.shop.ph", "ph", "--placeholder--");
+        {
+            let model = Arc::get_mut(&mut model).unwrap();
+            model.__common_attr__.checksum = DbtChecksum::String("new-hash".to_string());
+        }
+        nodes.models.insert("model.shop.ph".to_string(), model);
+
+        let previous = serde_json::json!({"nodes": {"model.shop.ph": {
+            "raw_code": "--placeholder--",
+            "checksum": "old-hash",
+        }}});
+        assert!(
+            StateSelector::from_previous_manifest(&nodes, &previous)
+                .modified
+                .contains("model.shop.ph"),
+            "a moved checksum behind two placeholders is still a modification"
+        );
+
+        let unchanged = serde_json::json!({"nodes": {"model.shop.ph": {
+            "raw_code": "--placeholder--",
+            "checksum": "new-hash",
+        }}});
+        assert!(
+            !StateSelector::from_previous_manifest(&nodes, &unchanged)
+                .modified
+                .contains("model.shop.ph"),
+            "and an unchanged checksum is still unmodified"
+        );
+    }
+
+    /// An empty body says as little as a placeholder does.
+    #[test]
+    fn an_empty_body_falls_through_to_the_checksum() {
+        let mut nodes = Nodes::default();
+        let mut model = model_with_code("model.shop.empty", "empty", "");
+        {
+            let model = Arc::get_mut(&mut model).unwrap();
+            model.__common_attr__.checksum = DbtChecksum::String("new-hash".to_string());
+        }
+        nodes.models.insert("model.shop.empty".to_string(), model);
+
+        let previous = serde_json::json!({"nodes": {"model.shop.empty": {
+            "raw_code": "",
+            "checksum": "old-hash",
+        }}});
+        assert!(
+            StateSelector::from_previous_manifest(&nodes, &previous)
+                .modified
+                .contains("model.shop.empty")
         );
     }
 

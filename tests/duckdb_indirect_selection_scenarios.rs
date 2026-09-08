@@ -43,16 +43,18 @@ async fn project() -> Harness {
     .await
 }
 
-/// Run selection the way the planner does, then expand for `mode`.
+/// Run selection the way the planner does, expanding for `mode`.
 fn selected_with(harness: &Harness, select: &str, mode: IndirectSelection) -> Vec<String> {
-    selected_for_command(harness, "build", select, mode)
+    selected_for_command(harness, "build", select, None, mode)
 }
 
-/// Same, for an arbitrary command — the command bounds what may be added.
+/// Same, for an arbitrary command and an optional `--exclude` — the command
+/// bounds what may be added, and the exclusion is subtracted after expansion.
 fn selected_for_command(
     harness: &Harness,
     command: &str,
     select: &str,
+    exclude: Option<&str>,
     mode: IndirectSelection,
 ) -> Vec<String> {
     let input: DbtRunInput =
@@ -60,8 +62,64 @@ fn selected_for_command(
     let all = select_command_node_ids(harness.state(), &input).unwrap();
     let eligible: std::collections::BTreeSet<String> = all.iter().cloned().collect();
     let nodes = &harness.state().resolver_state.nodes;
-    let direct = apply_selectors(all, nodes, Some(select), None, None).unwrap();
-    expand_indirect_selection(direct, nodes, &eligible, mode)
+    apply_selectors(all, nodes, Some(select), exclude, None, &|ids| {
+        expand_indirect_selection(ids, nodes, &eligible, mode)
+    })
+    .unwrap()
+}
+
+/// Naming a test in `--exclude` has to mean it does not run. Expanding
+/// indirect selection after the exclusion instead let the model the test hangs
+/// off put it straight back — so the run executed the one node the user had
+/// asked it not to.
+#[tokio::test]
+async fn an_explicitly_excluded_test_is_not_added_back() {
+    let harness = project().await;
+
+    let without_exclusion = selected_with(&harness, "a", IndirectSelection::Eager);
+    assert!(
+        has_test_on(&without_exclusion, "not_null_a_id"),
+        "fixture check — the test is what indirect selection adds: {without_exclusion:?}"
+    );
+
+    let ids = selected_for_command(
+        &harness,
+        "build",
+        "a",
+        Some("not_null_a_id"),
+        IndirectSelection::Eager,
+    );
+    assert!(
+        ids.iter().any(|id| id == "model.spike.a"),
+        "the selected model still runs: {ids:?}"
+    );
+    assert!(
+        !has_test_on(&ids, "not_null_a_id"),
+        "the excluded test must stay excluded: {ids:?}"
+    );
+}
+
+/// The same failure at type scope: `--exclude resource_type:test` excluded
+/// every test, and then indirect selection put them back.
+#[tokio::test]
+async fn excluding_tests_by_resource_type_keeps_them_out() {
+    let harness = project().await;
+    let ids = selected_for_command(
+        &harness,
+        "build",
+        "a",
+        Some("resource_type:test"),
+        IndirectSelection::Eager,
+    );
+
+    assert!(
+        ids.iter().any(|id| id == "model.spike.a"),
+        "the selected model still runs: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.starts_with("test.")),
+        "no test may survive an explicit resource_type exclusion: {ids:?}"
+    );
 }
 
 fn has_test_on(ids: &[String], needle: &str) -> bool {
@@ -156,7 +214,7 @@ async fn expanding_a_full_selection_adds_nothing() {
 #[tokio::test]
 async fn run_command_gains_no_tests_even_under_eager() {
     let harness = project().await;
-    let ids = selected_for_command(&harness, "run", "a", IndirectSelection::Eager);
+    let ids = selected_for_command(&harness, "run", "a", None, IndirectSelection::Eager);
 
     assert_eq!(
         ids,

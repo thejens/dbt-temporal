@@ -179,6 +179,13 @@ Indirect selection only adds tests and unit tests — it never pulls in a model
 you did not select. A unit test is judged by the model it tests, not by the
 nodes named in its fixtures.
 
+Selection runs in dbt's order: `--select` narrows, indirect selection expands
+what survived, and `--exclude` is subtracted from that. Excluding last is what
+makes an explicit exclusion stick — `--select my_model --exclude its_test` runs
+the model without the test, and `--exclude resource_type:test` keeps every test
+out. Expanding after the exclusion instead would let the model put its tests
+straight back.
+
 **Behavior change:** before this was implemented dbt-temporal effectively
 behaved as `empty`, so `build --select my_model` ran the model and skipped its
 tests. The default is now `eager`, matching dbt, and such a run executes more

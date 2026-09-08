@@ -46,6 +46,7 @@ pub fn apply_selectors(
     select: Option<&str>,
     exclude: Option<&str>,
     state: Option<&StateSelector>,
+    expand_indirect: &dyn Fn(Vec<String>) -> Vec<String>,
 ) -> Result<Vec<String>, anyhow::Error> {
     let select_expr = parse_selector(select).context("invalid --select")?;
     let exclude_expr = parse_selector(exclude).context("invalid --exclude")?;
@@ -87,6 +88,16 @@ pub fn apply_selectors(
         let matched = resolve_expression(nodes, &full_deps, &reverse_deps, ctx, &expr)?;
         selected_ids.retain(|uid| matched.contains(uid.as_str()));
     }
+
+    // Indirect selection runs between the two, matching the order upstream's
+    // scheduler applies inside one selection atom: base filter, graph
+    // operators, indirect selection, then exclude.
+    //
+    // The order is what makes an explicit exclusion stick. Expanding after the
+    // exclusion instead lets a test that was named in `--exclude` come back in
+    // through the model it hangs off — undoing the one thing the user asked
+    // for by name.
+    selected_ids = expand_indirect(selected_ids);
 
     if let Some(expr) = exclude_expr {
         let matched = resolve_expression(nodes, &full_deps, &reverse_deps, ctx, &expr)?;
@@ -270,6 +281,12 @@ fn resolve_criteria(
 mod tests {
     use super::*;
 
+    /// Selection tests drive `--select`/`--exclude` alone; the expansion hook
+    /// is exercised by the indirect-selection tests and by `plan_project`.
+    fn no_expansion(ids: Vec<String>) -> Vec<String> {
+        ids
+    }
+
     use std::sync::Arc;
 
     use dbt_schemas::schemas::Nodes;
@@ -350,14 +367,15 @@ mod tests {
     #[test]
     fn apply_selectors_no_filters_returns_input() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids.clone(), &nodes, None, None, None).unwrap();
+        let out = apply_selectors(ids.clone(), &nodes, None, None, None, &no_expansion).unwrap();
         assert_eq!(out, ids);
     }
 
     #[test]
     fn apply_selectors_filters_by_tag() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("tag:nightly"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("tag:nightly"), None, None, &no_expansion).unwrap();
         assert_eq!(
             out,
             vec![
@@ -370,7 +388,8 @@ mod tests {
     #[test]
     fn apply_selectors_filters_by_fqn_name_exact() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("stg_orders"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("stg_orders"), None, None, &no_expansion).unwrap();
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
     }
 
@@ -379,7 +398,8 @@ mod tests {
     #[test]
     fn apply_selectors_fqn_name_does_not_substring_match() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("customers"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("customers"), None, None, &no_expansion).unwrap();
         assert_eq!(out, vec!["model.shop.customers".to_string()]);
     }
 
@@ -392,17 +412,19 @@ mod tests {
         ];
 
         let with_package =
-            apply_selectors(ids.clone(), &nodes, Some("shop.staging"), None, None).unwrap();
+            apply_selectors(ids.clone(), &nodes, Some("shop.staging"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(with_package, expected);
 
-        let without_package = apply_selectors(ids, &nodes, Some("staging"), None, None).unwrap();
+        let without_package =
+            apply_selectors(ids, &nodes, Some("staging"), None, None, &no_expansion).unwrap();
         assert_eq!(without_package, expected);
     }
 
     #[test]
     fn apply_selectors_fqn_supports_wildcards() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("stg_*"), None, None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("stg_*"), None, None, &no_expansion).unwrap();
         assert_eq!(
             out,
             vec![
@@ -415,7 +437,9 @@ mod tests {
     #[test]
     fn apply_selectors_filters_by_path_prefix() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("path:models/staging"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("path:models/staging"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(
             out,
             vec![
@@ -429,7 +453,8 @@ mod tests {
     #[test]
     fn apply_selectors_bare_path_value_selects_by_path() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("models/staging"), None, None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("models/staging"), None, None, &no_expansion)
+            .unwrap();
         assert_eq!(
             out,
             vec![
@@ -444,21 +469,32 @@ mod tests {
     #[test]
     fn apply_selectors_file_method_and_its_bare_sql_spelling() {
         let (ids, nodes) = build_three_model_project();
-        let bare = apply_selectors(ids.clone(), &nodes, Some("customers.sql"), None, None).unwrap();
+        let bare =
+            apply_selectors(ids.clone(), &nodes, Some("customers.sql"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(bare, vec!["model.shop.customers".to_string()]);
 
-        let prefixed =
-            apply_selectors(ids.clone(), &nodes, Some("file:stg_orders.sql"), None, None).unwrap();
+        let prefixed = apply_selectors(
+            ids.clone(),
+            &nodes,
+            Some("file:stg_orders.sql"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert_eq!(prefixed, vec!["model.shop.stg_orders".to_string()]);
 
-        let none = apply_selectors(ids, &nodes, Some("file:absent.sql"), None, None).unwrap();
+        let none = apply_selectors(ids, &nodes, Some("file:absent.sql"), None, None, &no_expansion)
+            .unwrap();
         assert!(none.is_empty());
     }
 
     #[test]
     fn apply_selectors_filters_by_package() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, Some("package:shop"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("package:shop"), None, None, &no_expansion).unwrap();
         assert_eq!(out.len(), 3);
     }
 
@@ -466,26 +502,37 @@ mod tests {
     #[test]
     fn apply_selectors_package_this_resolves_to_the_root_project() {
         let (ids, mut nodes) = build_three_model_project();
-        let all = apply_selectors(ids.clone(), &nodes, Some("package:this"), None, None).unwrap();
+        let all =
+            apply_selectors(ids.clone(), &nodes, Some("package:this"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(all.len(), 3);
 
         nodes.project_name = Some("marketing".to_string());
-        let none = apply_selectors(ids, &nodes, Some("package:this"), None, None).unwrap();
+        let none =
+            apply_selectors(ids, &nodes, Some("package:this"), None, None, &no_expansion).unwrap();
         assert!(none.is_empty());
     }
 
     #[test]
     fn apply_selectors_excludes_subset() {
         let (ids, nodes) = build_three_model_project();
-        let out = apply_selectors(ids, &nodes, None, Some("tag:nightly"), None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, None, Some("tag:nightly"), None, &no_expansion).unwrap();
         assert_eq!(out, vec!["model.shop.customers".to_string()]);
     }
 
     #[test]
     fn apply_selectors_select_and_exclude_combined() {
         let (ids, nodes) = build_three_model_project();
-        let out =
-            apply_selectors(ids, &nodes, Some("tag:nightly"), Some("tag:hourly"), None).unwrap();
+        let out = apply_selectors(
+            ids,
+            &nodes,
+            Some("tag:nightly"),
+            Some("tag:hourly"),
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert_eq!(out, vec!["model.shop.stg_customers".to_string()]);
     }
 
@@ -493,7 +540,9 @@ mod tests {
     fn apply_selectors_intersection_via_comma() {
         let (ids, nodes) = build_three_model_project();
         // Comma is intersection: nodes that are nightly AND hourly.
-        let out = apply_selectors(ids, &nodes, Some("tag:nightly,tag:hourly"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("tag:nightly,tag:hourly"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
     }
 
@@ -501,7 +550,9 @@ mod tests {
     fn apply_selectors_union_via_space() {
         let (ids, nodes) = build_three_model_project();
         // Whitespace-separated tokens are union (each parsed independently).
-        let out = apply_selectors(ids, &nodes, Some("tag:hourly tag:nightly"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("tag:hourly tag:nightly"), None, None, &no_expansion)
+                .unwrap();
         assert_eq!(out.len(), 3);
     }
 
@@ -536,13 +587,26 @@ mod tests {
     #[test]
     fn apply_selectors_filters_by_config_materialized() {
         let (ids, nodes) = build_config_project();
-        let out =
-            apply_selectors(ids.clone(), &nodes, Some("config.materialized:view"), None, None)
-                .unwrap();
+        let out = apply_selectors(
+            ids.clone(),
+            &nodes,
+            Some("config.materialized:view"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert_eq!(out, vec!["model.shop.a".to_string()]);
 
-        let none =
-            apply_selectors(ids, &nodes, Some("config.materialized:table"), None, None).unwrap();
+        let none = apply_selectors(
+            ids,
+            &nodes,
+            Some("config.materialized:table"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert!(none.is_empty());
     }
 
@@ -550,8 +614,9 @@ mod tests {
     #[test]
     fn apply_selectors_filters_by_arbitrary_config_keys() {
         let (ids, nodes) = build_config_project();
-        let select =
-            |sel: &str| apply_selectors(ids.clone(), &nodes, Some(sel), None, None).unwrap();
+        let select = |sel: &str| {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion).unwrap()
+        };
 
         assert_eq!(select("config.schema:audit"), vec!["model.shop.a".to_string()]);
         assert!(select("config.schema:marts").is_empty());
@@ -568,14 +633,16 @@ mod tests {
     #[test]
     fn apply_selectors_unknown_config_key_selects_nothing_without_erroring() {
         let (ids, nodes) = build_config_project();
-        let out = apply_selectors(ids, &nodes, Some("config.not_a_key:foo"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("config.not_a_key:foo"), None, None, &no_expansion)
+                .unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn apply_selectors_config_naming_no_key_is_rejected() {
         let (ids, nodes) = build_config_project();
-        let err = apply_selectors(ids, &nodes, Some("config:not_a_key"), None, None)
+        let err = apply_selectors(ids, &nodes, Some("config:not_a_key"), None, None, &no_expansion)
             .expect_err("a config criterion naming no key must be rejected");
         assert!(err.to_string().contains("--select"), "got: {err:#}");
     }
@@ -620,19 +687,29 @@ mod tests {
     #[test]
     fn apply_selectors_source_method() {
         let (ids, nodes) = build_mixed_resource_project();
-        let out =
-            apply_selectors(ids.clone(), &nodes, Some("source:raw.orders"), None, None).unwrap();
+        let out = apply_selectors(
+            ids.clone(),
+            &nodes,
+            Some("source:raw.orders"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert_eq!(out, vec!["source.shop.raw.orders".to_string()]);
 
-        let none = apply_selectors(ids, &nodes, Some("source:raw.customers"), None, None).unwrap();
+        let none =
+            apply_selectors(ids, &nodes, Some("source:raw.customers"), None, None, &no_expansion)
+                .unwrap();
         assert!(none.is_empty());
     }
 
     #[test]
     fn apply_selectors_exposure_and_metric_methods() {
         let (ids, nodes) = build_mixed_resource_project();
-        let select =
-            |sel: &str| apply_selectors(ids.clone(), &nodes, Some(sel), None, None).unwrap();
+        let select = |sel: &str| {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion).unwrap()
+        };
 
         assert_eq!(select("exposure:weekly"), vec!["exposure.shop.weekly".to_string()]);
         assert!(select("exposure:monthly").is_empty());
@@ -643,8 +720,9 @@ mod tests {
     #[test]
     fn apply_selectors_test_type_and_test_name_methods() {
         let (ids, nodes) = build_mixed_resource_project();
-        let select =
-            |sel: &str| apply_selectors(ids.clone(), &nodes, Some(sel), None, None).unwrap();
+        let select = |sel: &str| {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion).unwrap()
+        };
 
         assert_eq!(select("test_type:generic"), vec!["test.shop.nn_orders".to_string()]);
         assert_eq!(select("test_type:singular"), vec!["test.shop.assert_totals".to_string()]);
@@ -665,8 +743,9 @@ mod tests {
             .models
             .insert("model.shop.orders".to_string(), Arc::new(orders));
 
-        let select =
-            |sel: &str| apply_selectors(ids.clone(), &nodes, Some(sel), None, None).unwrap();
+        let select = |sel: &str| {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion).unwrap()
+        };
 
         assert_eq!(select("group:finance"), vec!["model.shop.orders".to_string()]);
         assert!(select("group:marketing").is_empty());
@@ -677,13 +756,21 @@ mod tests {
     #[test]
     fn apply_selectors_resource_type_filter() {
         let (ids, nodes) = build_mixed_resource_project();
-        let out =
-            apply_selectors(ids.clone(), &nodes, Some("resource_type:source"), None, None).unwrap();
+        let out = apply_selectors(
+            ids.clone(),
+            &nodes,
+            Some("resource_type:source"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
         assert_eq!(out, vec!["source.shop.raw.orders".to_string()]);
 
         // `relation` is dbt's alias for everything that is not a test or check.
         let relations =
-            apply_selectors(ids, &nodes, Some("resource_type:relation"), None, None).unwrap();
+            apply_selectors(ids, &nodes, Some("resource_type:relation"), None, None, &no_expansion)
+                .unwrap();
         assert!(relations.contains(&"model.shop.orders".to_string()));
         assert!(!relations.contains(&"test.shop.nn_orders".to_string()));
     }
@@ -703,8 +790,9 @@ mod tests {
             .models
             .insert("model.shop.plain".to_string(), model_node("model.shop.plain", "plain"));
         let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
-        let select =
-            |sel: &str| apply_selectors(ids.clone(), &nodes, Some(sel), None, None).unwrap();
+        let select = |sel: &str| {
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion).unwrap()
+        };
 
         assert_eq!(select("version:latest"), vec!["model.shop.orders.v2".to_string()]);
         assert_eq!(select("version:old"), vec!["model.shop.orders.v1".to_string()]);
@@ -719,8 +807,15 @@ mod tests {
     #[test]
     fn unsupported_method_in_union_is_rejected_not_ignored() {
         let (ids, nodes) = build_three_model_project();
-        let err = apply_selectors(ids, &nodes, Some("tag:nightly result:success"), None, None)
-            .expect_err("result: is not evaluable and must be rejected");
+        let err = apply_selectors(
+            ids,
+            &nodes,
+            Some("tag:nightly result:success"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .expect_err("result: is not evaluable and must be rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("result"), "should name the method: {msg}");
         assert!(msg.contains("unsupported selector method"), "got: {msg}");
@@ -730,8 +825,9 @@ mod tests {
     #[test]
     fn unsupported_method_in_exclude_is_rejected() {
         let (ids, nodes) = build_three_model_project();
-        let err = apply_selectors(ids, &nodes, None, Some("source_status:fresher"), None)
-            .expect_err("source_status: is not evaluable and must be rejected");
+        let err =
+            apply_selectors(ids, &nodes, None, Some("source_status:fresher"), None, &no_expansion)
+                .expect_err("source_status: is not evaluable and must be rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("--exclude"), "got: {msg}");
         assert!(msg.contains("source_status"), "should name the method: {msg}");
@@ -747,8 +843,9 @@ mod tests {
             ("column:model.shop.customers.id", "column"),
             ("selector:nightly", "selector"),
         ] {
-            let err = apply_selectors(ids.clone(), &nodes, Some(selector), None, None)
-                .expect_err("must be rejected");
+            let err =
+                apply_selectors(ids.clone(), &nodes, Some(selector), None, None, &no_expansion)
+                    .expect_err("must be rejected");
             assert!(format!("{err:#}").contains(method), "{selector}: {err:#}");
         }
     }
@@ -759,8 +856,9 @@ mod tests {
     fn a_malformed_resource_specific_value_is_rejected() {
         let (ids, nodes) = build_three_model_project();
         for selector in ["exposure:a.b.c", "source:a.b.c.d", "test_type:integration"] {
-            let err = apply_selectors(ids.clone(), &nodes, Some(selector), None, None)
-                .expect_err("must be rejected");
+            let err =
+                apply_selectors(ids.clone(), &nodes, Some(selector), None, None, &no_expansion)
+                    .expect_err("must be rejected");
             assert!(
                 format!("{err:#}").contains("unsupported selector method"),
                 "{selector}: {err:#}"
@@ -823,7 +921,8 @@ mod tests {
     fn apply_selectors_parents_walks_upstream() {
         let (ids, nodes) = build_dag_project();
         // `+ar_summary` selects ar_summary plus all transitive parents.
-        let out = apply_selectors(ids, &nodes, Some("+ar_summary"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("+ar_summary"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.ar_summary"));
         assert!(set.contains("model.shop.orders"));
@@ -835,7 +934,8 @@ mod tests {
     fn apply_selectors_parents_depth_limited() {
         let (ids, nodes) = build_dag_project();
         // `1+ar_summary` selects ar_summary plus direct parents only.
-        let out = apply_selectors(ids, &nodes, Some("1+ar_summary"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("1+ar_summary"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.ar_summary"));
         assert!(set.contains("model.shop.orders"));
@@ -848,7 +948,8 @@ mod tests {
     fn apply_selectors_children_walks_downstream() {
         let (ids, nodes) = build_dag_project();
         // `stg_orders+` selects stg_orders plus everything downstream.
-        let out = apply_selectors(ids, &nodes, Some("stg_orders+"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("stg_orders+"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.stg_orders"));
         assert!(set.contains("model.shop.orders"));
@@ -861,7 +962,8 @@ mod tests {
     fn apply_selectors_children_depth_limited() {
         let (ids, nodes) = build_dag_project();
         // `stg_orders+1` selects stg_orders + direct children only.
-        let out = apply_selectors(ids, &nodes, Some("stg_orders+1"), None, None).unwrap();
+        let out =
+            apply_selectors(ids, &nodes, Some("stg_orders+1"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.stg_orders"));
         assert!(set.contains("model.shop.orders"));
@@ -875,7 +977,7 @@ mod tests {
         // `@orders` per the implementation: orders + direct parents + direct
         // children (one hop in each direction). Multi-hop transitive expansion
         // is intentionally not done here.
-        let out = apply_selectors(ids, &nodes, Some("@orders"), None, None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("@orders"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
         assert!(set.contains("model.shop.orders"));
         assert!(set.contains("model.shop.stg_orders"), "direct parent");
@@ -919,7 +1021,8 @@ mod tests {
         let state = StateSelector::from_previous_manifest(&nodes, &previous_manifest());
         let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
         let select = |sel: &str| {
-            apply_selectors(ids.clone(), &nodes, Some(sel), None, Some(&state)).unwrap()
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, Some(&state), &no_expansion)
+                .unwrap()
         };
 
         assert_eq!(
@@ -953,7 +1056,7 @@ mod tests {
             "state:old",
             "state:unmodified",
         ] {
-            apply_selectors(ids.clone(), &nodes, Some(sel), None, None)
+            apply_selectors(ids.clone(), &nodes, Some(sel), None, None, &no_expansion)
                 .unwrap_or_else(|e| panic!("{sel} should be accepted: {e:#}"));
         }
     }
@@ -963,8 +1066,9 @@ mod tests {
         let nodes = state_nodes();
         let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
         for selector in ["state:sideways", "state:modified.bdoy"] {
-            let err = apply_selectors(ids.clone(), &nodes, Some(selector), None, None)
-                .expect_err("has no backing set");
+            let err =
+                apply_selectors(ids.clone(), &nodes, Some(selector), None, None, &no_expansion)
+                    .expect_err("has no backing set");
             assert!(format!("{err:#}").contains(selector), "got: {err:#}");
         }
     }
@@ -973,7 +1077,8 @@ mod tests {
     fn state_selector_without_sets_matches_nothing() {
         let nodes = state_nodes();
         let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
-        let out = apply_selectors(ids, &nodes, Some("state:modified"), None, None).unwrap();
+        let out = apply_selectors(ids, &nodes, Some("state:modified"), None, None, &no_expansion)
+            .unwrap();
         assert!(out.is_empty());
     }
 }

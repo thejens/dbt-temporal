@@ -80,6 +80,24 @@ impl ObjectStoreArtifactStore {
     pub fn new(store: Box<dyn ObjectStore>, prefix: String) -> Self {
         Self { store, prefix }
     }
+
+    /// Resolve an artifact reference to an object path inside the store.
+    ///
+    /// `retrieve` is reached with values that arrive on workflow input
+    /// (`defer_manifest_ref`, `state_manifest_ref`, `resume_from.state_ref`),
+    /// so a reference that may name any key turns "can start a workflow" into
+    /// "can read anything in the bucket the worker's credentials reach". An
+    /// empty prefix means the whole bucket *is* the store, and matches
+    /// everything by design.
+    fn resolve_for_read(&self, reference: &str) -> Result<Path> {
+        let path = Path::from(reference);
+        let prefix = Path::from(self.prefix.as_str());
+        anyhow::ensure!(
+            path.prefix_matches(&prefix),
+            "artifact reference resolves outside the artifact store: {reference}"
+        );
+        Ok(path)
+    }
 }
 
 #[async_trait]
@@ -96,7 +114,7 @@ impl ArtifactStore for ObjectStoreArtifactStore {
     }
 
     async fn retrieve(&self, path: &str) -> Result<Vec<u8>> {
-        let path = Path::from(path);
+        let path = self.resolve_for_read(path)?;
         let result = self
             .store
             .get(&path)

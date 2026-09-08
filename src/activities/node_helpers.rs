@@ -373,8 +373,14 @@ pub(super) fn json_to_minijinja(v: &serde_json::Value) -> minijinja::Value {
         serde_json::Value::Null => minijinja::Value::from(()),
         serde_json::Value::Bool(b) => minijinja::Value::from(*b),
         serde_json::Value::Number(n) => {
+            // `u64` before `f64`: a JSON integer above `i64::MAX` is exact as
+            // an unsigned, and lossy as a float. Warehouse ids and epoch
+            // nanoseconds land in that range, and a var silently rounded to
+            // the nearest representable double changes what the model selects.
             if let Some(i) = n.as_i64() {
                 minijinja::Value::from(i)
+            } else if let Some(u) = n.as_u64() {
+                minijinja::Value::from(u)
             } else if let Some(f) = n.as_f64() {
                 minijinja::Value::from(f)
             } else {
@@ -776,12 +782,16 @@ mod tests {
     }
 
     #[test]
-    fn json_to_minijinja_large_unsigned_falls_back_to_f64() {
-        // u64::MAX doesn't fit in i64; we fall through to as_f64 which always
-        // succeeds for serde_json::Number (so the to_string() arm is dead but
-        // typesafe). Exercise the f64 branch — the value stringifies as a float.
+    fn json_to_minijinja_large_unsigned_keeps_every_digit() {
+        // Above i64::MAX the value has to go through the u64 branch: as an f64
+        // it would round to the nearest double and come back as a different
+        // number, which is how a var reaches SQL as the wrong id.
         let v = json_to_minijinja(&serde_json::json!(u64::MAX));
-        assert!(v.to_string().contains("e19") || v.to_string().contains("18446744"));
+        assert_eq!(v.to_string(), u64::MAX.to_string());
+
+        let id = 9_007_199_254_740_993_u64; // 2^53 + 1 — not representable as f64
+        let v = json_to_minijinja(&serde_json::json!(id));
+        assert_eq!(v.to_string(), id.to_string());
     }
 
     // --- patch_target_global ---

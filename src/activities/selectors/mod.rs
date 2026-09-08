@@ -1073,6 +1073,31 @@ mod tests {
         }
     }
 
+    /// These name dimensions the comparison does not read. Answering them with
+    /// the body comparison is a narrowing, not a coarsening: `modified.configs`
+    /// would match only nodes whose *body* changed, so a config-only change —
+    /// the thing it was asked about — selected nothing at all.
+    #[test]
+    fn a_modified_subselector_this_comparison_cannot_decide_is_rejected() {
+        let nodes = state_nodes();
+        let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
+        for sub in [
+            "configs",
+            "relation",
+            "persisted_descriptions",
+            "macros",
+            "contract",
+        ] {
+            let selector = format!("state:modified.{sub}");
+            let err =
+                apply_selectors(ids.clone(), &nodes, Some(&selector), None, None, &no_expansion)
+                    .expect_err("this comparison cannot decide it");
+            let msg = format!("{err:#}");
+            assert!(msg.contains(sub), "should name the dimension: {msg}");
+            assert!(msg.contains("state:modified.body"), "should point at what it can do: {msg}");
+        }
+    }
+
     #[test]
     fn state_selector_without_sets_matches_nothing() {
         let nodes = state_nodes();

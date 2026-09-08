@@ -33,14 +33,21 @@ pub enum StateSet {
     Unmodified,
 }
 
-/// The `modified.<sub>` refinements dbt defines.
+/// The one `modified.<sub>` refinement this comparison implements.
 ///
-/// All of them coarsen to the full modified set here: over-selecting rebuilds
-/// more than asked, which is the safe direction for a CI build. They are still
-/// spelled out so a typo is rejected rather than quietly selecting everything
-/// modified under a name that means nothing.
-const MODIFIED_SUBTYPES: [&str; 6] = [
-    "body",
+/// `body` is exactly what it does: compare node bodies, falling back to file
+/// checksums.
+const SUPPORTED_MODIFIED_SUBTYPES: [&str; 1] = ["body"];
+
+/// dbt's other `modified.<sub>` refinements, rejected by name.
+///
+/// Each names a dimension the manifest comparison here does not look at. They
+/// used to answer with the body comparison, which is not a coarsening but a
+/// narrowing: `state:modified.configs` matched only nodes whose *body* changed,
+/// so a config-only change — the exact thing it was asked about — selected
+/// nothing. A CI build that silently skips the node it was pointed at is worse
+/// than one that refuses the selector.
+const UNSUPPORTED_MODIFIED_SUBTYPES: [&str; 5] = [
     "configs",
     "relation",
     "persisted_descriptions",
@@ -54,12 +61,29 @@ impl StateSet {
             "new" => Ok(Self::New),
             "old" => Ok(Self::Old),
             "unmodified" => Ok(Self::Unmodified),
-            "modified" => Ok(Self::Modified),
+            "modified" => {
+                // dbt's `state:modified` is the union of every dimension; this
+                // one reads bodies and checksums, so it selects a subset. Say
+                // so rather than let a CI build quietly skip a node whose
+                // config, contract or description moved.
+                tracing::warn!(
+                    "state:modified here compares node bodies and file checksums only — a \
+                     node changed solely in its config, relation, contract, description or \
+                     macros will not be selected"
+                );
+                Ok(Self::Modified)
+            }
             _ => match value.strip_prefix("modified.") {
-                Some(sub) if MODIFIED_SUBTYPES.contains(&sub) => Ok(Self::Modified),
+                Some(sub) if SUPPORTED_MODIFIED_SUBTYPES.contains(&sub) => Ok(Self::Modified),
+                Some(sub) if UNSUPPORTED_MODIFIED_SUBTYPES.contains(&sub) => Err(format!(
+                    "state:modified.{sub} — this state comparison reads node bodies and file \
+                     checksums, so it cannot decide {sub} changes; it would match on bodies \
+                     instead and select the wrong nodes. Use state:modified.body, or \
+                     state:modified for the same body comparison across every node"
+                )),
                 _ => Err(format!(
-                    "state:{value} — must be one of new, modified[.<{}>], old, unmodified",
-                    MODIFIED_SUBTYPES.join("|")
+                    "state:{value} — must be one of new, modified[.{}], old, unmodified",
+                    SUPPORTED_MODIFIED_SUBTYPES.join("|")
                 )),
             },
         }

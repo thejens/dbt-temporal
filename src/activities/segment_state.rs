@@ -19,12 +19,22 @@ use crate::types::{LoadSegmentStateInput, RunSegmentState, SaveSegmentStateInput
 
 use super::DbtActivities;
 
-/// Filename used for every segment handover of a run.
+/// Schema version stamped into every checkpoint this worker writes.
 ///
-/// Keyed by invocation id in the store, and each segment overwrites the last —
-/// only the most recent handover is ever read, and keeping one file per run
-/// avoids unbounded litter for a run that continues many times.
-const SEGMENT_STATE_FILENAME: &str = "run_segment_state.json";
+/// Bump it when a successor can no longer make sense of what an older worker
+/// spilled. `0` means "written before checkpoints identified themselves".
+pub const SEGMENT_STATE_SCHEMA_VERSION: u32 = 1;
+
+/// Artifact name for one segment's handover, within the run's own directory.
+///
+/// One file per segment, never overwritten. A single reused name made the
+/// checkpoint mutable: a delayed or retried `save_segment_state` from an
+/// earlier segment would land on top of the live one, and the successor would
+/// resume from a snapshot of the wrong point in the run — silently, because
+/// the payload deserializes perfectly well.
+fn segment_state_filename(segment: u32) -> String {
+    format!("run_segment_state_{segment}.json")
+}
 
 /// Write the state a continuation needs, returning its artifact-store path.
 pub async fn save_segment_state_inner(
@@ -38,16 +48,18 @@ pub async fn save_segment_state_inner(
         )
     })?;
 
+    let filename = segment_state_filename(input.state.segment);
     let json = serde_json::to_vec(&input.state).context("serializing run segment state")?;
     let size = json.len();
     let path = store
-        .store(&input.invocation_id, SEGMENT_STATE_FILENAME, &json)
+        .store(&input.invocation_id, &filename, &json)
         .await
         .map_err(|e| DbtTemporalError::ArtifactStore(e.context("storing run segment state")))?;
 
     info!(
         path = %path,
         bytes = size,
+        segment = input.state.segment,
         results = input.state.all_results.len(),
         "spilled run state for continue-as-new"
     );
@@ -73,10 +85,64 @@ pub async fn load_segment_state_inner(
     let state: RunSegmentState =
         serde_json::from_slice(&bytes).context("parsing run segment state")?;
 
+    if let Some(expected) = input.expected.as_ref() {
+        verify_identity(&state, expected)
+            .with_context(|| format!("refusing run segment state from {}", input.state_ref))?;
+    }
+
     info!(
         state_ref = %input.state_ref,
+        segment = state.segment,
         results = state.all_results.len(),
         "restored run state after continue-as-new"
     );
     Ok(state)
+}
+
+/// Refuse a checkpoint that is not the one this successor was continued from.
+///
+/// A resumable run reads its checkpoint reference from workflow input, so the
+/// reference is not guaranteed to name the state this execution actually left
+/// behind — a retry of an older execution, a reset, or a hand-written input can
+/// all point somewhere else. The payload would deserialize either way, and the
+/// run would carry on from another point in the DAG with no sign anything was
+/// wrong.
+///
+/// `next_level` is checked even for a checkpoint written before checkpoints
+/// carried identity, because that field always existed. The rest is checked
+/// only when the checkpoint claims a schema version that has them.
+fn verify_identity(
+    state: &RunSegmentState,
+    expected: &crate::types::SegmentIdentity,
+) -> Result<(), anyhow::Error> {
+    anyhow::ensure!(
+        state.next_level == expected.next_level,
+        "checkpoint resumes at level {} but this run continued at level {}",
+        state.next_level,
+        expected.next_level
+    );
+
+    if state.schema_version == 0 {
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        state.schema_version <= SEGMENT_STATE_SCHEMA_VERSION,
+        "checkpoint schema version {} is newer than this worker understands ({})",
+        state.schema_version,
+        SEGMENT_STATE_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        state.invocation_id == expected.invocation_id,
+        "checkpoint belongs to run {} but this run is {}",
+        state.invocation_id,
+        expected.invocation_id
+    );
+    anyhow::ensure!(
+        state.segment == expected.segment,
+        "checkpoint was written by segment {} but this run continued from segment {}",
+        state.segment,
+        expected.segment
+    );
+    Ok(())
 }

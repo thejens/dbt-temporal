@@ -144,6 +144,19 @@ pub struct SaveSegmentStateInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadSegmentStateInput {
     pub state_ref: String,
+    /// What the successor's own input says this checkpoint should be, verified
+    /// against what the checkpoint says about itself before its contents are
+    /// trusted. `None` from a worker that predates checkpoint identity.
+    #[serde(default)]
+    pub expected: Option<SegmentIdentity>,
+}
+
+/// The identity a successor requires of the checkpoint it resumes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentIdentity {
+    pub invocation_id: String,
+    pub segment: u32,
+    pub next_level: usize,
 }
 
 /// Everything a run segment hands to its successor.
@@ -153,6 +166,20 @@ pub struct LoadSegmentStateInput {
 /// grow with every node executed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSegmentState {
+    /// Payload schema version. `0` identifies a checkpoint written before
+    /// checkpoints carried their own identity, whose `invocation_id` and
+    /// `segment` are therefore absent rather than wrong — a run already in
+    /// flight when this shipped still resumes.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// The run this checkpoint belongs to.
+    #[serde(default)]
+    pub invocation_id: String,
+    /// The continuation that wrote it. With the segment in the artifact name
+    /// too, a delayed or retried write from an earlier segment lands on its own
+    /// key instead of over the live one.
+    #[serde(default)]
+    pub segment: u32,
     /// The plan, carried forward so a continuation never re-plans. Re-planning
     /// could otherwise pick up a different node set mid-run.
     pub plan: ExecutionPlan,

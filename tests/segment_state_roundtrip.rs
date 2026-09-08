@@ -40,12 +40,35 @@ fn activities(store_dir: &std::path::Path) -> DbtActivities {
     }
 }
 
+fn identity(next_level: usize) -> dbt_temporal::types::SegmentIdentity {
+    dbt_temporal::types::SegmentIdentity {
+        invocation_id: "inv-continued".to_string(),
+        segment: 1,
+        next_level,
+    }
+}
+
+async fn save(activities: &DbtActivities, state: RunSegmentState) -> String {
+    save_segment_state_inner(
+        activities,
+        SaveSegmentStateInput {
+            invocation_id: "inv-continued".to_string(),
+            state,
+        },
+    )
+    .await
+    .expect("spilling state should succeed")
+}
+
 fn sample_state() -> RunSegmentState {
     let mut nodes = BTreeMap::new();
     nodes.insert("model.p.done".to_string(), NodeStatus::Success);
     nodes.insert("model.p.broke".to_string(), NodeStatus::Error);
 
     RunSegmentState {
+        schema_version: 1,
+        invocation_id: "inv-continued".to_string(),
+        segment: 1,
         plan: ExecutionPlan {
             project: "p".to_string(),
             levels: vec![
@@ -107,9 +130,15 @@ async fn segment_state_survives_the_round_trip() {
     .await
     .expect("spilling state should succeed");
 
-    let restored = load_segment_state_inner(&activities, LoadSegmentStateInput { state_ref })
-        .await
-        .expect("restoring state should succeed");
+    let restored = load_segment_state_inner(
+        &activities,
+        LoadSegmentStateInput {
+            state_ref,
+            expected: Some(identity(2)),
+        },
+    )
+    .await
+    .expect("restoring state should succeed");
 
     // The successor resumes from here, so each of these changes what it does.
     assert_eq!(restored.next_level, 2, "resumes after the completed levels");
@@ -156,40 +185,134 @@ async fn spilling_without_an_artifact_store_is_rejected_clearly() {
     assert!(msg.contains("artifact storage"), "should name the cause: {msg}");
 }
 
-/// Each segment overwrites the last, so a run that continues many times leaves
-/// one handover file rather than a growing pile.
+/// Each segment writes its own file. A single reused name made the checkpoint
+/// mutable: a delayed or retried write from an earlier segment would land on
+/// top of the live one, and the successor would resume from the wrong point in
+/// the run with a payload that deserializes perfectly well.
 #[tokio::test]
-async fn repeated_spills_reuse_one_path() {
+async fn each_segment_writes_its_own_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let activities = activities(dir.path());
 
     let mut first_state = sample_state();
+    first_state.segment = 1;
     first_state.next_level = 1;
-    let first = save_segment_state_inner(
+    let first = save(&activities, first_state).await;
+
+    let mut second_state = sample_state();
+    second_state.segment = 2;
+    let second = save(&activities, second_state).await;
+
+    assert_ne!(first, second, "a later segment must not overwrite an earlier one");
+
+    // Re-spilling segment 1 late must not disturb what segment 2 wrote.
+    let mut replay = sample_state();
+    replay.segment = 1;
+    replay.next_level = 1;
+    assert_eq!(save(&activities, replay).await, first);
+
+    let mut expected = identity(2);
+    expected.segment = 2;
+    let restored = load_segment_state_inner(
         &activities,
-        SaveSegmentStateInput {
-            invocation_id: "inv-continued".to_string(),
-            state: first_state,
+        LoadSegmentStateInput {
+            state_ref: second,
+            expected: Some(expected),
         },
     )
     .await
     .unwrap();
+    assert_eq!(restored.next_level, 2, "segment 2's checkpoint is intact");
+}
 
-    let second = save_segment_state_inner(
+/// A resumable run reads its checkpoint reference from workflow input, so the
+/// reference is not guaranteed to name the state this execution left behind. A
+/// mismatched checkpoint deserializes fine and would silently resume the run
+/// from another point in its DAG.
+#[tokio::test]
+async fn a_checkpoint_from_another_run_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let activities = activities(dir.path());
+    let state_ref = save(&activities, sample_state()).await;
+
+    let mut expected = identity(2);
+    expected.invocation_id = "inv-somebody-else".to_string();
+
+    let err = load_segment_state_inner(
         &activities,
-        SaveSegmentStateInput {
-            invocation_id: "inv-continued".to_string(),
-            state: sample_state(),
+        LoadSegmentStateInput {
+            state_ref,
+            expected: Some(expected),
         },
     )
     .await
-    .unwrap();
+    .expect_err("a checkpoint from another run must be refused");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("belongs to run"), "should name the mismatch: {msg}");
+}
 
-    assert_eq!(first, second, "same run reuses one handover path");
+#[tokio::test]
+async fn a_checkpoint_from_another_segment_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let activities = activities(dir.path());
+    let state_ref = save(&activities, sample_state()).await;
 
-    let restored =
-        load_segment_state_inner(&activities, LoadSegmentStateInput { state_ref: second })
-            .await
-            .unwrap();
-    assert_eq!(restored.next_level, 2, "the latest spill wins");
+    let mut expected = identity(2);
+    expected.segment = 7;
+
+    let err = load_segment_state_inner(
+        &activities,
+        LoadSegmentStateInput {
+            state_ref,
+            expected: Some(expected),
+        },
+    )
+    .await
+    .expect_err("a checkpoint from another segment must be refused");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("segment"), "should name the mismatch: {msg}");
+}
+
+/// The cursor check works on a checkpoint written before checkpoints carried
+/// identity at all, because `next_level` always existed.
+#[tokio::test]
+async fn a_checkpoint_resuming_at_the_wrong_level_is_refused_even_without_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let activities = activities(dir.path());
+
+    let mut legacy = sample_state();
+    legacy.schema_version = 0;
+    legacy.invocation_id = String::new();
+    legacy.segment = 0;
+    let state_ref = save(&activities, legacy).await;
+
+    let mut expected = identity(9);
+    expected.invocation_id = "anything".to_string();
+
+    let err = load_segment_state_inner(
+        &activities,
+        LoadSegmentStateInput {
+            state_ref: state_ref.clone(),
+            expected: Some(expected),
+        },
+    )
+    .await
+    .expect_err("a checkpoint at the wrong level must be refused");
+    assert!(format!("{err:#}").contains("level"), "{err:#}");
+
+    // …and with the cursor agreeing, a run already in flight when identity
+    // shipped still resumes, rather than failing on fields it never wrote.
+    let mut expected = identity(2);
+    expected.invocation_id = "anything".to_string();
+    expected.segment = 42;
+    let restored = load_segment_state_inner(
+        &activities,
+        LoadSegmentStateInput {
+            state_ref,
+            expected: Some(expected),
+        },
+    )
+    .await
+    .expect("a pre-identity checkpoint must still load");
+    assert_eq!(restored.next_level, 2);
 }

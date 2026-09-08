@@ -312,7 +312,7 @@ async fn load_resume_state(
     let Some(resume) = input.resume_from.as_ref() else {
         return Ok(None);
     };
-    let state = load_segment_state(ctx, &resume.state_ref).await?;
+    let state = load_segment_state(ctx, resume).await?;
     tracing::info!(
         segment = resume.segment,
         next_level = resume.next_level,
@@ -360,7 +360,7 @@ async fn continue_run_as_new(
     next_level: usize,
 ) -> WorkflowResult<DbtRunOutput> {
     let segment = next_segment_number(input.resume_from.as_ref());
-    let state = build_segment_state(plan, levels, effective_env, hook_errors, next_level);
+    let state = build_segment_state(plan, levels, effective_env, hook_errors, next_level, segment);
 
     let state_ref = save_segment_state(ctx, &plan.invocation_id, state).await?;
 
@@ -423,8 +423,14 @@ fn build_segment_state(
     effective_env: &BTreeMap<String, String>,
     hook_errors: &[crate::types::HookError],
     next_level: usize,
+    segment: u32,
 ) -> RunSegmentState {
     RunSegmentState {
+        // Stamped so the successor can tell this checkpoint apart from another
+        // segment's, rather than trusting whatever its `state_ref` names.
+        schema_version: crate::activities::segment_state::SEGMENT_STATE_SCHEMA_VERSION,
+        invocation_id: plan.invocation_id.clone(),
+        segment,
         plan: plan.clone(),
         all_results: levels.all_results.clone(),
         log_lines: levels.log_lines.clone(),
@@ -567,7 +573,7 @@ mod continuation_tests {
             error: "flaky".to_string(),
         }];
 
-        let state = build_segment_state(&plan(), &outcome(), &env, &hook_errors, 1);
+        let state = build_segment_state(&plan(), &outcome(), &env, &hook_errors, 1, 1);
 
         assert_eq!(state.next_level, 1);
         assert_eq!(state.plan.levels.len(), 2, "plan carried, not re-planned");
@@ -594,7 +600,7 @@ mod continuation_tests {
     #[test]
     fn a_resumed_run_picks_up_where_its_predecessor_stopped() {
         let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
-        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1);
+        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1);
 
         let point = build_resume_point(&plan(), Some(state), true);
 

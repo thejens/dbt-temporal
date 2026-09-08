@@ -186,14 +186,24 @@ pub async fn save_segment_state(
 }
 
 /// Restore the state the previous segment spilled.
+///
+/// The whole resume record travels, not just its reference: the activity
+/// refuses a checkpoint whose identity disagrees with it, so a stale or
+/// hand-written `state_ref` fails loudly instead of resuming the run from
+/// another point in its DAG.
 pub async fn load_segment_state(
     ctx: &WorkflowContext<DbtRunWorkflow>,
-    state_ref: &str,
+    resume: &crate::types::RunResumeState,
 ) -> Result<RunSegmentState, WorkflowTermination> {
     ctx.execute_activity(
         DbtActivities::load_segment_state,
         LoadSegmentStateInput {
-            state_ref: state_ref.to_string(),
+            state_ref: resume.state_ref.clone(),
+            expected: Some(crate::types::SegmentIdentity {
+                invocation_id: resume.invocation_id.clone(),
+                segment: resume.segment,
+                next_level: resume.next_level,
+            }),
         },
         ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
     )

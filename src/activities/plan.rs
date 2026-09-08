@@ -18,8 +18,6 @@ use super::execute_node::freshness;
 use super::indirect::{IndirectSelection, expand_indirect_selection};
 use super::selectors::apply_selectors;
 
-const MANIFEST_INLINE_THRESHOLD: usize = 3 * 1024 * 1024; // 3 MB
-
 /// Collect all node IDs that match the command (run vs build), applying the
 /// exclusions that happen before selectors.
 ///
@@ -248,6 +246,31 @@ fn artifact_io_error(e: anyhow::Error) -> anyhow::Error {
     crate::error::DbtTemporalError::ArtifactStore(e).into()
 }
 
+/// Store the run's manifest and return its artifact-store reference.
+///
+/// The manifest never travels inline. `ExecutionPlan` is an activity result, so
+/// anything carried in it becomes a Temporal history payload, and a manifest
+/// routinely exceeds the 2 MB payload limit on its own — before the rest of the
+/// plan, JSON string escaping, and every later copy of the plan are added.
+///
+/// A missing store is an error rather than a fallback: the end-of-run
+/// `store_artifacts` activity needs the same store, so a run configured to
+/// write artifacts without one cannot finish anyway. Failing here surfaces it
+/// before a single node executes.
+async fn store_manifest_json(
+    artifact_store: Option<&std::sync::Arc<dyn crate::artifact_store::ArtifactStore>>,
+    invocation_id: &str,
+    manifest_json: &str,
+) -> Result<String, anyhow::Error> {
+    let store = artifact_store.ok_or_else(|| {
+        anyhow::anyhow!("ArtifactStore not configured but write_artifacts is enabled")
+    })?;
+    store
+        .store(invocation_id, "manifest.json", manifest_json.as_bytes())
+        .await
+        .map_err(|e| artifact_io_error(e.context("storing manifest.json")))
+}
+
 /// Plan activity inner logic — called from DbtActivities::plan_project.
 #[allow(clippy::too_many_lines)]
 pub async fn plan_project_inner(
@@ -413,28 +436,19 @@ pub async fn plan_project_inner(
 
     let write_artifacts = activities.write_artifacts.0;
 
-    // Build manifest only when artifact writing is enabled — the manifest can be
-    // hundreds of KB (especially with adapter macro packages) and would otherwise
-    // bloat Temporal workflow history for every run.
-    let (inline_manifest, manifest_ref) = if write_artifacts {
+    // Build the manifest only when artifact writing is enabled — it can run to
+    // hundreds of KB (especially with adapter macro packages) and nothing else
+    // in the run needs it.
+    let manifest_ref = if write_artifacts {
         let manifest =
             dbt_schemas::schemas::manifest::build_manifest(&invocation_id, &state.resolver_state);
         let manifest_json = serde_json::to_string(&manifest)?;
-
-        if manifest_json.len() < MANIFEST_INLINE_THRESHOLD {
-            (Some(manifest_json), None)
-        } else {
-            let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("ArtifactStore not configured but write_artifacts is enabled")
-            })?;
-            let path = artifact_store
-                .store(&invocation_id, "manifest.json", manifest_json.as_bytes())
-                .await
-                .map_err(|e| artifact_io_error(e.context("storing manifest.json")))?;
-            (None, Some(path))
-        }
+        Some(
+            store_manifest_json(activities.artifact_store.as_ref(), &invocation_id, &manifest_json)
+                .await?,
+        )
     } else {
-        (None, None)
+        None
     };
 
     let search_attributes = build_search_attributes(
@@ -457,7 +471,7 @@ pub async fn plan_project_inner(
         project: state.project_name.clone(),
         levels,
         nodes,
-        manifest_json: inline_manifest,
+        manifest_json: None,
         manifest_ref,
         invocation_id,
         search_attributes,
@@ -1342,5 +1356,37 @@ mod tests {
             build_node_info(&nodes, "test.shop.not_null_id").expect("test is in the registry");
         assert_eq!(info.resource_type, "NODE_TYPE_TEST");
         assert_eq!(info.on_error, None);
+    }
+
+    // --- store_manifest_json ---
+
+    #[tokio::test]
+    async fn store_manifest_json_writes_to_the_store_and_returns_its_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: std::sync::Arc<dyn crate::artifact_store::ArtifactStore> = std::sync::Arc::new(
+            crate::artifact_store::LocalArtifactStore::new(dir.path().to_path_buf()),
+        );
+
+        let manifest = r#"{"nodes":{}}"#;
+        let path = store_manifest_json(Some(&store), "inv-1", manifest)
+            .await
+            .expect("storing the manifest should succeed");
+
+        assert!(path.ends_with("manifest.json"), "{path}");
+        assert_eq!(std::fs::read_to_string(&path).expect("stored file"), manifest);
+    }
+
+    /// Without a store there is nowhere to put the manifest, and the run could
+    /// not write its artifacts at the end either — so planning fails now rather
+    /// than after every node has executed.
+    #[tokio::test]
+    async fn store_manifest_json_without_a_store_names_the_missing_configuration() {
+        let err = store_manifest_json(None, "inv-1", "{}")
+            .await
+            .expect_err("a missing store must fail");
+        assert!(
+            err.to_string().contains("ArtifactStore not configured"),
+            "unexpected error: {err:#}"
+        );
     }
 }

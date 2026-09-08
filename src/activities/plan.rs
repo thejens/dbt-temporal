@@ -321,45 +321,42 @@ pub async fn plan_project_inner(
         None
     };
 
-    // Apply --select/--exclude filters.
+    // Apply --select/--exclude, pulling in the tests hanging off what --select
+    // matched in between. Without that expansion `--select my_model` runs the
+    // model and silently skips every test on it; running it before --exclude
+    // is what keeps an explicitly excluded test excluded.
+    //
+    // `apply_selectors` returns early when neither filter is set, so the
+    // expansion never runs for an unfiltered `build` — which already contains
+    // every test.
+    //
+    // The mode is parsed up front so an unrecognised value is rejected before
+    // any graph work, and on every run rather than only on filtered ones.
+    let indirect_mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
+    let nodes = &state.resolver_state.nodes;
     let selected_ids = apply_selectors(
         selected_ids,
-        &state.resolver_state.nodes,
+        nodes,
         input.select.as_deref(),
         input.exclude.as_deref(),
         state_selector.as_ref(),
+        &|ids| {
+            let before = ids.len();
+            let expanded = expand_indirect_selection(ids, nodes, &command_eligible, indirect_mode);
+            if expanded.len() > before {
+                info!(
+                    added = expanded.len() - before,
+                    mode = ?indirect_mode,
+                    "indirect selection added tests for the selected nodes"
+                );
+            }
+            expanded
+        },
     )?;
 
     if selected_ids.is_empty() {
         anyhow::bail!("no nodes matched after applying selectors");
     }
-
-    // Pull in the tests hanging off what the selector matched. dbt does this
-    // after selection, not as part of it — without it `--select my_model` runs
-    // the model and silently skips every test on it.
-    //
-    // Only applies when a selector narrowed the run: an unfiltered `build`
-    // already contains every test.
-    let selected_ids = if input.select.is_some() || input.exclude.is_some() {
-        let mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
-        let before = selected_ids.len();
-        let expanded = expand_indirect_selection(
-            selected_ids,
-            &state.resolver_state.nodes,
-            &command_eligible,
-            mode,
-        );
-        if expanded.len() > before {
-            info!(
-                added = expanded.len() - before,
-                mode = ?mode,
-                "indirect selection added tests for the selected nodes"
-            );
-        }
-        expanded
-    } else {
-        selected_ids
-    };
 
     // Retry-from-failure: narrow the selection to nodes that did not succeed
     // in a previous run. Skipped nodes are included because they were blocked

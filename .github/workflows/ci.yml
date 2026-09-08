@@ -29,16 +29,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: make test
-
+  # No standalone test job: `make coverage` runs the same
+  # `cargo test --workspace -- --test-threads=1` under llvm-cov instrumentation
+  # and only then checks the floor, so a failing test already fails this job.
+  # Running both duplicated a full compile and test cycle per PR for a second
+  # copy of the same signal.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

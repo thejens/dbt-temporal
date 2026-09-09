@@ -81,6 +81,12 @@ pub struct WorkerState {
     /// cannot change while the worker lives, and every microbatch node activity
     /// otherwise rebuilt the same map by scanning every model in the project.
     pub event_time_columns: Arc<BTreeMap<String, String>>,
+    /// Target schemas this worker has already created, per run.
+    ///
+    /// dbt creates a node's schema before materializing it; without this, a
+    /// project with three hundred models in one schema issues three hundred
+    /// identical `CREATE SCHEMA IF NOT EXISTS` statements.
+    pub created_schemas: crate::worker::schemas::CreatedSchemas,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,

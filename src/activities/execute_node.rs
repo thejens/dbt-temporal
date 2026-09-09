@@ -279,6 +279,69 @@ fn select_materialization_name(rt: NodeType, base_materialized: &str) -> String 
     }
 }
 
+/// Create the node's target schema, once per run rather than once per node.
+///
+/// A project with three hundred models in one schema used to issue three
+/// hundred identical `CREATE SCHEMA IF NOT EXISTS` statements and the metadata
+/// round trips behind them. The claim is keyed by run, not by worker: a schema
+/// dropped between runs must be created again.
+///
+/// Failures are still not fatal — a run against an existing schema on a role
+/// without CREATE is a legitimate setup, and the materialization gives a much
+/// better error if the schema really is absent. But a *retryable* failure here
+/// (a dropped connection, a throttle) is propagated: swallowing it meant the
+/// node went on to fail with a confusing materialization error instead of
+/// being retried.
+fn ensure_target_schema(
+    state: &crate::worker_state::WorkerState,
+    invocation_id: &str,
+    base: &dbt_schemas::schemas::nodes::NodeBaseAttributes,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    node_context: &BTreeMap<String, minijinja::Value>,
+) -> Result<(), DbtTemporalError> {
+    // The relation `this` resolves to, which is what `create_schema` reads —
+    // per-workflow overrides have already patched it into the context.
+    let (database, schema) = node_context
+        .get("this")
+        .and_then(|this| {
+            let database = this.get_attr("database").ok()?.as_str()?.to_string();
+            let schema = this.get_attr("schema").ok()?.as_str()?.to_string();
+            Some((database, schema))
+        })
+        .unwrap_or_else(|| (base.database.clone(), base.schema.clone()));
+
+    if !state
+        .created_schemas
+        .claim(invocation_id, base.adapter, &database, &schema)
+    {
+        return Ok(());
+    }
+
+    let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", node_context, &[]) else {
+        return Ok(());
+    };
+
+    // Not created after all — let the next node needing it try again.
+    state
+        .created_schemas
+        .release(invocation_id, base.adapter, &database, &schema);
+
+    let classified = crate::error::classify_adapter_execution_error(
+        &*e,
+        &format!("creating schema {database}.{schema}"),
+    );
+    if classified.is_retryable() {
+        return Err(classified);
+    }
+    tracing::warn!(
+        database = %database,
+        schema = %schema,
+        error = %classified,
+        "create_schema failed (non-fatal)"
+    );
+    Ok(())
+}
+
 /// True if the node is one we expect `create_schema(this)` to be called for
 /// before materialization. Tests and operations don't get a schema-create
 /// pass — they only read. Unit tests qualify because the `unit`
@@ -947,10 +1010,8 @@ pub async fn execute_node_inner(
     // rows into the audit schema — which may not exist yet.
     let needs_schema = is_create_schema_eligible(rt)
         || (rt == NodeType::Test && test_stores_failures(&state.resolver_state.nodes, unique_id));
-    if needs_schema
-        && let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", &node_context, &[])
-    {
-        tracing::warn!(node = %unique_id, error = %e, "create_schema failed (non-fatal)");
+    if needs_schema {
+        ensure_target_schema(state, &input.invocation_id, base, jinja_env, &node_context)?;
     }
 
     // Resolve the materialization template using dbt-fusion's MaterializationResolver.

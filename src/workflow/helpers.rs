@@ -528,6 +528,25 @@ pub fn format_running_details(level_idx: usize, total_levels: usize, running: &[
     format!("level {}/{}: {}", level_idx + 1, total_levels, running.join(", "))
 }
 
+/// Patch id for the bounded memo cadence.
+///
+/// Memo upserts are workflow commands, so changing which levels write one
+/// changes the command sequence. A run whose history was recorded before this
+/// keeps the old cadence and replays cleanly; runs started after it get the
+/// bounded one.
+pub const MEMO_CADENCE_PATCH: &str = "bounded-memo-cadence";
+
+/// Decide whether to publish the memo *before* scheduling a level.
+///
+/// The first level always, so a run shows something as soon as it starts, and
+/// then on the same periodic cadence as the end-of-level flush. In between,
+/// this write only moves one level's nodes from Pending to Running — the
+/// level's actual results are published by the end-of-level flush, and on a
+/// deep DAG the announcement was a full memo snapshot per level for that.
+pub const fn should_announce_level(level_idx: usize, periodic_every_n: usize) -> bool {
+    level_idx == 0 || level_idx.is_multiple_of(periodic_every_n)
+}
+
 /// Decide whether to flush the memo at the end of a level.
 ///
 /// Always flushes on a level that just had a failure (operators want failure
@@ -1466,6 +1485,37 @@ mod tests {
     #[test]
     fn format_running_details_handles_empty_running() {
         assert_eq!(format_running_details(0, 1, &[]), "level 1/1: ");
+    }
+
+    // --- should_announce_level ---
+
+    /// A run has to show something as soon as it starts.
+    #[test]
+    fn the_first_level_always_announces_itself() {
+        assert!(should_announce_level(0, 5));
+    }
+
+    /// On a deep DAG the announcement was a full memo snapshot per level, for a
+    /// change that only moves one level's nodes from Pending to Running.
+    #[test]
+    fn intermediate_levels_announce_on_the_periodic_cadence_only() {
+        assert!(!should_announce_level(1, 5));
+        assert!(!should_announce_level(4, 5));
+        assert!(should_announce_level(5, 5));
+        assert!(!should_announce_level(6, 5));
+        assert!(should_announce_level(10, 5));
+    }
+
+    /// The two writes around a level share one cadence, so a level that
+    /// announces itself is not also flushed on the way out.
+    #[test]
+    fn the_two_cadences_do_not_double_write_the_same_level() {
+        let every = 5;
+        for level in 0..20_usize {
+            let announced = should_announce_level(level, every);
+            let flushed = should_flush_memo(level, 100, false, every);
+            assert!(!(announced && flushed), "level {level} would write the memo twice");
+        }
     }
 
     // --- should_flush_memo ---

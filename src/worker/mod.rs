@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod engines;
 pub mod profile;
 pub mod project_checks;
+pub mod schemas;
 pub mod temporal;
 
 use std::collections::BTreeMap;
@@ -582,6 +583,7 @@ async fn initialize_project_inner(
     );
 
     Ok(WorkerState {
+        created_schemas: schemas::CreatedSchemas::default(),
         adapter_settings,
         event_time_columns,
         project_name,

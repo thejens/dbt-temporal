@@ -350,17 +350,37 @@ async fn injected_permanent_error_does_not_retry() {
     );
 }
 
-/// A table model creates its target schema before materializing. A transient
-/// failure on that first adapter call is logged and non-fatal — the
-/// materialization proceeds and the node still succeeds (partial resilience
-/// within one activity, independent of Temporal's activity-level retry).
+/// A table model creates its target schema before materializing. A *transient*
+/// failure there means the warehouse is unreachable, and the materialization
+/// behind it is going to fail too — so it is reported as retryable and Temporal
+/// retries the node, rather than being swallowed and resurfacing as a
+/// confusing materialization error.
 #[tokio::test]
-async fn create_schema_failure_is_non_fatal() {
+async fn a_transient_create_schema_failure_is_retryable() {
     let harness =
         Harness::build(&[("t", "{{ config(materialized='table') }}\nselect 1 as id")]).await;
     harness
         .faults()
         .fail_next_executes(1, &AdapterFault::connection_failure());
+
+    let err = harness.run_err("t").await;
+    assert!(
+        err.is_retryable() && matches!(err, DbtTemporalError::Adapter(_)),
+        "a dropped connection during create_schema must retry, got: {err:?}"
+    );
+}
+
+/// A *permanent* failure stays non-fatal. Running against a schema that already
+/// exists on a role without CREATE is a legitimate setup, and the
+/// materialization gives a far better error if the schema really is absent.
+#[tokio::test]
+async fn a_permanent_create_schema_failure_is_non_fatal() {
+    let harness =
+        Harness::build(&[("t", "{{ config(materialized='table') }}\nselect 1 as id")]).await;
+    harness
+        .faults()
+        .fail_next_executes(1, &AdapterFault::permanent_undefined_table());
+
     harness.run_ok("t").await;
 }
 

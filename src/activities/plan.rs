@@ -246,6 +246,43 @@ fn artifact_io_error(e: anyhow::Error) -> anyhow::Error {
     crate::error::DbtTemporalError::ArtifactStore(e).into()
 }
 
+/// Check the microbatch window before any node runs.
+///
+/// The window is two strings on the workflow input, and every node activity
+/// used to parse them for itself — so a typo, a reversed pair, or only one of
+/// the two was discovered once per node, or not at all: with just one of them
+/// set, the windowing simply did not activate and the run quietly rebuilt every
+/// batch of every microbatch model.
+fn validate_microbatch_window(input: &DbtRunInput) -> Result<(), anyhow::Error> {
+    let (start, end) = match (&input.event_time_start, &input.event_time_end) {
+        (None, None) => return Ok(()),
+        (Some(_), None) => {
+            anyhow::bail!(
+                "event_time_start is set without event_time_end — a microbatch window needs both, and one alone silently disables windowing"
+            )
+        }
+        (None, Some(_)) => {
+            anyhow::bail!(
+                "event_time_end is set without event_time_start — a microbatch window needs both, and one alone silently disables windowing"
+            )
+        }
+        (Some(start), Some(end)) => (start, end),
+    };
+
+    let parsed_start: chrono::DateTime<chrono::Utc> = start
+        .parse()
+        .with_context(|| format!("parsing event_time_start: {start}"))?;
+    let parsed_end: chrono::DateTime<chrono::Utc> = end
+        .parse()
+        .with_context(|| format!("parsing event_time_end: {end}"))?;
+
+    anyhow::ensure!(
+        parsed_start < parsed_end,
+        "microbatch window starts at or after it ends ({start} .. {end}); no batch can fall inside it"
+    );
+    Ok(())
+}
+
 /// Store the run's manifest and return its artifact-store reference.
 ///
 /// The manifest never travels inline. `ExecutionPlan` is an activity result, so
@@ -285,6 +322,8 @@ pub async fn plan_project_inner(
         .workflow_run_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    validate_microbatch_window(&input)?;
 
     let selected_ids = select_command_node_ids(state, &input)?;
     // The command's own node-type filter bounds what indirect selection may
@@ -1353,6 +1392,74 @@ mod tests {
             build_node_info(&nodes, "test.shop.not_null_id").expect("test is in the registry");
         assert_eq!(info.resource_type, "NODE_TYPE_TEST");
         assert_eq!(info.on_error, None);
+    }
+
+    // --- validate_microbatch_window ---
+
+    fn window_input(start: Option<&str>, end: Option<&str>) -> DbtRunInput {
+        serde_json::from_value(serde_json::json!({
+            "command": "run",
+            "event_time_start": start,
+            "event_time_end": end,
+        }))
+        .expect("valid input")
+    }
+
+    #[test]
+    fn a_run_without_a_microbatch_window_is_fine() {
+        assert!(validate_microbatch_window(&window_input(None, None)).is_ok());
+    }
+
+    /// Half a window used to activate nothing: the run rebuilt every batch of
+    /// every microbatch model and reported success.
+    #[test]
+    fn half_a_microbatch_window_is_rejected() {
+        for (start, end, missing) in [
+            (Some("2026-01-01T00:00:00Z"), None, "event_time_end"),
+            (None, Some("2026-01-02T00:00:00Z"), "event_time_start"),
+        ] {
+            let err = validate_microbatch_window(&window_input(start, end))
+                .expect_err("half a window must be refused");
+            assert!(err.to_string().contains(missing), "should name what is missing: {err}");
+        }
+    }
+
+    #[test]
+    fn a_microbatch_window_that_does_not_move_forward_is_rejected() {
+        let err = validate_microbatch_window(&window_input(
+            Some("2026-01-02T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+        ))
+        .expect_err("a backwards window must be refused");
+        assert!(err.to_string().contains("starts at or after it ends"), "{err}");
+
+        let err = validate_microbatch_window(&window_input(
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+        ))
+        .expect_err("an empty window must be refused");
+        assert!(err.to_string().contains("starts at or after it ends"), "{err}");
+    }
+
+    #[test]
+    fn an_unparseable_microbatch_bound_names_itself() {
+        let err = validate_microbatch_window(&window_input(
+            Some("yesterday"),
+            Some("2026-01-02T00:00:00Z"),
+        ))
+        .expect_err("a non-timestamp must be refused");
+        assert!(format!("{err:#}").contains("event_time_start"), "{err:#}");
+    }
+
+    #[test]
+    fn a_well_formed_microbatch_window_is_accepted() {
+        assert!(
+            validate_microbatch_window(&window_input(
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-02T00:00:00Z"),
+            ))
+            .is_ok()
+        );
     }
 
     // --- store_manifest_json ---

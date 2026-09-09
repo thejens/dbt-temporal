@@ -593,26 +593,12 @@ pub async fn execute_node_inner(
             .parse()
             .with_context(|| format!("parsing event_time_end: {end_str}"))?;
 
-        let event_time_mapping = Arc::new(
-            state
-                .resolver_state
-                .nodes
-                .models
-                .iter()
-                .filter_map(|(uid, model)| {
-                    model
-                        .deprecated_config
-                        .event_time
-                        .clone()
-                        .map(|col| (uid.clone(), col))
-                })
-                .collect::<BTreeMap<_, _>>(),
-        );
-
+        // Built once at startup rather than rescanned per node — the project's
+        // event-time columns cannot change while the worker lives.
         let microbatch_ctx = dbt_jinja_utils::phases::MicrobatchRefContext::new(
             event_time_start,
             event_time_end,
-            Arc::clone(&event_time_mapping),
+            Arc::clone(&state.event_time_columns),
         );
         let mb_ref = dbt_jinja_utils::phases::RefFunction::new_with_microbatch_context(
             Arc::clone(&state.resolver_state.node_resolver),

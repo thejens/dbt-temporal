@@ -75,6 +75,12 @@ pub struct WorkerState {
     /// with, so a per-workflow rebuild produces engines configured the same way
     /// rather than falling back to adapter defaults.
     pub adapter_settings: crate::worker::adapter::AdapterSettings,
+    /// Every model's `event_time` column, keyed by unique id.
+    ///
+    /// Built once at startup: it is derived from the resolved project, which
+    /// cannot change while the worker lives, and every microbatch node activity
+    /// otherwise rebuilt the same map by scanning every model in the project.
+    pub event_time_columns: Arc<BTreeMap<String, String>>,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,

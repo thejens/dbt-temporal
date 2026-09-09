@@ -2,6 +2,7 @@ pub(super) mod freshness;
 mod raw_sql;
 mod schema_patch;
 mod schema_patcher;
+mod sql_rewrite;
 mod unit_test;
 mod yml_to_value;
 
@@ -13,9 +14,10 @@ use dbt_schemas::schemas::telemetry::NodeType;
 use raw_sql::resolve_raw_sql;
 use schema_patch::{
     apply_patched_relation, apply_schema_map_to_context, build_database_rewrite_map,
-    build_schema_rewrite_map, compute_patched_relation, patch_sql_with_schema_map,
+    build_default_schema_rewrite_map, build_schema_rewrite_map, compute_patched_relation,
 };
 use schema_patcher::has_env_var_in_config_schema_or_database;
+use sql_rewrite::{RelationRewrite, rewrite_relations};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use tracing::{info, warn};
@@ -286,26 +288,6 @@ impl ActivityWorkspace {
             },
         })
     }
-}
-
-/// Patch refs in compiled SQL when a per-workflow env override changed the
-/// profile schema. Replaces quoted occurrences of the worker-startup default
-/// schema with the workflow's schema; otherwise returns the input unchanged.
-///
-/// `env_schema = None` (no override active) and `env_schema == default_schema`
-/// (override matches startup) are both no-ops.
-fn patch_compiled_schema(
-    compiled: String,
-    env_schema: Option<&str>,
-    default_schema: &str,
-) -> String {
-    let Some(wf_schema) = env_schema else {
-        return compiled;
-    };
-    if wf_schema == default_schema {
-        return compiled;
-    }
-    compiled.replace(&format!("\"{default_schema}\""), &format!("\"{wf_schema}\""))
 }
 
 /// Pick the materialization name to dispatch on. Seeds are forced to "seed"
@@ -852,7 +834,7 @@ fn execute_node_body(
     //
     // Default macro path: reconstruct the schema using dbt's default
     // `<target_schema>[_<custom>]` pattern from the profile-rebuilt target.schema.
-    let schema_rewrite_map = if state.has_custom_schema_name_macro && !input.env.is_empty() {
+    let schemas = if state.has_custom_schema_name_macro && !input.env.is_empty() {
         let schema_map = build_schema_rewrite_map(state, jinja_env).map_err(|e| {
             DbtTemporalError::Compilation(format!("building schema rewrite map: {e:#}"))
         })?;
@@ -864,7 +846,7 @@ fn execute_node_body(
             &mut node_context,
         )
         .map_err(|e| DbtTemporalError::Compilation(format!("{e:#}")))?;
-        Some(schema_map)
+        schema_map
     } else {
         if let Some(patch) = compute_patched_relation(
             state,
@@ -875,7 +857,16 @@ fn execute_node_body(
         ) {
             apply_patched_relation(base, &patch, &mut node_context);
         }
-        None
+        build_default_schema_rewrite_map(state, env_schema.as_deref(), env_database.as_deref())
+    };
+    // The node's own relation is patched in its Jinja context above; this
+    // rewrites the relations already baked into the compiled text — the
+    // upstream `ref()`s the startup manifest resolved against the startup
+    // schema, plus this node's own name where the materialization interpolates
+    // the compiled SQL rather than `this`.
+    let relation_rewrite = RelationRewrite {
+        schemas,
+        databases: build_database_rewrite_map(state, env_database.as_deref()),
     };
 
     // Resolve raw SQL: build_run_node_context does NOT populate the top-level
@@ -938,7 +929,7 @@ fn execute_node_body(
             &state.io_args.in_dir,
             &ephemeral_dir,
         )?;
-        let sql = patch_compiled_schema(sql, env_schema.as_deref(), &state.default_schema);
+        let sql = rewrite_relations(sql, &relation_rewrite);
         // minijinja Values share their string via Arc — clone the Value, not the SQL.
         let sql_value = minijinja::Value::from(sql);
         node_context.insert("sql".to_owned(), sql_value.clone());
@@ -990,25 +981,9 @@ fn execute_node_body(
                     ephemeral_dir: &ephemeral_dir,
                 },
             )?;
-            // Patch ref() schemas in compiled SQL so downstream refs resolve to the
-            // correct per-workflow schemas.
-            //
-            // Custom macro path: use the schema rewrite map (built above from
-            // generate_schema_name re-execution). Patches every distinct schema in
-            // the project, covering both the current model and all its dependencies.
-            // Handles double-quoted ("schema") and backtick-quoted (`schema`) identifiers
-            // so BigQuery and standard SQL adapters are both covered.
-            //
-            // Default macro path: replace the startup default_schema token with the
-            // per-workflow schema (the existing single-schema substitution).
-            let compiled = if let Some(ref schema_map) = schema_rewrite_map {
-                let db_map = build_database_rewrite_map(state, env_database.as_deref());
-                let mut combined = schema_map.clone();
-                combined.extend(db_map);
-                patch_sql_with_schema_map(compiled, &combined)
-            } else {
-                patch_compiled_schema(compiled, env_schema.as_deref(), &state.default_schema)
-            };
+            // Resolve the relations the startup manifest baked into this text —
+            // the upstream `ref()`s that still name startup schemas.
+            let compiled = rewrite_relations(compiled, &relation_rewrite);
 
             // Write compiled SQL to the temp dir so model.compiled_code / model.compiled_sql
             // resolve correctly when accessed by the materialization template.
@@ -1503,41 +1478,6 @@ mod tests {
         response.insert("message".to_string(), serde_json::json!(42));
         let msg = build_success_message(&response, "table");
         assert_eq!(msg.as_deref(), Some("table"));
-    }
-
-    // --- patch_compiled_schema ---
-
-    #[test]
-    fn patch_compiled_schema_replaces_quoted_default_with_workflow_schema() {
-        let sql = "select * from \"raw\".\"orders\" join \"raw\".\"customers\" using (id)";
-        let out = patch_compiled_schema(sql.to_string(), Some("workflow_42"), "raw");
-        assert_eq!(
-            out,
-            "select * from \"workflow_42\".\"orders\" join \"workflow_42\".\"customers\" using (id)"
-        );
-    }
-
-    #[test]
-    fn patch_compiled_schema_no_op_when_env_schema_absent() {
-        let sql = "select 1 from \"raw\".\"x\"";
-        let out = patch_compiled_schema(sql.to_string(), None, "raw");
-        assert_eq!(out, sql);
-    }
-
-    #[test]
-    fn patch_compiled_schema_no_op_when_workflow_matches_default() {
-        let sql = "select 1 from \"raw\".\"x\"";
-        let out = patch_compiled_schema(sql.to_string(), Some("raw"), "raw");
-        assert_eq!(out, sql);
-    }
-
-    #[test]
-    fn patch_compiled_schema_only_replaces_quoted_occurrences() {
-        // An unquoted match is left alone: only `"raw"` (with quotes) matters.
-        // Bare `raw.foo` is something else (e.g. a column reference).
-        let sql = "with raw as (select 1) select \"raw\".\"x\" from raw";
-        let out = patch_compiled_schema(sql.to_string(), Some("env_a"), "raw");
-        assert_eq!(out, "with raw as (select 1) select \"env_a\".\"x\" from raw");
     }
 
     // --- select_materialization_name ---

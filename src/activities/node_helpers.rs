@@ -516,7 +516,7 @@ pub fn extract_adapter_response(result_store: &ResultStore) -> BTreeMap<String, 
 pub(super) fn patch_target_global(
     jinja_env: &mut dbt_jinja_utils::jinja_environment::JinjaEnv,
     schema: &str,
-    database: &str,
+    database: Option<&str>,
     target_name: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     // Extract current target as JSON, modify fields, re-inject as a native BTreeMap Value.
@@ -536,7 +536,12 @@ pub(super) fn patch_target_global(
         .collect();
 
     new_target.insert("schema".to_string(), minijinja::Value::from(schema));
-    new_target.insert("database".to_string(), minijinja::Value::from(database));
+    // A target that declares no database keeps the one the adapter derived —
+    // DuckDB names it after the file, and overwriting that with an empty
+    // string puts `""` into every relation the project renders.
+    if let Some(database) = database {
+        new_target.insert("database".to_string(), minijinja::Value::from(database));
+    }
     if let Some(name) = target_name {
         new_target.insert("name".to_string(), minijinja::Value::from(name));
         new_target.insert("target_name".to_string(), minijinja::Value::from(name));
@@ -1076,7 +1081,7 @@ mod tests {
             "database": "old_db",
             "name": "dev",
         }));
-        patch_target_global(&mut env, "new_schema", "new_db", None)
+        patch_target_global(&mut env, "new_schema", Some("new_db"), None)
             .expect("patching the target succeeds");
 
         let rendered = env
@@ -1096,7 +1101,7 @@ mod tests {
             "database": "d",
             "name": "old",
         }));
-        patch_target_global(&mut env, "s", "d", Some("prod"))
+        patch_target_global(&mut env, "s", Some("d"), Some("prod"))
             .expect("patching the target succeeds");
 
         let rendered = env
@@ -1115,7 +1120,8 @@ mod tests {
             "schema": "s",
             "database": "d",
         }));
-        patch_target_global(&mut env, "s2", "d2", None).expect("patching the target succeeds");
+        patch_target_global(&mut env, "s2", Some("d2"), None)
+            .expect("patching the target succeeds");
 
         let rendered = env
             .render_str(
@@ -1137,7 +1143,7 @@ mod tests {
         env.add_global("target", minijinja::Value::from("not_an_object"));
         let mut jenv = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
 
-        let err = patch_target_global(&mut jenv, "s", "d", None)
+        let err = patch_target_global(&mut jenv, "s", None, None)
             .expect_err("a non-object target must be reported");
         assert!(err.to_string().contains("not an object"), "should say what was wrong: {err}");
     }

@@ -37,8 +37,12 @@ const MEMO_UPSERT_EVERY_N_LEVELS: usize = 10;
 
 /// Everything the level loop produces, returned to the orchestrator.
 pub struct LevelExecutionOutcome {
+    /// This segment's log lines and results — earlier segments left theirs in
+    /// their own checkpoints, named by `prior_segments`.
     pub log_lines: Vec<String>,
     pub all_results: Vec<NodeExecutionResult>,
+    /// Checkpoints written by every earlier segment of this run, oldest first.
+    pub prior_segments: Vec<String>,
     pub node_status: NodeStatusTree,
     pub had_failure: bool,
     pub was_cancelled: bool,
@@ -136,6 +140,7 @@ pub async fn execute_levels(
     Ok(LevelExecutionOutcome {
         log_lines,
         all_results,
+        prior_segments: resume.prior_segments,
         node_status,
         had_failure,
         was_cancelled,
@@ -152,8 +157,11 @@ pub async fn execute_levels(
 /// the state its predecessor spilled.
 pub struct ResumePoint {
     pub start_level: usize,
+    /// Empty on resume: the predecessor's log and results stay in its
+    /// checkpoint rather than travelling into this segment's history.
     pub log_lines: Vec<String>,
     pub all_results: Vec<NodeExecutionResult>,
+    pub prior_segments: Vec<String>,
     pub node_status: NodeStatusTree,
     pub failed_nodes: BTreeSet<String>,
     pub had_failure: bool,
@@ -171,6 +179,7 @@ impl ResumePoint {
             start_level: 0,
             log_lines: build_log_header(plan),
             all_results: Vec::new(),
+            prior_segments: Vec::new(),
             node_status: build_node_status_tree(plan),
             failed_nodes: BTreeSet::new(),
             had_failure: false,

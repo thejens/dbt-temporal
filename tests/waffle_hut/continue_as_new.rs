@@ -13,8 +13,6 @@
 
 use anyhow::{Context, Result};
 
-use dbt_temporal::types::NodeStatus;
-
 use super::infra::*;
 
 #[tokio::test(flavor = "current_thread")]
@@ -88,19 +86,15 @@ async fn test_run_continues_as_new_and_still_completes() -> Result<()> {
             // Everything below is the point: a continued run is still one run.
             assert!(output.success, "a continued run must still succeed");
 
-            let model_results: Vec<_> = output
-                .node_results
-                .iter()
-                .filter(|r| r.unique_id.starts_with("model."))
-                .collect();
-            assert_eq!(
-                model_results.len(),
-                expected_models,
-                "results from before each handover must survive it"
+            // The workflow output carries this execution's segment; the run's
+            // complete record is the artifact. Each segment's results stay in
+            // its own checkpoint rather than travelling into every successor's
+            // history, so this is where "did every node survive the handover"
+            // is answered.
+            assert!(
+                !output.node_results.is_empty(),
+                "the final segment's own results are still reported"
             );
-            for r in &model_results {
-                assert_eq!(r.status, NodeStatus::Success, "{} should pass", r.unique_id);
-            }
 
             // One invocation id across the whole chain: the successor inherits
             // the plan rather than planning again, and artifacts land in one
@@ -109,6 +103,30 @@ async fn test_run_continues_as_new_and_still_completes() -> Result<()> {
                 .artifacts
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("artifacts should be present"))?;
+
+            let run_results = std::fs::read_to_string(&artifacts.run_results_path)
+                .context("reading run_results.json")?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&run_results).context("parsing run_results.json")?;
+            let results = parsed["results"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("run_results.results should be an array"))?;
+            let model_results: Vec<_> = results
+                .iter()
+                .filter(|r| {
+                    r["unique_id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("model."))
+                })
+                .collect();
+            assert_eq!(
+                model_results.len(),
+                expected_models,
+                "results from before each handover must survive it"
+            );
+            for r in &model_results {
+                assert_eq!(r["status"], "success", "{} should pass", r["unique_id"]);
+            }
             assert!(
                 artifacts.run_results_path.contains(&output.invocation_id),
                 "artifacts should be keyed by the run's original invocation id: {} vs {}",

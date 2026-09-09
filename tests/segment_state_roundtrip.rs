@@ -114,6 +114,7 @@ fn sample_state() -> RunSegmentState {
         total_nodes: 3,
         node_counter: 2,
         next_level: 2,
+        prior_segments: vec!["dbt-artifacts/inv-continued/run_segment_state_0.json".to_string()],
     }
 }
 
@@ -147,9 +148,6 @@ async fn segment_state_survives_the_round_trip() {
     assert_eq!(restored.next_level, 2, "resumes after the completed levels");
     assert_eq!(restored.plan.levels.len(), 3, "plan carried, not re-planned");
     assert_eq!(restored.plan.invocation_id, "inv-continued");
-    assert_eq!(restored.all_results.len(), 1);
-    assert_eq!(restored.all_results[0].unique_id, "model.p.done");
-    assert_eq!(restored.log_lines, original.log_lines);
     assert_eq!(restored.node_status.nodes.len(), 2);
     assert!(restored.had_failure, "failure state must not reset");
     assert_eq!(
@@ -165,6 +163,54 @@ async fn segment_state_survives_the_round_trip() {
     assert_eq!(restored.hook_errors.len(), 1, "hook errors accumulate across segments");
     assert_eq!(restored.total_nodes, 3, "progress numbering stays continuous");
     assert_eq!(restored.node_counter, 2);
+
+    // The results and log stay behind: returning them would put the whole run
+    // so far into the successor's history as an activity result, which is what
+    // the continuation exists to avoid. The checkpoint that holds them joins
+    // the chain instead.
+    assert_eq!(
+        restored.prior_segments.len(),
+        2,
+        "the checkpoint just read is added to the ones before it"
+    );
+    assert_eq!(restored.prior_segments[0], original.prior_segments[0]);
+    assert!(
+        restored.prior_segments[1].ends_with("run_segment_state_1.json"),
+        "unexpected chain: {:?}",
+        restored.prior_segments
+    );
+}
+
+/// The artifact activity reads each segment's payload back out of the
+/// checkpoint the successor deliberately left it in.
+#[tokio::test]
+async fn a_segments_payload_is_readable_from_its_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let activities = activities(dir.path());
+    let original = sample_state();
+
+    let state_ref = save_segment_state_inner(
+        &activities,
+        SaveSegmentStateInput {
+            invocation_id: "inv-continued".to_string(),
+            state: original.clone(),
+        },
+    )
+    .await
+    .expect("spilling state should succeed");
+
+    let store = activities
+        .artifact_store
+        .as_ref()
+        .expect("store configured");
+    let (results, log) =
+        dbt_temporal::activities::segment_state::read_segment_payload(store.as_ref(), &state_ref)
+            .await
+            .expect("reading the payload back");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].unique_id, "model.p.done");
+    assert_eq!(log, original.log_lines);
 }
 
 /// Continuation is impossible without somewhere to spill state, and the error

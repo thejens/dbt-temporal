@@ -6,10 +6,19 @@
 | `Configuration` | No | Missing profile, bad config, invalid selector |
 | `Adapter` | Yes | Connection timeout, rate limit, transient DB error |
 | `ArtifactStore` | Yes | Object-store 5xx or throttle while reading/writing run artifacts |
-| `TestFailure` | No | A dbt test query returned failing rows (data won't change on retry) |
-| `UnitTestFailure` | No | A unit test's output differed from its fixture |
-| `StaleSource` | No | A source exceeded its `error_after` freshness threshold |
+| `TestFailure` | n/a | A dbt test query returned failing rows |
+| `UnitTestFailure` | n/a | A unit test's output differed from its fixture |
+| `StaleSource` | n/a | A source exceeded its `error_after` freshness threshold |
 | `ProjectNotFound` | No | Worker doesn't have the requested project loaded |
+
+The last three are not activity failures at all. They are terminal outcomes dbt
+reports *on the node*, so the activity succeeds and returns a
+`NodeExecutionResult` with `NodeStatus::Error`, carrying the failure count, the
+compiled SQL, the adapter response, the timings and — for a stale source — the
+freshness measurement. The workflow marks the node failed from that status, the
+same way it does for a node that failed to execute. They stay listed in the
+retry policy's non-retryable types so that an older in-flight run, or any path
+that still raises one, is never retried.
 
 `plan_project` and `store_artifacts` classify the same way `execute_node` does,
 but their default for an *untyped* error is permanent — their own failures mean

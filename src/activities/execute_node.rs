@@ -85,6 +85,37 @@ pub async fn execute_node_outer(
     }
 }
 
+/// Longest domain-failure message carried on a node result.
+///
+/// A unit test's message holds its row diff, which has no natural bound. The
+/// result travels through Temporal, the run log and `run_results.json`, so the
+/// message is capped where the diff stops being readable anyway.
+const DOMAIN_FAILURE_MESSAGE_MAX: usize = 4096;
+
+/// Render a terminal domain outcome as the node's result message.
+///
+/// A data test that found rows, a unit test whose output differed, a source
+/// past its `error_after`: dbt reports each of these *on the node*, and none of
+/// them gets better on a retry. They travel back as a populated
+/// `NodeExecutionResult` with `NodeStatus::Error` rather than as an activity
+/// failure — failing the activity discarded the timings, compiled SQL, adapter
+/// metadata, failure count and freshness measurement already collected, and the
+/// workflow rebuilt a bare error result in their place, so a failing test was
+/// the node whose results said the least.
+///
+/// The `DbtTemporalError` variants stay the vocabulary for these outcomes; only
+/// their journey changes, so the wording an operator sees is unchanged.
+fn domain_failure_message(error: &DbtTemporalError) -> String {
+    let full = error.to_string();
+    if full.len() <= DOMAIN_FAILURE_MESSAGE_MAX {
+        return full;
+    }
+    format!(
+        "{}… (truncated)",
+        crate::error::truncate_at_char_boundary(&full, DOMAIN_FAILURE_MESSAGE_MAX)
+    )
+}
+
 /// Load the deferred node set from a previous run's manifest.
 ///
 /// `--defer`'s purpose: unbuilt upstream `ref()`s resolve against the relations
@@ -833,10 +864,11 @@ pub async fn execute_node_inner(
     let execute_start = chrono::Utc::now();
 
     // Run the freshness check instead of a materialization and return early.
-    // A stale node (error_after exceeded) fails the activity as non-retryable;
-    // a warning succeeds, because `NodeStatus` has no warning state — the
-    // "warn" survives on the outcome and in the node message, which is what
-    // the run log and run_results.json show.
+    // A stale node (error_after exceeded) reports `NodeStatus::Error` with its
+    // measurement attached, rather than failing the activity — see
+    // `domain_failure_message`. A warning succeeds, because `NodeStatus` has no
+    // warning state; the "warn" survives on the outcome and in the node
+    // message, which is what the run log and run_results.json show.
     if measures_freshness {
         let freshness_node = freshness::as_freshness_node(
             &state.resolver_state.nodes,
@@ -849,20 +881,22 @@ pub async fn execute_node_inner(
         let verdict = freshness::run_freshness_check(freshness_node, jinja_env, &node_context)?;
         let execute_end = chrono::Utc::now();
         let execution_time = start_instant.elapsed().as_secs_f64();
+        let mut stale_message = None;
         let outcome = match verdict {
             freshness::FreshnessVerdict::Stale {
-                max_loaded_at,
-                age_secs,
+                outcome,
                 max_allowed_secs,
             } => {
-                return Err(DbtTemporalError::StaleSource {
+                let message = domain_failure_message(&DbtTemporalError::StaleSource {
                     unique_id: unique_id.clone(),
                     node_kind: rt.as_static_ref(),
-                    max_loaded_at,
-                    age_secs,
+                    max_loaded_at: outcome.max_loaded_at.clone(),
+                    age_secs: outcome.max_loaded_at_time_ago_in_s,
                     max_allowed_secs,
-                }
-                .into());
+                });
+                warn!(node = %unique_id, message = %message, "freshness error (error_after exceeded)");
+                stale_message = Some(message);
+                outcome
             }
             freshness::FreshnessVerdict::Warning(outcome) => {
                 warn!(
@@ -874,16 +908,22 @@ pub async fn execute_node_inner(
             }
             freshness::FreshnessVerdict::Fresh(outcome) => outcome,
         };
-        let message = format!(
-            "freshness {} (age {:.0}s, max_loaded_at {})",
-            outcome.status.to_uppercase(),
-            outcome.max_loaded_at_time_ago_in_s,
-            outcome.max_loaded_at
-        );
+        let message = stale_message.clone().unwrap_or_else(|| {
+            format!(
+                "freshness {} (age {:.0}s, max_loaded_at {})",
+                outcome.status.to_uppercase(),
+                outcome.max_loaded_at_time_ago_in_s,
+                outcome.max_loaded_at
+            )
+        });
         info!(node = %unique_id, message = %message, "freshness check complete");
         return Ok(NodeExecutionResult {
             unique_id: unique_id.clone(),
-            status: NodeStatus::Success,
+            status: if stale_message.is_some() {
+                NodeStatus::Error
+            } else {
+                NodeStatus::Success
+            },
             execution_time,
             message: Some(message),
             adapter_response: extract_adapter_response(&result_store),
@@ -955,18 +995,23 @@ pub async fn execute_node_inner(
         .into());
     }
 
+    // A terminal outcome dbt reports on the node rather than an execution
+    // failure to retry — see `domain_failure_message`. Set by the unit-test and
+    // data-test verdicts below; when present it becomes the node's message and
+    // its status is `Error`.
+    let mut domain_failure: Option<String> = None;
+
     // Unit tests: compare the actual vs expected partitions of the executed
-    // union query. Differences are non-retryable — fixtures and model SQL
-    // won't change on retry.
+    // union query. A difference is the test's answer, not a fault to retry —
+    // fixtures and model SQL do not change between attempts.
     let unit_outcome = if rt == NodeType::UnitTest {
         let outcome = unit_test::extract_unit_test_outcome(&result_store)?;
         if !outcome.passed {
-            return Err(DbtTemporalError::UnitTestFailure {
+            domain_failure = Some(domain_failure_message(&DbtTemporalError::UnitTestFailure {
                 unique_id: unique_id.clone(),
                 failures: outcome.failures,
-                diff: outcome.diff,
-            }
-            .into());
+                diff: outcome.diff.clone(),
+            }));
         }
         Some(outcome)
     } else {
@@ -983,21 +1028,6 @@ pub async fn execute_node_inner(
         None
     };
     let failures = test_outcome.map(|o| o.failures);
-
-    // Build a human-readable message from the adapter response for the Temporal UI.
-    // Falls back to materialization type when the adapter doesn't return metadata
-    // (e.g. ephemeral models that never execute against the warehouse).
-    let message = unit_outcome.map_or_else(
-        || build_success_message(&adapter_response, &materialization),
-        |o| Some(format!("unit test passed ({} row(s) compared)", o.actual_rows)),
-    );
-
-    info!(
-        node = %unique_id,
-        time_secs = execution_time,
-        message = message.as_deref().unwrap_or("-"),
-        "node execution complete"
-    );
 
     // The test's verdict, on dbt's terms: it fails only when its severity is
     // `error` *and* the `error_if` expression the warehouse evaluated came back
@@ -1017,11 +1047,10 @@ pub async fn execute_node_inner(
             .cloned()
             .unwrap_or_default();
         if matches!(severity, Severity::Error) && outcome.should_error {
-            return Err(DbtTemporalError::TestFailure {
+            domain_failure = Some(domain_failure_message(&DbtTemporalError::TestFailure {
                 unique_id: unique_id.clone(),
                 failures: outcome.failures,
-            }
-            .into());
+            }));
         }
         if outcome.should_warn {
             warn!(
@@ -1033,9 +1062,36 @@ pub async fn execute_node_inner(
         }
     }
 
+    // Build a human-readable message from the adapter response for the Temporal UI.
+    // Falls back to materialization type when the adapter doesn't return metadata
+    // (e.g. ephemeral models that never execute against the warehouse).
+    let message = domain_failure.clone().or_else(|| {
+        unit_outcome.map_or_else(
+            || build_success_message(&adapter_response, &materialization),
+            |o| Some(format!("unit test passed ({} row(s) compared)", o.actual_rows)),
+        )
+    });
+
+    let status = if domain_failure.is_some() {
+        NodeStatus::Error
+    } else {
+        NodeStatus::Success
+    };
+
+    if let Some(reason) = domain_failure.as_deref() {
+        warn!(node = %unique_id, time_secs = execution_time, reason, "node failed");
+    } else {
+        info!(
+            node = %unique_id,
+            time_secs = execution_time,
+            message = message.as_deref().unwrap_or("-"),
+            "node execution complete"
+        );
+    }
+
     Ok(NodeExecutionResult {
         unique_id: unique_id.clone(),
-        status: NodeStatus::Success,
+        status,
         execution_time,
         message,
         adapter_response,

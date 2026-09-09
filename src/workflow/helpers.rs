@@ -526,19 +526,9 @@ pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     )
 }
 
-/// Truncate to at most `max_bytes`, backing up to a UTF-8 char boundary so
-/// the slice never panics on multi-byte content (warehouse error messages
-/// routinely carry smart quotes or user data).
-pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
-    let mut end = s.len().min(max_bytes);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// Extract a concise error message from a Temporal activity execution error.
 pub fn short_activity_error(e: &temporalio_sdk::ActivityExecutionError) -> String {
+    use crate::error::truncate_at_char_boundary;
     let full = e.to_string();
 
     // Truncate if very long.
@@ -580,6 +570,7 @@ pub fn build_retry_policy(config: &RetryConfig) -> RetryPolicy {
 )]
 mod tests {
     use super::*;
+    use crate::error::truncate_at_char_boundary;
     use crate::types::NodeInfo;
 
     fn test_plan(

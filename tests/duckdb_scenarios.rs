@@ -118,21 +118,30 @@ async fn model_calling_an_undefined_macro_is_not_registered() {
     );
 }
 
+/// A failing test is an answer, not a fault. It comes back as a populated
+/// result the run can report on — the failure count, the compiled SQL that
+/// found them, the timings — rather than as an activity failure that threw all
+/// of that away and left the workflow to invent a bare error result.
 #[tokio::test]
 async fn failing_data_test_reports_a_test_failure() {
-    // A singular test whose query returns rows = failing rows → TestFailure
-    // (non-retryable: the data won't change on retry).
     let harness = Harness::build_files(&[
         ("models/m.sql", "select 1 as id union all select 2 as id"),
         ("tests/all_rows_fail.sql", "select * from {{ ref('m') }}"),
     ])
     .await;
     harness.run_ok("m").await;
-    let err = harness.run_err_uid("test.spike.all_rows_fail").await;
+
+    let result = harness.run_failed_uid("test.spike.all_rows_fail").await;
+    assert_eq!(result.failures, Some(2), "{result:?}");
     assert!(
-        matches!(err, DbtTemporalError::TestFailure { failures, .. } if failures == 2),
-        "expected TestFailure with 2 failing rows, got: {err:?}"
+        result
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("2 failing row")),
+        "the message still reads as it did: {result:?}"
     );
+    assert!(result.compiled_code.is_some(), "the SQL that found them: {result:?}");
+    assert!(!result.timing.is_empty(), "timings survive the failure: {result:?}");
 }
 
 #[tokio::test]
@@ -207,11 +216,8 @@ async fn a_test_above_its_error_if_threshold_fails() {
     .await;
     harness.run_ok("m").await;
 
-    let err = harness.run_err_uid("test.spike.tolerates_one").await;
-    assert!(
-        matches!(err, DbtTemporalError::TestFailure { failures, .. } if failures == 2),
-        "expected TestFailure with 2 failing rows, got: {err:?}"
-    );
+    let result = harness.run_failed_uid("test.spike.tolerates_one").await;
+    assert_eq!(result.failures, Some(2), "{result:?}");
 }
 
 /// `warn_if` below `error_if` warns without failing, and the count survives on
@@ -249,11 +255,8 @@ async fn store_failures_test_persists_rows_and_still_fails() {
     ])
     .await;
     harness.run_ok("m").await;
-    let err = harness.run_err_uid("test.spike.stored").await;
-    assert!(
-        matches!(err, DbtTemporalError::TestFailure { .. }),
-        "expected TestFailure, got: {err:?}"
-    );
+    let result = harness.run_failed_uid("test.spike.stored").await;
+    assert_eq!(result.failures, Some(2), "{result:?}");
 }
 
 #[tokio::test]

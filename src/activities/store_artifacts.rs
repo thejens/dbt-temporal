@@ -358,6 +358,26 @@ mod tests {
         Ok(())
     }
 
+    /// A stale source is the one measurement anybody reads a freshness artifact
+    /// for. It used to be missing from both: the stale verdict carried no
+    /// outcome, the activity failed instead of returning one, and the filter
+    /// here keeps only results that have one.
+    #[test]
+    fn sources_json_includes_a_stale_source() -> anyhow::Result<()> {
+        let mut stale = with_freshness("source.p.s.orders", "source", "error");
+        stale.status = NodeStatus::Error;
+        let input = freshness_input("source-freshness", vec![stale]);
+
+        let parsed: serde_json::Value = serde_json::from_str(&build_freshness_json(&input, true)?)?;
+        let results = parsed["results"].as_array().context("results array")?;
+
+        assert_eq!(results.len(), 1, "{parsed}");
+        assert_eq!(results[0]["unique_id"], "source.p.s.orders");
+        assert_eq!(results[0]["status"], "error");
+        assert_eq!(results[0]["max_loaded_at_time_ago_in_s"], 3600.0);
+        Ok(())
+    }
+
     #[test]
     fn freshness_json_carries_models_and_resource_types() -> anyhow::Result<()> {
         let input = freshness_input(

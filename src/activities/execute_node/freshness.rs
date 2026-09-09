@@ -37,10 +37,12 @@ pub enum FreshnessVerdict {
     Fresh(FreshnessOutcome),
     /// warn_after exceeded but error_after not: succeed with a warning.
     Warning(FreshnessOutcome),
-    /// error_after exceeded.
+    /// error_after exceeded. Carries the same outcome the other verdicts do,
+    /// with dbt's `error` status: a stale node is still a *measured* node, and
+    /// dropping the measurement is what kept stale sources out of
+    /// `sources.json` and `freshness.json` entirely.
     Stale {
-        max_loaded_at: String,
-        age_secs: f64,
+        outcome: FreshnessOutcome,
         max_allowed_secs: i64,
     },
 }

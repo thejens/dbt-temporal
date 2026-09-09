@@ -46,6 +46,23 @@ pub enum DbtTemporalError {
     },
 }
 
+/// Truncate to at most `max_bytes`, at a UTF-8 char boundary.
+///
+/// Backing up to a boundary keeps the slice from panicking on multi-byte
+/// content — warehouse error messages, unit test diffs and user data all
+/// routinely carry smart quotes and worse.
+///
+/// Lives with the error types because both places that bound a rendered
+/// message use it: the node result an activity returns, and the run-log line
+/// the workflow writes for an activity failure.
+pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut end = s.len().min(max_bytes);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl DbtTemporalError {
     /// Whether this error is retryable by Temporal.
     ///

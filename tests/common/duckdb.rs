@@ -351,6 +351,22 @@ impl Harness {
         result
     }
 
+    /// Execute a node by full unique id, expecting it to report a terminal
+    /// domain failure — a data test that found rows, a unit test whose output
+    /// differed, a source past its `error_after`.
+    ///
+    /// Those come back as a populated result with `NodeStatus::Error`, not as
+    /// an activity failure: the timings, compiled SQL, adapter metadata and
+    /// failure count are the point of running the node at all.
+    pub async fn run_failed_uid(&self, unique_id: &str) -> NodeExecutionResult {
+        let result = self
+            .run_uid(unique_id)
+            .await
+            .unwrap_or_else(|e| panic!("{unique_id} should report, not fail the activity: {e:#}"));
+        assert_eq!(result.status, NodeStatus::Error, "{result:?}");
+        result
+    }
+
     /// Execute a node by full unique id, expecting failure, returning the
     /// classified error.
     pub async fn run_err_uid(&self, unique_id: &str) -> DbtTemporalError {

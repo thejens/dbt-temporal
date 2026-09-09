@@ -50,38 +50,64 @@ pub async fn execute_node_outer(
     // dbt-native telemetry: Invocation root + NodeEvaluated span. The spans
     // must outlive the select! so the outcome can be recorded on them.
     let spans = super::node_telemetry::node_execution_spans(&activities.registry, &input);
-    tokio::select! {
-        result = tracing::Instrument::instrument(
-            execute_node_inner(activities, input), spans.node.clone()
-        ) => {
-            match result {
-                Ok(result) => {
-                    super::node_telemetry::record_outcome(&spans, result.status);
-                    Ok(result)
-                }
-                Err(e) => {
-                    super::node_telemetry::record_outcome(&spans, NodeStatus::Error);
-                    // {:#} prints the whole context chain; the top context
-                    // alone routinely hides the actionable cause.
-                    tracing::error!(node = %unique_id, error = %format!("{e:#}"), "activity failed");
-                    let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
-                    Err(retry::classify(
-                        e,
-                        patterns.as_deref().unwrap_or(&[]),
-                        retry::Unclassified::RetryAsAdapter,
-                    ))
-                }
+
+    // This activity's own cancellation source, handed to the adapter through
+    // the render environment. The worker-wide source was never cancelled by
+    // anything, so a cancelled activity left its query running: the server's
+    // heartbeat timeout could then start a second attempt while the first was
+    // still writing.
+    let cancel = dbt_common::cancellation::CancellationTokenSource::new();
+    let token = cancel.token();
+
+    let work = tracing::Instrument::instrument(
+        execute_node_cancellable(activities, input, &token),
+        spans.node.clone(),
+    );
+    tokio::pin!(work);
+
+    let mut cancelled = false;
+    let result = loop {
+        tokio::select! {
+            result = &mut work => break result,
+            // `&mut work` above, so this branch does not drop the work: the
+            // query is told to stop and then joined. Dropping the future would
+            // leave the blocking thread running against the warehouse with
+            // nothing waiting for it.
+            () = ctx.cancelled(), if !cancelled => {
+                cancelled = true;
+                info!(node = %unique_id, "activity cancelled — stopping warehouse work");
+                cancel.cancel();
             }
+            // Never resolves — keeps the UI's last-heartbeat fresh and lets the
+            // server's heartbeat_timeout reschedule on a fresh worker if this
+            // one dies. The node's own work runs on a blocking thread, so this
+            // task is free to keep heartbeating while a long query runs.
+            never = heartbeat::heartbeat_loop(&ctx) => match never {},
         }
-        () = ctx.cancelled() => {
-            super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);
-            info!(node = %unique_id, "activity cancelled");
-            Err(ActivityError::cancelled())
+    };
+
+    if cancelled {
+        super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);
+        return Err(ActivityError::cancelled());
+    }
+
+    match result {
+        Ok(result) => {
+            super::node_telemetry::record_outcome(&spans, result.status);
+            Ok(result)
         }
-        // Never resolves — keeps the UI's last-heartbeat fresh and lets the
-        // server's heartbeat_timeout reschedule on a fresh worker if this one
-        // dies. Loses the select! race to the two real branches above.
-        never = heartbeat::heartbeat_loop(&ctx) => match never {},
+        Err(e) => {
+            super::node_telemetry::record_outcome(&spans, NodeStatus::Error);
+            // {:#} prints the whole context chain; the top context alone
+            // routinely hides the actionable cause.
+            tracing::error!(node = %unique_id, error = %format!("{e:#}"), "activity failed");
+            let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
+            Err(retry::classify(
+                e,
+                patterns.as_deref().unwrap_or(&[]),
+                retry::Unclassified::RetryAsAdapter,
+            ))
+        }
     }
 }
 
@@ -553,8 +579,54 @@ pub async fn execute_node_inner(
     activities: &DbtActivities,
     input: NodeExecutionInput,
 ) -> Result<NodeExecutionResult, anyhow::Error> {
-    let state = activities.registry.get(Some(&input.project))?;
+    let cancel = dbt_common::cancellation::CancellationTokenSource::new();
+    execute_node_cancellable(activities, input, &cancel.token()).await
+}
 
+/// `execute_node_inner`, with the caller holding the cancellation source.
+///
+/// The activity wrapper keeps the source so it can cancel the warehouse work
+/// from its own task while this one is blocked inside dbt.
+pub async fn execute_node_cancellable(
+    activities: &DbtActivities,
+    input: NodeExecutionInput,
+    cancellation: &dbt_common::cancellation::CancellationToken,
+) -> Result<NodeExecutionResult, anyhow::Error> {
+    let state = Arc::clone(activities.registry.get(Some(&input.project))?);
+
+    // The one thing here that needs the async runtime: the deferred manifest
+    // comes from the artifact store. Everything after it is synchronous, and
+    // runs on a blocking thread so this task stays free to heartbeat and to
+    // notice cancellation.
+    let defer_nodes =
+        load_defer_nodes(activities, &state, input.defer_manifest_ref.as_deref()).await?;
+
+    let token = cancellation.clone();
+    // dbt's telemetry data layer asserts that every span it sees descends from
+    // an `Invocation` root, and a blocking thread starts with no current span
+    // — so the node span has to be re-entered on the far side of the handoff,
+    // or the first dbt macro to open a span panics the thread.
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        execute_node_body(&state, &input, defer_nodes.as_deref(), &token)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("node execution task failed: {e}"))?
+}
+
+/// The synchronous half of a node execution: compile, materialize, decode.
+///
+/// Runs on a blocking thread. Every Jinja value it builds is thread-affine and
+/// never leaves this function, which is why the environment is constructed
+/// here rather than handed in.
+#[allow(clippy::too_many_lines)]
+fn execute_node_body(
+    state: &crate::worker_state::WorkerState,
+    input: &NodeExecutionInput,
+    defer_nodes: Option<&dbt_schemas::schemas::Nodes>,
+    cancellation: &dbt_common::cancellation::CancellationToken,
+) -> Result<NodeExecutionResult, anyhow::Error> {
     let unique_id = &input.unique_id;
 
     // Look up the node in the resolver state.
@@ -603,6 +675,7 @@ pub async fn execute_node_inner(
     let mut render_env = render_env::prepare_render_env(
         state,
         &render_env::RenderOverrides {
+            cancellation,
             env: &input.env,
             target: input.target.as_deref(),
             vars: &input.vars,
@@ -622,10 +695,7 @@ pub async fn execute_node_inner(
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    let defer_nodes =
-        load_defer_nodes(activities, state, input.defer_manifest_ref.as_deref()).await?;
-
-    let base_context = build_base_context(state, defer_nodes.as_deref(), namespace_keys);
+    let base_context = build_base_context(state, defer_nodes, namespace_keys);
 
     // Serialize the node config for the deprecated_config parameter.
     let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt)?;

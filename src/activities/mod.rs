@@ -41,6 +41,7 @@ use crate::types::{
 ///
 /// Created once at worker startup and registered via `worker.register_activities(Arc::new(..))`.
 /// Each `#[activity]` method accesses shared state through `self: Arc<Self>`.
+#[derive(Clone)]
 pub struct DbtActivities {
     pub registry: Arc<ProjectRegistry>,
     pub artifact_store: Option<Arc<dyn ArtifactStore>>,

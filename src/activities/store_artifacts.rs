@@ -186,6 +186,7 @@ async fn generate_and_store_catalog(
                     &input.node_results,
                     &input.invocation_id,
                     &crate::activities::render_env::RenderOverrides {
+                        cancellation: &state.cancellation_source.token(),
                         env: &input.env,
                         target: input.target.as_deref(),
                         // Neither reaches a `get_columns_in_relation` call.

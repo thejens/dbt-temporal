@@ -406,6 +406,38 @@ async fn a_permanent_create_schema_failure_is_non_fatal() {
     harness.run_ok("t").await;
 }
 
+/// The token the adapter aborts on has to be the one the caller passed, not
+/// the worker's own — which nothing ever cancelled, so a cancelled activity
+/// left its query running while the server's heartbeat timeout could start a
+/// second attempt against the same relation.
+///
+/// A token holds a `Weak` ref to its source, so a source that is gone reads as
+/// cancelled: the node fails, which is only possible if the adapter is using
+/// *this* token.
+#[tokio::test]
+async fn the_node_runs_on_the_token_it_was_given() {
+    let harness = Harness::build(&[("m", "select 1 as id")]).await;
+
+    let dead = {
+        let source = dbt_common::cancellation::CancellationTokenSource::new();
+        source.token()
+    };
+    let result = harness
+        .run_uid_with_cancellation("model.spike.m", &dead)
+        .await;
+    assert!(
+        result.is_err(),
+        "a token whose source is gone must stop the work, got: {result:?}"
+    );
+
+    let live = dbt_common::cancellation::CancellationTokenSource::new();
+    let result = harness
+        .run_uid_with_cancellation("model.spike.m", &live.token())
+        .await
+        .expect("a live token must not block the node");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+}
+
 /// The recovery guarantee: a model that fails against a briefly-unreachable
 /// warehouse succeeds once the warehouse is reachable again — exactly what
 /// Temporal's retry buys.

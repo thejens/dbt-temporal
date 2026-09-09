@@ -555,20 +555,24 @@ async fn initialize_project_inner(
     let default_database = dbt_state.dbt_profile.database.clone();
 
     // Detect custom generate_schema_name/generate_database_name overrides.
-    let has_custom_schema_name_macro = resolver_state
-        .macros
-        .macros
-        .contains_key(&format!("macro.{project_name}.generate_schema_name"))
-        || resolver_state
+    // Separately: a project overriding only one of them still wants dbt's own
+    // pattern for the other, and running the missing macro would fail.
+    let defines_macro = |name: &str| {
+        resolver_state
             .macros
             .macros
-            .contains_key(&format!("macro.{project_name}.generate_database_name"));
-    if has_custom_schema_name_macro {
+            .contains_key(&format!("macro.{project_name}.{name}"))
+    };
+    let has_custom_schema_name_macro = defines_macro("generate_schema_name");
+    let has_custom_database_name_macro = defines_macro("generate_database_name");
+    if has_custom_schema_name_macro || has_custom_database_name_macro {
         info!(
             project = %project_name,
-            "project overrides generate_schema_name or generate_database_name — \
-             per-workflow env overrides will re-execute the macro at activity time \
-             (env_var() reads and target.schema both reflect the workflow env)"
+            schema_name_macro = has_custom_schema_name_macro,
+            database_name_macro = has_custom_database_name_macro,
+            "project overrides a dbt naming macro — per-workflow env overrides \
+             re-execute it per node at activity time (env_var() reads and \
+             target.schema both reflect the workflow env)"
         );
     }
 
@@ -616,6 +620,7 @@ async fn initialize_project_inner(
         default_schema,
         default_database,
         has_custom_schema_name_macro,
+        has_custom_database_name_macro,
         cancellation_source: cts,
         auth_override,
         project_checks,

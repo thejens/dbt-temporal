@@ -1,62 +1,217 @@
-//! Recompute `this`, `schema`, `database` for nodes whose profile schema or
-//! database was overridden per-workflow.
+//! Recompute where each of a run's relations lives when a per-workflow env
+//! override changed the profile schema or database.
 //!
-//! Two strategies are implemented, chosen based on whether the project overrides
-//! `generate_schema_name` / `generate_database_name`:
+//! Two strategies, chosen by whether the project overrides dbt's naming macros:
 //!
-//! **Default macro** (`has_custom_schema_name_macro = false`): reconstruct the new
-//! schema using dbt's default pattern (`<target_schema>_<custom>`) from the
-//! profile-rebuilt `target.schema`.
+//! **Default macros**: reconstruct the schema from dbt's own
+//! `<target_schema>[_<custom>]` pattern against the profile-rebuilt
+//! `target.schema`, and take `target.database` for the database.
 //!
-//! **Custom macro** (`has_custom_schema_name_macro = true`): re-execute the macro
-//! itself via the already-cloned Jinja env — which has `env_var()` overridden with
-//! the workflow env and `target` patched. This matches vanilla dbt's per-run
-//! evaluation and correctly handles any macro logic, including direct `env_var()`
-//! reads, custom suffixes, and per-model `config(schema=...)` overrides.
+//! **Custom macros**: re-execute `generate_schema_name` — and
+//! `generate_database_name` where the project defines one — through the
+//! already-cloned Jinja env, which has `env_var()` overridden with the workflow
+//! env and `target` patched. That is what dbt itself does per run, so macro
+//! logic of any shape works: env reads, custom suffixes, per-model
+//! `config(schema=...)`, and branching on the node.
 //!
-//! SQL text patching handles both double-quoted identifiers (PostgreSQL, Snowflake,
-//! Redshift) and backtick-quoted identifiers (BigQuery) so that cross-model `ref()`
-//! compilations also resolve to the correct per-workflow schemas.
+//! Either way the macros are evaluated **per node**, against that node's own
+//! attributes. A project is entitled to send two models that share a startup
+//! schema to different ones, and a schema-to-schema map cannot express that; a
+//! map from each startup relation to where it moved can.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use dbt_schemas::schemas::InternalDbtNodeAttributes;
 use dbt_schemas::schemas::nodes::NodeBaseAttributes;
 use dbt_schemas::schemas::telemetry::NodeType;
 
+use super::sql_rewrite::{RelationMove, RelationRewrite};
 use crate::error::DbtTemporalError;
 use crate::worker_state::WorkerState;
 
-/// Result of a schema/database recomputation via the default-pattern strategy.
-#[derive(Debug)]
-pub struct PatchedRelation {
-    pub schema: String,
+/// Where one node's relation lives for this workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRelation {
     pub database: String,
-    pub patched_schema: bool,
-    pub patched_database: bool,
+    pub schema: String,
 }
 
-/// Compute new schema/database when per-workflow env overrides are in play
-/// and the project uses the **default** `generate_schema_name` macro.
+/// Everything the executing node needs to name relations correctly: where its
+/// own output goes, and where every relation its compiled SQL can mention has
+/// moved to.
+#[derive(Debug, Default)]
+pub struct ResolvedRelations {
+    /// `None` when the node's own relation did not move.
+    pub own: Option<NodeRelation>,
+    pub rewrite: RelationRewrite,
+}
+
+/// Resolve the relations the executing node can name, under this workflow's
+/// env overrides.
 ///
-/// Only called when `!state.has_custom_schema_name_macro`; the custom-macro
-/// path goes through `build_schema_rewrite_map` instead.
-pub fn compute_patched_relation(
+/// The scope is the node itself plus everything it transitively depends on:
+/// exactly the set a compiled statement can mention, through its own `ref()`s,
+/// through the CTEs an ephemeral ancestor injects, and — for a unit test —
+/// through the SQL of the model under test. Resolving the whole project would
+/// mean a macro render per project node per activity to answer questions
+/// nobody asked.
+pub fn resolve_relations(
     state: &WorkerState,
-    base: &NodeBaseAttributes,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    unique_id: &str,
     env_schema: Option<&str>,
     env_database: Option<&str>,
-    unique_id: &str,
-) -> Option<PatchedRelation> {
-    compute_patched_relation_inner(
-        &state.default_schema,
-        &state.default_database,
-        &base.schema,
-        &base.database,
-        env_schema,
-        env_database,
-        unique_id,
-    )
+) -> Result<ResolvedRelations, DbtTemporalError> {
+    let mut resolved = ResolvedRelations::default();
+    if env_schema.is_none() && env_database.is_none() {
+        return Ok(resolved);
+    }
+
+    for id in rewrite_scope(&state.resolver_state.nodes, unique_id) {
+        let Some(node) = state.resolver_state.nodes.get_node(&id) else {
+            continue;
+        };
+        if !takes_part_in_the_rewrite(node) {
+            continue;
+        }
+        let base = node.base();
+        let moved = resolve_one(state, jinja_env, node, env_schema, env_database)?;
+        if moved.schema == base.schema && moved.database == base.database {
+            continue;
+        }
+        if id == unique_id {
+            resolved.own = Some(moved.clone());
+        }
+        resolved.rewrite.insert(
+            &base.schema,
+            &base.alias,
+            RelationMove {
+                old_database: base.database.clone(),
+                new_database: moved.database,
+                new_schema: moved.schema,
+            },
+        );
+    }
+    Ok(resolved)
+}
+
+/// Where one node's relation lands, by whichever strategy its project's macros
+/// call for.
+fn resolve_one(
+    state: &WorkerState,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    node: &dyn InternalDbtNodeAttributes,
+    env_schema: Option<&str>,
+    env_database: Option<&str>,
+) -> Result<NodeRelation, DbtTemporalError> {
+    let base = node.base();
+    let unique_id = &node.common().unique_id;
+
+    let default_relation = || {
+        compute_patched_relation_inner(
+            &state.default_schema,
+            &state.default_database,
+            &base.schema,
+            &base.database,
+            env_schema,
+            env_database,
+            unique_id,
+        )
+        .unwrap_or_else(|| NodeRelation {
+            database: base.database.clone(),
+            schema: base.schema.clone(),
+        })
+    };
+
+    if !state.has_custom_schema_name_macro && !state.has_custom_database_name_macro {
+        return Ok(default_relation());
+    }
+
+    let node_value = naming_macro_node(node);
+
+    let schema = if state.has_custom_schema_name_macro {
+        // An empty answer is a macro that did not name this node; dbt keeps the
+        // resolved value rather than writing to a schema with no name.
+        let rendered = render_naming_macro(
+            jinja_env,
+            &state.project_name,
+            "generate_schema_name",
+            unrendered(node, "schema").as_deref(),
+            &node_value,
+        )
+        .map_err(|e| {
+            DbtTemporalError::Compilation(format!(
+                "re-executing generate_schema_name for {unique_id}: {e:#}"
+            ))
+        })?;
+        if rendered.is_empty() {
+            base.schema.clone()
+        } else {
+            rendered
+        }
+    } else {
+        default_relation().schema
+    };
+
+    let database = if state.has_custom_database_name_macro {
+        let rendered = render_naming_macro(
+            jinja_env,
+            &state.project_name,
+            "generate_database_name",
+            unrendered(node, "database").as_deref(),
+            &node_value,
+        )
+        .map_err(|e| {
+            DbtTemporalError::Compilation(format!(
+                "re-executing generate_database_name for {unique_id}: {e:#}"
+            ))
+        })?;
+        if rendered.is_empty() {
+            base.database.clone()
+        } else {
+            rendered
+        }
+    } else {
+        default_relation().database
+    };
+
+    Ok(NodeRelation { database, schema })
+}
+
+/// The `custom_schema_name` / `custom_database_name` argument dbt passed to the
+/// naming macro when it resolved this node. `None` means the node set none.
+fn unrendered(node: &dyn InternalDbtNodeAttributes, key: &str) -> Option<String> {
+    node.base()
+        .unrendered_config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Whether a node's relation takes part in the per-workflow rewrite.
+///
+/// Sources do not: their schema is declared in YAML and names a table dbt did
+/// not create, so moving it to the workflow's schema points every `source()`
+/// at something that was never there. A source sharing the models' schema —
+/// the ordinary case in a dev project — is exactly when that bites.
+fn takes_part_in_the_rewrite(node: &dyn InternalDbtNodeAttributes) -> bool {
+    node.resource_type() != NodeType::Source
+}
+
+/// The node itself plus everything it transitively depends on.
+fn rewrite_scope(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![unique_id.to_owned()];
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(node) = nodes.get_node(&id) {
+            queue.extend(node.base().depends_on.nodes.iter().cloned());
+        }
+    }
+    seen
 }
 
 fn compute_patched_relation_inner(
@@ -67,7 +222,7 @@ fn compute_patched_relation_inner(
     env_schema: Option<&str>,
     env_database: Option<&str>,
     unique_id: &str,
-) -> Option<PatchedRelation> {
+) -> Option<NodeRelation> {
     let wf_schema = env_schema?;
 
     let wf_database = env_database.unwrap_or(base_database);
@@ -94,282 +249,144 @@ fn compute_patched_relation_inner(
         base_database.to_string()
     };
 
-    let patched_schema = new_schema != base_schema;
-    let patched_database = new_database != base_database;
-    if !patched_schema && !patched_database {
+    if new_schema == base_schema && new_database == base_database {
         return None;
     }
 
-    Some(PatchedRelation {
-        schema: new_schema,
+    Some(NodeRelation {
         database: new_database,
-        patched_schema,
-        patched_database,
+        schema: new_schema,
     })
 }
 
-/// Whether a node's schema takes part in the per-workflow rewrite.
+/// Call the project's `generate_schema_name` / `generate_database_name` with
+/// this node.
 ///
-/// Sources do not: their schema is declared in YAML and names a table dbt did
-/// not create, so moving it to the workflow's schema points every `source()`
-/// at something that was never there. A source sharing the models' schema —
-/// the ordinary case in a dev project — is exactly when that bites.
-fn takes_part_in_the_rewrite(node: &dyn dbt_schemas::schemas::InternalDbtNodeAttributes) -> bool {
-    node.resource_type() != NodeType::Source
-}
-
-/// Build a schema rewrite map by re-executing `generate_schema_name` with the
-/// per-workflow Jinja env for every distinct (resolved-schema, custom-schema-input)
-/// combination in the project.
-///
-/// The Jinja env passed in must already have:
-/// - `env_var()` overridden with the workflow's env
-/// - `target` patched with the per-workflow schema/database (if profiles.yml uses env_var)
-///
-/// This matches vanilla dbt's per-run evaluation of `generate_schema_name`.
-pub fn build_schema_rewrite_map(
-    state: &WorkerState,
+/// A macro defined by a project is a *template*, `<package>.<macro>`, not a
+/// global of the Jinja environment. Rendering `{{ generate_schema_name(…) }}`
+/// as a plain expression therefore resolved dbt's built-in and returned
+/// `target.schema` no matter what the project had written — a project's
+/// override was accepted at startup and then never actually run. The macro is
+/// looked up and invoked the same way a materialization is.
+fn render_naming_macro(
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
-) -> Result<BTreeMap<String, String>, DbtTemporalError> {
-    // Collect unique (resolved_schema → custom_schema_input) pairs.
-    // `unrendered_config["schema"]` is the `custom_schema_name` argument that dbt
-    // passed to `generate_schema_name` at resolve time. None means the model did
-    // not set an explicit schema override.
-    let mut schema_to_input: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-    for (_, node) in state.resolver_state.nodes.iter() {
-        if !takes_part_in_the_rewrite(node) {
-            continue;
-        }
-        let base_schema = node.base().schema.clone();
-        let custom_schema_name = node
-            .base()
-            .unrendered_config
-            .get("schema")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let name = node.common().name.clone();
-        // One representative node per resolved schema is enough.
-        schema_to_input
-            .entry(base_schema)
-            .or_insert((custom_schema_name, name));
-    }
-
-    let mut map = BTreeMap::new();
-    for (old_schema, (custom_schema_name, node_name)) in &schema_to_input {
-        let new_schema =
-            render_schema_name_macro(jinja_env, custom_schema_name.as_deref(), node_name).map_err(
-                |e| {
-                    DbtTemporalError::Compilation(format!(
-                        "re-executing generate_schema_name for schema {old_schema:?}: {e:#}"
-                    ))
-                },
-            )?;
-        if !new_schema.is_empty() && new_schema != *old_schema {
-            map.insert(old_schema.clone(), new_schema);
-        }
-    }
-    Ok(map)
-}
-
-/// Build the schema rewrite map for the **default** `generate_schema_name`
-/// path, covering every distinct schema in the project.
-///
-/// The single-token substitution this replaces only knew the startup default
-/// schema, so a model configured into `<default>_marketing` kept naming the
-/// startup schema in every downstream `ref()` — the run wrote to the right
-/// relation and read from the wrong one. Reusing the per-node reconstruction
-/// gives every schema the same treatment the node's own relation gets.
-pub fn build_default_schema_rewrite_map(
-    state: &WorkerState,
-    env_schema: Option<&str>,
-    env_database: Option<&str>,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    if env_schema.is_none() {
-        return map;
-    }
-    for (unique_id, node) in state.resolver_state.nodes.iter() {
-        if !takes_part_in_the_rewrite(node) {
-            continue;
-        }
-        let base = node.base();
-        if map.contains_key(&base.schema) {
-            continue;
-        }
-        if let Some(patch) = compute_patched_relation_inner(
-            &state.default_schema,
-            &state.default_database,
-            &base.schema,
-            &base.database,
-            env_schema,
-            env_database,
-            unique_id,
-        ) && patch.patched_schema
-        {
-            map.insert(base.schema.clone(), patch.schema);
-        }
-    }
-    map
-}
-
-/// Render `{{ generate_schema_name(custom_schema_name, node) }}` through the
-/// already-configured Jinja env. The env must have env_var() overridden and target
-/// patched; this function only builds the argument and fires the call.
-fn render_schema_name_macro(
-    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
-    custom_schema_name: Option<&str>,
-    node_name: &str,
+    project_name: &str,
+    macro_name: &str,
+    custom_name: Option<&str>,
+    node: &minijinja::Value,
 ) -> Result<String, anyhow::Error> {
-    let arg = custom_schema_name.map_or_else(
-        || "none".to_string(),
-        |s| {
-            // Escape single quotes so the Jinja literal is valid.
-            let escaped = s.replace('\'', "\\'");
-            format!("'{escaped}'")
-        },
-    );
+    let template_name = naming_macro_template(jinja_env, project_name, macro_name)
+        .ok_or_else(|| anyhow::anyhow!("no template defines {macro_name}"))?;
+    let template = jinja_env
+        .env
+        .get_template(&template_name)
+        .map_err(|e| anyhow::anyhow!("template {template_name} not found: {e}"))?;
+    let state = template
+        .eval_to_state(BTreeMap::<String, minijinja::Value>::new(), &[])
+        .map_err(|e| anyhow::anyhow!("evaluating {template_name}: {e}"))?;
+    let func = state
+        .lookup(macro_name, &[])
+        .ok_or_else(|| anyhow::anyhow!("macro {macro_name} not found in {template_name}"))?;
 
-    // Build a minimal node object. Most generate_schema_name implementations only
-    // read `node.name`; the full node is available at run time so this covers
-    // the common case. Macros that need more fields (config, fqn, …) should use
-    // the profiles.yml approach where target.schema carries the per-tenant value.
-    let mut node_map = BTreeMap::<String, minijinja::Value>::new();
-    node_map.insert("name".to_owned(), minijinja::Value::from(node_name));
-    let node_val = minijinja::Value::from(node_map);
-
-    let template = format!("{{{{ generate_schema_name({arg}, node) }}}}");
-    let mut ctx = BTreeMap::new();
-    ctx.insert("node".to_owned(), node_val);
-
-    jinja_env
-        .render_str(&template, &ctx, &[])
-        .map(|s| s.trim().to_string())
-        .map_err(anyhow::Error::from)
+    let custom = custom_name.map_or_else(|| minijinja::Value::from(()), minijinja::Value::from);
+    let out = func
+        .call(&state, &[custom, node.clone()], &[])
+        .map_err(|e| anyhow::anyhow!("calling {macro_name}: {e}"))?;
+    Ok(out.as_str().unwrap_or_default().trim().to_string())
 }
 
-/// Apply a schema rewrite map to the node Jinja context (`this`, `schema`).
-/// Also patches `database` when the workflow supplies a new one.
+/// The template that defines a naming macro, preferring the root project's own
+/// — which is dbt's precedence: a project's override beats a package's.
+fn naming_macro_template(
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    project_name: &str,
+    macro_name: &str,
+) -> Option<String> {
+    let preferred = format!("{project_name}.{macro_name}");
+    if jinja_env.env.get_template(&preferred).is_ok() {
+        return Some(preferred);
+    }
+    super::super::node_helpers::find_materialization_template(jinja_env, macro_name)
+}
+
+/// The `node` a naming macro is handed.
 ///
-/// Used in the custom-macro path after `build_schema_rewrite_map`.
+/// dbt passes the whole node, and macros in the wild read far more than its
+/// name: `node.config.materialized`, `node.tags`, `node.fqn[0]`,
+/// `node.resource_type`, the package a model came from. Passing a one-field
+/// stand-in made every one of those undefined, which a macro reads as "not
+/// set" rather than as an error — so it quietly returned the wrong schema.
+fn naming_macro_node(node: &dyn InternalDbtNodeAttributes) -> minijinja::Value {
+    let common = node.common();
+    let base = node.base();
+    let mut map = BTreeMap::<String, minijinja::Value>::new();
+    map.insert("name".to_owned(), minijinja::Value::from(common.name.as_str()));
+    map.insert("unique_id".to_owned(), minijinja::Value::from(common.unique_id.as_str()));
+    map.insert("package_name".to_owned(), minijinja::Value::from(common.package_name.as_str()));
+    map.insert("fqn".to_owned(), minijinja::Value::from(common.fqn.clone()));
+    map.insert("tags".to_owned(), minijinja::Value::from(common.tags.clone()));
+    map.insert(
+        "resource_type".to_owned(),
+        minijinja::Value::from(node.resource_type().as_str_name()),
+    );
+    map.insert("path".to_owned(), minijinja::Value::from(common.path.to_string()));
+    map.insert(
+        "original_file_path".to_owned(),
+        minijinja::Value::from(common.original_file_path.to_string()),
+    );
+    map.insert("alias".to_owned(), minijinja::Value::from(base.alias.as_str()));
+    map.insert("identifier".to_owned(), minijinja::Value::from(base.alias.as_str()));
+    map.insert("schema".to_owned(), minijinja::Value::from(base.schema.as_str()));
+    map.insert("database".to_owned(), minijinja::Value::from(base.database.as_str()));
+    map.insert(
+        "config".to_owned(),
+        super::yml_to_value::yml_value_to_minijinja(&node.serialized_config()),
+    );
+    minijinja::Value::from(map)
+}
+
+/// Apply the node's own resolved relation to its Jinja context: `this` — the
+/// relation materializations call methods on — plus the bare `schema` and
+/// `database` globals.
 ///
 /// A relation that cannot be built is an error rather than a skipped step. The
-/// bare `schema` and `database` globals are patched either way, so swallowing
-/// it left `this` still pointing at the startup relation while everything
-/// around it named the new one — the materialization would write to the old
-/// schema and the run would report the new.
-pub fn apply_schema_map_to_context(
-    state: &WorkerState,
+/// bare globals are patched either way, so swallowing it left `this` still
+/// pointing at the startup relation while everything around it named the new
+/// one — the materialization would write to the old schema and the run would
+/// report the new.
+pub fn apply_relation_to_context(
     base: &NodeBaseAttributes,
-    schema_map: &BTreeMap<String, String>,
-    env_database: Option<&str>,
+    resolved: &NodeRelation,
     node_context: &mut BTreeMap<String, minijinja::Value>,
 ) -> Result<(), anyhow::Error> {
-    let new_schema = schema_map.get(&base.schema).map(String::as_str);
-    let new_database = env_database.filter(|_| base.database == state.default_database);
-
-    let effective_schema = new_schema.unwrap_or(&base.schema);
-    let effective_database = new_database.unwrap_or(&base.database);
-
-    if new_schema.is_some() || new_database.is_some() {
-        let relation = dbt_adapter::relation::do_create_relation(
-            base.adapter,
-            effective_database.to_string(),
-            effective_schema.to_string(),
-            Some(base.alias.clone()),
-            None,
-            base.quoting,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "building the patched relation \
-                 {effective_database}.{effective_schema}.{}: {e}",
-                base.alias
-            )
-        })?;
-        let relation_value =
-            dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value();
-        node_context.insert("this".to_owned(), relation_value);
-    }
-    if new_schema.is_some() {
-        node_context.insert("schema".to_owned(), minijinja::Value::from(effective_schema));
-    }
-    if new_database.is_some() {
-        node_context.insert("database".to_owned(), minijinja::Value::from(effective_database));
-    }
-    Ok(())
-}
-
-/// Apply a patched relation to the node Jinja context: rebuilds `this`
-/// (the relation that materializations call methods on) plus the bare
-/// `schema` and `database` globals.
-///
-/// Used in the default-macro path after `compute_patched_relation`.
-pub fn apply_patched_relation(
-    base: &NodeBaseAttributes,
-    patch: &PatchedRelation,
-    node_context: &mut BTreeMap<String, minijinja::Value>,
-) {
-    let patched_schema = if patch.patched_schema {
-        patch.schema.as_str()
-    } else {
-        &base.schema
-    };
-    let patched_database = if patch.patched_database {
-        patch.database.as_str()
-    } else {
-        &base.database
-    };
-
-    if let Ok(relation) = dbt_adapter::relation::do_create_relation(
+    let relation = dbt_adapter::relation::do_create_relation(
         base.adapter,
-        patched_database.to_string(),
-        patched_schema.to_string(),
+        resolved.database.clone(),
+        resolved.schema.clone(),
         Some(base.alias.clone()),
         None,
         base.quoting,
-    ) {
-        let relation_value =
-            dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value();
-        node_context.insert("this".to_owned(), relation_value);
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "building the patched relation {}.{}.{}: {e}",
+            resolved.database,
+            resolved.schema,
+            base.alias
+        )
+    })?;
+    node_context.insert(
+        "this".to_owned(),
+        dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value(),
+    );
+    if resolved.schema != base.schema {
+        node_context.insert("schema".to_owned(), minijinja::Value::from(resolved.schema.as_str()));
     }
-    if patch.patched_schema {
-        node_context.insert("schema".to_owned(), minijinja::Value::from(patched_schema));
+    if resolved.database != base.database {
+        node_context
+            .insert("database".to_owned(), minijinja::Value::from(resolved.database.as_str()));
     }
-    if patch.patched_database {
-        node_context.insert("database".to_owned(), minijinja::Value::from(patched_database));
-    }
-}
-
-/// Build a database rewrite map for relation rewriting.
-///
-/// Only replaces the worker-startup default database — nodes configured with
-/// non-default databases are left unchanged (matching the relation-level logic
-/// in `compute_patched_relation` / `apply_schema_map_to_context`).
-pub fn build_database_rewrite_map(
-    state: &WorkerState,
-    env_database: Option<&str>,
-) -> BTreeMap<String, String> {
-    let Some(new_db) = env_database else {
-        return BTreeMap::new();
-    };
-    if new_db == state.default_database {
-        return BTreeMap::new();
-    }
-    // Collect all distinct databases in the project; only remap the default.
-    let default_databases: BTreeSet<String> = state
-        .resolver_state
-        .nodes
-        .iter()
-        .filter(|(_, n)| {
-            takes_part_in_the_rewrite(*n) && n.base().database == state.default_database
-        })
-        .map(|(_, n)| n.base().database.clone())
-        .collect();
-
-    default_databases
-        .into_iter()
-        .map(|old| (old, new_db.to_string()))
-        .collect()
+    Ok(())
 }
 
 #[cfg(test)]
@@ -407,8 +424,6 @@ mod tests {
         .expect("should produce a patch");
         assert_eq!(result.schema, "workflow_42");
         assert_eq!(result.database, "warehouse");
-        assert!(result.patched_schema);
-        assert!(!result.patched_database);
     }
 
     #[test]
@@ -454,8 +469,6 @@ mod tests {
         .expect("should produce a patch");
         assert_eq!(result.schema, "raw");
         assert_eq!(result.database, "override_db");
-        assert!(!result.patched_schema);
-        assert!(result.patched_database);
     }
 
     #[test]
@@ -472,8 +485,6 @@ mod tests {
         .expect("should produce a patch");
         assert_eq!(result.schema, "workflow_42");
         assert_eq!(result.database, "other_db");
-        assert!(result.patched_schema);
-        assert!(!result.patched_database);
     }
 
     #[test]
@@ -503,44 +514,139 @@ mod tests {
         )
         .expect("schema patch alone should still produce a result");
         assert_eq!(result.database, "warehouse");
-        assert!(!result.patched_database);
     }
 
-    // --- render_schema_name_macro ---
+    // --- render_naming_macro ---
+
+    fn node_named(name: &str) -> minijinja::Value {
+        let mut map = BTreeMap::<String, minijinja::Value>::new();
+        map.insert("name".to_owned(), minijinja::Value::from(name));
+        minijinja::Value::from(map)
+    }
+
+    /// A project macro is a template named `<package>.<macro>`, which is why
+    /// the renderer looks one up rather than evaluating a bare expression.
+    fn env_with_macro(
+        template_name: &str,
+        body: &str,
+    ) -> dbt_jinja_utils::jinja_environment::JinjaEnv {
+        let mut env = minijinja::Environment::new();
+        env.add_template_owned(template_name.to_string(), body.to_string(), None)
+            .expect("add template");
+        dbt_jinja_utils::jinja_environment::JinjaEnv::new(env)
+    }
+
+    const SCHEMA_MACRO: &str = "{% macro generate_schema_name(custom, node) %}\
+        {%- if custom is none -%}default_{{ node.name }}\
+        {%- else -%}custom_{{ custom }}_{{ node.name }}{%- endif -%}\
+    {% endmacro %}";
 
     #[test]
-    fn render_schema_name_macro_returns_target_schema_for_none_arg() {
-        let mut env = minijinja::Environment::new();
-        env.add_function(
+    fn render_naming_macro_passes_none_when_the_node_sets_no_override() {
+        let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
+        let result = render_naming_macro(
+            &env,
+            "spike",
             "generate_schema_name",
-            |custom: minijinja::Value, _node: minijinja::Value| -> String {
-                if custom.is_none() {
-                    "default_schema".to_string()
-                } else {
-                    format!("custom_{custom}")
-                }
-            },
-        );
-        let jinja_env = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
-        let result = render_schema_name_macro(&jinja_env, None, "my_model").unwrap();
-        assert_eq!(result, "default_schema");
+            None,
+            &node_named("my_model"),
+        )
+        .unwrap();
+        assert_eq!(result, "default_my_model");
     }
 
     #[test]
-    fn render_schema_name_macro_passes_custom_schema_name() {
-        let mut env = minijinja::Environment::new();
-        env.add_function(
+    fn render_naming_macro_passes_the_custom_name_through() {
+        let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
+        let result = render_naming_macro(
+            &env,
+            "spike",
             "generate_schema_name",
-            |custom: minijinja::Value, _node: minijinja::Value| -> String {
-                if custom.is_none() {
-                    "default".to_string()
-                } else {
-                    format!("prefix_{custom}")
-                }
-            },
+            Some("marketing"),
+            &node_named("my_model"),
+        )
+        .unwrap();
+        assert_eq!(result, "custom_marketing_my_model");
+    }
+
+    /// A project can override the database macro alone, so it is dispatched by
+    /// name rather than assumed to be the schema one.
+    #[test]
+    fn render_naming_macro_calls_the_macro_it_is_given() {
+        let env = env_with_macro(
+            "spike.generate_database_name",
+            "{% macro generate_database_name(custom, node) %}db_{{ node.name }}{% endmacro %}",
         );
-        let jinja_env = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
-        let result = render_schema_name_macro(&jinja_env, Some("marketing"), "my_model").unwrap();
-        assert_eq!(result, "prefix_marketing");
+        let result = render_naming_macro(
+            &env,
+            "spike",
+            "generate_database_name",
+            None,
+            &node_named("my_model"),
+        )
+        .unwrap();
+        assert_eq!(result, "db_my_model");
+    }
+
+    /// dbt's precedence: the root project's override wins over a package's.
+    #[test]
+    fn render_naming_macro_prefers_the_root_projects_own() {
+        let mut env = minijinja::Environment::new();
+        env.add_template_owned(
+            "some_package.generate_schema_name".to_string(),
+            "{% macro generate_schema_name(custom, node) %}package{% endmacro %}".to_string(),
+            None,
+        )
+        .expect("add template");
+        env.add_template_owned(
+            "spike.generate_schema_name".to_string(),
+            "{% macro generate_schema_name(custom, node) %}root{% endmacro %}".to_string(),
+            None,
+        )
+        .expect("add template");
+        let env = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
+        let result =
+            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
+                .unwrap();
+        assert_eq!(result, "root");
+    }
+
+    /// A package's macro is still used when the root project defines none —
+    /// which is how a project inherits one from a dependency.
+    #[test]
+    fn render_naming_macro_falls_back_to_a_package() {
+        let env = env_with_macro(
+            "some_package.generate_schema_name",
+            "{% macro generate_schema_name(custom, node) %}package_{{ node.name }}{% endmacro %}",
+        );
+        let result =
+            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
+                .unwrap();
+        assert_eq!(result, "package_m");
+    }
+
+    #[test]
+    fn render_naming_macro_reports_a_macro_it_cannot_find() {
+        let env = env_with_macro("spike.other", "{% macro other() %}x{% endmacro %}");
+        let err =
+            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
+                .expect_err("a missing macro must be reported");
+        assert!(err.to_string().contains("generate_schema_name"), "should name the macro: {err}");
+    }
+
+    /// A custom name carrying an apostrophe reaches the macro intact — it is
+    /// passed as a value, not spliced into a template string.
+    #[test]
+    fn render_naming_macro_passes_a_quoted_custom_name_through() {
+        let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
+        let result = render_naming_macro(
+            &env,
+            "spike",
+            "generate_schema_name",
+            Some("it's"),
+            &node_named("m"),
+        )
+        .unwrap();
+        assert_eq!(result, "custom_it's_m");
     }
 }

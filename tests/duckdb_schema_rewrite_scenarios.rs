@@ -60,6 +60,10 @@ async fn custom_generate_schema_name_macro_is_re_executed_per_workflow() {
         .await
         .unwrap();
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success);
+    // Asserting the relation, not just success: a run that quietly fell back
+    // to dbt's built-in macro also succeeds — it just writes somewhere else.
+    assert_eq!(result.relation_name.as_deref(), Some("spike.custom_workflow42.plain"));
+    assert_eq!(harness.query_scalar("select id from custom_workflow42.plain"), "1");
 }
 
 #[tokio::test]
@@ -76,6 +80,10 @@ async fn custom_generate_schema_name_macro_honours_per_model_schema_override() {
         .await
         .unwrap();
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success);
+    assert_eq!(
+        result.relation_name.as_deref(),
+        Some("spike.custom_workflow42_marts.overridden")
+    );
 }
 
 #[tokio::test]
@@ -86,4 +94,7 @@ async fn custom_macro_schema_rewrite_is_a_no_op_without_env_override() {
     let harness = Harness::build_files_with_profile(CUSTOM_MACRO_FILES, CUSTOM_MACRO_PROFILE).await;
     let result = harness.run("plain").await.unwrap();
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success);
+    // The schema dbt itself resolved at startup, when the macro ran with
+    // `target.schema = main`. Nothing patches it, because nothing changed.
+    assert_eq!(result.relation_name.as_deref(), Some("spike.custom_main.plain"));
 }

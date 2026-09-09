@@ -27,20 +27,42 @@
 
 use std::collections::BTreeMap;
 
-/// The names to swap, split by which position they may legally appear in.
+/// Where each of the run's relations moved, indexed the way compiled SQL
+/// names them: by the schema and identifier the startup manifest resolved.
 ///
-/// Keeping schemas and databases apart matters: a project whose database and
-/// one of its schemas share a name would otherwise have each rewritten with
-/// the other's replacement.
+/// Indexing by relation rather than by schema name is what lets two nodes that
+/// share a startup schema resolve to different ones — which a project's own
+/// `generate_schema_name` is free to do — and what keeps a source sharing that
+/// schema from being dragged along with the models.
 #[derive(Debug, Default, Clone)]
 pub struct RelationRewrite {
-    pub schemas: BTreeMap<String, String>,
-    pub databases: BTreeMap<String, String>,
+    by_schema: BTreeMap<String, BTreeMap<String, RelationMove>>,
+}
+
+/// The destination of one relation, plus the database it started in — needed
+/// to tell a `db.schema.name` whose database this run also moves from one
+/// whose database it leaves alone.
+#[derive(Debug, Clone)]
+pub struct RelationMove {
+    pub old_database: String,
+    pub new_database: String,
+    pub new_schema: String,
 }
 
 impl RelationRewrite {
+    pub fn insert(&mut self, old_schema: &str, old_identifier: &str, moved: RelationMove) {
+        self.by_schema
+            .entry(old_schema.to_owned())
+            .or_default()
+            .insert(old_identifier.to_owned(), moved);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.schemas.is_empty() && self.databases.is_empty()
+        self.by_schema.is_empty()
+    }
+
+    fn get(&self, schema: &str, identifier: &str) -> Option<&RelationMove> {
+        self.by_schema.get(schema)?.get(identifier)
     }
 }
 
@@ -52,12 +74,12 @@ struct Component {
     end: usize,
 }
 
-/// A dotted identifier chain. Only the two leading components can ever be
-/// qualifiers, so the rest is counted rather than kept.
+/// A dotted identifier chain. A relation is at most three components, so the
+/// rest is counted rather than kept.
 struct Chain {
     first: Component,
     second: Option<Component>,
-    len: usize,
+    third: Option<Component>,
 }
 
 pub fn rewrite_relations(sql: String, rewrite: &RelationRewrite) -> String {
@@ -115,12 +137,11 @@ pub fn rewrite_relations(sql: String, rewrite: &RelationRewrite) -> String {
 
 /// Decide which components of one dotted chain to rewrite.
 ///
-/// `db.schema.name` and `schema.name` are both compiled by dbt, and a column
-/// reference can extend either (`schema.table.column`). Matching against the
-/// maps rather than against the chain length resolves that: a leading
-/// component that names a known database is a database, one that names a known
-/// schema is a schema, and a chain that starts with neither may still carry the
-/// schema in second position because its database is not being remapped.
+/// dbt renders a relation as `database.schema.identifier` or
+/// `schema.identifier`, and a column reference can extend either. Looking the
+/// trailing pair up as a relation first, then the leading pair, tells those
+/// apart without a parser: `db.schema.tbl` matches on (schema, tbl), while
+/// `schema.tbl.col` misses on (tbl, col) and matches on (schema, tbl).
 fn plan_edits<'a>(
     sql: &str,
     chain: &Chain,
@@ -133,23 +154,25 @@ fn plan_edits<'a>(
     };
     let name = |c: Component| &sql[c.start..c.end];
 
-    if chain.len >= 3
-        && let Some(new_db) = rewrite.databases.get(name(chain.first))
+    if let Some(third) = chain.third
+        && let Some(moved) = rewrite.get(name(second), name(third))
     {
-        edits.push((chain.first.start, chain.first.end, new_db));
-        if let Some(new_schema) = rewrite.schemas.get(name(second)) {
-            edits.push((second.start, second.end, new_schema));
+        // Only this run's own database is remapped. A relation qualified by
+        // some other database keeps it — a BigQuery project the workflow does
+        // not own, say — while its dataset still moves.
+        if name(chain.first) == moved.old_database && moved.new_database != moved.old_database {
+            edits.push((chain.first.start, chain.first.end, &moved.new_database));
+        }
+        if moved.new_schema != name(second) {
+            edits.push((second.start, second.end, &moved.new_schema));
         }
         return;
     }
-    if let Some(new_schema) = rewrite.schemas.get(name(chain.first)) {
-        edits.push((chain.first.start, chain.first.end, new_schema));
-        return;
-    }
-    if chain.len >= 3
-        && let Some(new_schema) = rewrite.schemas.get(name(second))
+
+    if let Some(moved) = rewrite.get(name(chain.first), name(second))
+        && moved.new_schema != name(chain.first)
     {
-        edits.push((second.start, second.end, new_schema));
+        edits.push((chain.first.start, chain.first.end, &moved.new_schema));
     }
 }
 
@@ -163,8 +186,9 @@ fn scan_chain(bytes: &[u8], start: usize) -> Option<(Chain, usize)> {
     let mut chain = Chain {
         first,
         second: None,
-        len: 1,
+        third: None,
     };
+    let mut len = 1usize;
     loop {
         let after_name = i;
         let mut j = skip_whitespace(bytes, i);
@@ -175,10 +199,14 @@ fn scan_chain(bytes: &[u8], start: usize) -> Option<(Chain, usize)> {
         let Some((next, after)) = scan_component(bytes, j) else {
             return Some((chain, after_name));
         };
-        if chain.len == 1 {
-            chain.second = Some(next);
+        match len {
+            1 => chain.second = Some(next),
+            2 => chain.third = Some(next),
+            // A fourth component and beyond cannot be part of the relation:
+            // `db.schema.table.column` already ends the relation at `table`.
+            _ => {}
         }
-        chain.len += 1;
+        len += 1;
         i = after;
     }
 }
@@ -310,18 +338,21 @@ fn skip_dollar_quoted(bytes: &[u8], start: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
-            .collect()
-    }
-
-    fn schemas(pairs: &[(&str, &str)]) -> RelationRewrite {
-        RelationRewrite {
-            schemas: map(pairs),
-            databases: BTreeMap::new(),
+    /// `(old_schema, identifier) -> new_schema`, with the database untouched.
+    fn schemas(entries: &[(&str, &str, &str)]) -> RelationRewrite {
+        let mut r = RelationRewrite::default();
+        for (old_schema, identifier, new_schema) in entries {
+            r.insert(
+                old_schema,
+                identifier,
+                RelationMove {
+                    old_database: "warehouse".to_owned(),
+                    new_database: "warehouse".to_owned(),
+                    new_schema: (*new_schema).to_owned(),
+                },
+            );
         }
+        r
     }
 
     fn rewrite(sql: &str, r: &RelationRewrite) -> String {
@@ -330,7 +361,7 @@ mod tests {
 
     #[test]
     fn rewrites_a_double_quoted_schema() {
-        let r = schemas(&[("dbt_dev", "dbt_tenant1")]);
+        let r = schemas(&[("dbt_dev", "orders", "dbt_tenant1")]);
         assert_eq!(
             rewrite(r#"SELECT * FROM "dbt_dev"."orders""#, &r),
             r#"SELECT * FROM "dbt_tenant1"."orders""#
@@ -339,7 +370,7 @@ mod tests {
 
     #[test]
     fn rewrites_a_backtick_quoted_schema_leaving_the_project_alone() {
-        let r = schemas(&[("dbt_dev", "dbt_tenant1")]);
+        let r = schemas(&[("dbt_dev", "orders", "dbt_tenant1")]);
         assert_eq!(
             rewrite("SELECT * FROM `my-project`.`dbt_dev`.`orders`", &r),
             "SELECT * FROM `my-project`.`dbt_tenant1`.`orders`"
@@ -347,8 +378,11 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_every_schema_in_the_statement() {
-        let r = schemas(&[("dev_analytics", "t1_analytics"), ("dev_raw", "t1_raw")]);
+    fn rewrites_every_relation_in_the_statement() {
+        let r = schemas(&[
+            ("dev_analytics", "a", "t1_analytics"),
+            ("dev_raw", "b", "t1_raw"),
+        ]);
         assert_eq!(
             rewrite(r#"SELECT * FROM "dev_analytics"."a" JOIN "dev_raw"."b" ON TRUE"#, &r),
             r#"SELECT * FROM "t1_analytics"."a" JOIN "t1_raw"."b" ON TRUE"#
@@ -361,39 +395,68 @@ mod tests {
         assert_eq!(rewrite(sql, &RelationRewrite::default()), sql);
     }
 
+    /// Two models that share a startup schema may resolve to different ones.
+    /// A schema-to-schema map could only pick one of these.
+    #[test]
+    fn two_relations_in_one_schema_can_move_apart() {
+        let r = schemas(&[
+            ("dev", "orders", "tenant_a"),
+            ("dev", "customers", "tenant_b"),
+        ]);
+        assert_eq!(
+            rewrite(r#""dev"."orders" JOIN "dev"."customers""#, &r),
+            r#""tenant_a"."orders" JOIN "tenant_b"."customers""#
+        );
+    }
+
+    /// A source shares the models' schema in almost every dev project, and its
+    /// table is one dbt did not create — so it is absent from the map and must
+    /// come through untouched.
+    #[test]
+    fn a_relation_absent_from_the_map_is_left_alone() {
+        let r = schemas(&[("dev", "orders", "tenant1")]);
+        assert_eq!(
+            rewrite(r#""dev"."orders" JOIN "dev"."events""#, &r),
+            r#""tenant1"."orders" JOIN "dev"."events""#
+        );
+    }
+
     /// The whole point of the position rule. A search-and-replace changed the
     /// data this query returns.
     #[test]
     fn leaves_string_literals_alone() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "t", "tenant1")]);
         assert_eq!(
-            rewrite(r#"SELECT '"dev"' AS label, 'dev.x' AS b FROM "dev"."t""#, &r),
-            r#"SELECT '"dev"' AS label, 'dev.x' AS b FROM "tenant1"."t""#
+            rewrite(r#"SELECT '"dev"."t"' AS label FROM "dev"."t""#, &r),
+            r#"SELECT '"dev"."t"' AS label FROM "tenant1"."t""#
         );
     }
 
     #[test]
     fn leaves_escaped_quotes_inside_literals_alone() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "t", "tenant1")]);
         // The doubled quote keeps the literal open past the first apostrophe.
         assert_eq!(
-            rewrite(r#"SELECT 'it''s "dev".x' FROM "dev"."t""#, &r),
-            r#"SELECT 'it''s "dev".x' FROM "tenant1"."t""#
+            rewrite(r#"SELECT 'it''s "dev"."t"' FROM "dev"."t""#, &r),
+            r#"SELECT 'it''s "dev"."t"' FROM "tenant1"."t""#
         );
     }
 
     #[test]
     fn leaves_comments_alone() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(
-            rewrite("-- from dev.orders\n/* dev.x /* dev.y */ */ SELECT * FROM dev.orders", &r),
-            "-- from dev.orders\n/* dev.x /* dev.y */ */ SELECT * FROM tenant1.orders"
+            rewrite(
+                "-- from dev.orders\n/* dev.orders /* dev.orders */ */ SELECT * FROM dev.orders",
+                &r
+            ),
+            "-- from dev.orders\n/* dev.orders /* dev.orders */ */ SELECT * FROM tenant1.orders"
         );
     }
 
     #[test]
     fn leaves_dollar_quoted_bodies_alone() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(
             rewrite("SELECT $tag$ dev.orders $tag$ FROM dev.orders", &r),
             "SELECT $tag$ dev.orders $tag$ FROM tenant1.orders"
@@ -403,7 +466,7 @@ mod tests {
     /// A bare name is a column, an alias, or a CTE — never a qualifier.
     #[test]
     fn leaves_unqualified_names_alone() {
-        let r = schemas(&[("raw", "workflow_42")]);
+        let r = schemas(&[("raw", "orders", "workflow_42")]);
         assert_eq!(
             rewrite(r#"WITH raw AS (SELECT 1) SELECT "raw" FROM raw"#, &r),
             r#"WITH raw AS (SELECT 1) SELECT "raw" FROM raw"#
@@ -413,19 +476,19 @@ mod tests {
     /// Sequential `String::replace` calls turned both source schemas into `c`.
     #[test]
     fn chained_mappings_do_not_cascade() {
-        let r = schemas(&[("a", "b"), ("b", "c")]);
+        let r = schemas(&[("a", "t", "b"), ("b", "t", "c")]);
         assert_eq!(rewrite(r#""a"."t", "b"."t""#, &r), r#""b"."t", "c"."t""#);
     }
 
     #[test]
     fn rewrites_unquoted_relations() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(rewrite("SELECT * FROM dev.orders", &r), "SELECT * FROM tenant1.orders");
     }
 
     #[test]
     fn rewrites_a_mixed_quoting_chain() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(
             rewrite(r#"SELECT * FROM "dev".orders"#, &r),
             r#"SELECT * FROM "tenant1".orders"#
@@ -434,67 +497,72 @@ mod tests {
 
     #[test]
     fn rewrites_the_database_and_schema_of_a_three_part_name() {
-        let r = RelationRewrite {
-            schemas: map(&[("dev", "tenant1")]),
-            databases: map(&[("warehouse", "wh_tenant1")]),
-        };
+        let mut r = RelationRewrite::default();
+        r.insert(
+            "dev",
+            "orders",
+            RelationMove {
+                old_database: "warehouse".to_owned(),
+                new_database: "wh_tenant1".to_owned(),
+                new_schema: "tenant1".to_owned(),
+            },
+        );
         assert_eq!(
             rewrite(r#"SELECT * FROM "warehouse"."dev"."orders""#, &r),
             r#"SELECT * FROM "wh_tenant1"."tenant1"."orders""#
         );
     }
 
-    /// BigQuery projects are not remapped, but the dataset behind them is.
+    /// A relation qualified by a database this run does not own — a BigQuery
+    /// project it only reads from — keeps it, while its dataset still moves.
     #[test]
-    fn rewrites_the_schema_when_the_database_is_not_remapped() {
-        let r = schemas(&[("dev", "tenant1")]);
+    fn leaves_a_database_this_run_does_not_own_alone() {
+        let mut r = RelationRewrite::default();
+        r.insert(
+            "dev",
+            "orders",
+            RelationMove {
+                old_database: "warehouse".to_owned(),
+                new_database: "wh_tenant1".to_owned(),
+                new_schema: "tenant1".to_owned(),
+            },
+        );
         assert_eq!(
-            rewrite("SELECT * FROM `my-project`.`dev`.`orders`", &r),
-            "SELECT * FROM `my-project`.`tenant1`.`orders`"
+            rewrite("SELECT * FROM `other-project`.`dev`.`orders`", &r),
+            "SELECT * FROM `other-project`.`tenant1`.`orders`"
         );
     }
 
-    /// `schema.table.column` reads as a schema, not as a database, because the
-    /// name matches the schema map and no database map entry claims it.
+    /// `schema.table.column` must read as a schema-qualified relation with a
+    /// column suffix, not as a database-qualified one.
     #[test]
     fn a_qualified_column_reference_still_rewrites_its_schema() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(rewrite(r#""dev"."orders"."id""#, &r), r#""tenant1"."orders"."id""#);
-    }
-
-    /// A database and a schema sharing a name used to be rewritten with
-    /// whichever mapping the merged map happened to hold.
-    #[test]
-    fn a_shared_name_takes_the_mapping_for_its_own_position() {
-        let r = RelationRewrite {
-            schemas: map(&[("shared", "schema_new")]),
-            databases: map(&[("shared", "db_new")]),
-        };
-        assert_eq!(rewrite(r#""shared"."shared"."t""#, &r), r#""db_new"."schema_new"."t""#);
     }
 
     #[test]
     fn tolerates_whitespace_around_the_dots() {
-        let r = schemas(&[("dev", "tenant1")]);
+        let r = schemas(&[("dev", "orders", "tenant1")]);
         assert_eq!(rewrite(r#""dev" . "orders""#, &r), r#""tenant1" . "orders""#);
     }
 
     #[test]
     fn an_unterminated_quote_rewrites_nothing_after_it() {
-        let r = schemas(&[("dev", "tenant1")]);
-        let sql = r#"SELECT * FROM "dev"."t" WHERE x = "dev.t"#;
-        assert_eq!(rewrite(sql, &r), r#"SELECT * FROM "tenant1"."t" WHERE x = "dev.t"#);
+        let r = schemas(&[("dev", "t", "tenant1")]);
+        let sql = r#"SELECT * FROM "dev"."t" WHERE x = "dev"."t"#;
+        assert_eq!(rewrite(sql, &r), r#"SELECT * FROM "tenant1"."t" WHERE x = "dev"."t"#);
     }
 
     #[test]
     fn handles_non_ascii_identifiers() {
-        let r = schemas(&[("café", "tenant1")]);
+        let r = schemas(&[("café", "orders", "tenant1")]);
         assert_eq!(rewrite("SELECT * FROM café.orders", &r), "SELECT * FROM tenant1.orders");
     }
 
     #[test]
     fn leaves_numeric_literals_alone() {
-        let r = schemas(&[("1", "2")]);
-        assert_eq!(rewrite("SELECT 1.5, 1.orders", &r), "SELECT 1.5, 1.orders");
+        let r = schemas(&[("1", "5", "2")]);
+        assert_eq!(rewrite("SELECT 1.5", &r), "SELECT 1.5");
     }
 }

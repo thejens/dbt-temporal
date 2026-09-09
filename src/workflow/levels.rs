@@ -198,6 +198,25 @@ const fn should_continue_as_new(
     can_continue && levels_done_this_segment > 0 && suggested
 }
 
+/// How many node activities one level may have outstanding at a time.
+///
+/// Temporal Cloud caps a workflow at 2,000 incomplete activities and recommends
+/// no more than 500 concurrent operations; a self-hosted server has its own
+/// limits on incomplete activities and on the size of one workflow task's
+/// command batch. A DAG level's width is a property of the project, not of any
+/// of that, so it has to be bounded here.
+const MAX_ACTIVITIES_IN_FLIGHT: usize = 500;
+
+/// Take the nodes that may start now, given how many are already outstanding.
+///
+/// Separated from the scheduling itself so the bound is testable: everything
+/// around it needs a live workflow context, and "how many activities may be in
+/// flight" is the part that has to be right.
+fn take_startable<T>(pending: &mut std::collections::VecDeque<T>, in_flight: usize) -> Vec<T> {
+    let room = MAX_ACTIVITIES_IN_FLIGHT.saturating_sub(in_flight);
+    pending.drain(..room.min(pending.len())).collect()
+}
+
 #[allow(clippy::too_many_lines)]
 // Sequential phases (skip-checks → schedule → collect → memo) are clearer
 // inline than as a tower of single-call helpers.
@@ -317,47 +336,74 @@ async fn execute_one_level(
         }
     }
 
-    // Second pass: schedule activities.
-    let mut futures = Vec::new();
-    for (unique_id, node_input, activity_label) in nodes_to_schedule {
-        // Priority/fairness keys (server >= 1.31; older servers ignore them):
-        // priority_key orders nodes within a run by critical-path depth,
-        // fairness_key gives concurrent runs proportional dispatch on a
-        // shared queue instead of FIFO starvation.
-        let priority = if state.plan.priority_scheduling {
-            Some(
-                temporalio_common::Priority::builder()
-                    .maybe_priority_key(state.plan.nodes.get(&unique_id).and_then(|n| n.priority))
-                    .fairness_key(truncate_fairness_key(&state.plan.invocation_id))
+    // Second pass: schedule activities, at most `MAX_ACTIVITIES_IN_FLIGHT` of
+    // them outstanding at a time.
+    //
+    // Worker concurrency bounds how many nodes *execute*; it does nothing about
+    // how many are scheduled. A wide level used to put one command per node into
+    // a single workflow task, so a project with a few thousand independent
+    // models could exceed the server's limits on incomplete activities and on
+    // transaction size before the between-levels continuation check ever ran.
+    //
+    // Scheduling and awaiting both follow the level's own order, so replay sees
+    // the same commands in the same sequence, and a level narrower than the
+    // window is scheduled exactly as it was before.
+    let level_node_ids: Vec<String> = nodes_to_schedule
+        .iter()
+        .map(|(unique_id, _, _)| unique_id.clone())
+        .collect();
+    let mut pending: std::collections::VecDeque<_> = nodes_to_schedule.into();
+    let mut futures = std::collections::VecDeque::new();
+
+    // Take the next node off the queue and start it, if the window has room.
+    let fill_window =
+        |pending: &mut std::collections::VecDeque<(String, NodeExecutionInput, Option<String>)>,
+         futures: &mut std::collections::VecDeque<_>| {
+            for (unique_id, node_input, activity_label) in take_startable(pending, futures.len()) {
+                // Priority/fairness keys (server >= 1.31; older servers ignore them):
+                // priority_key orders nodes within a run by critical-path depth,
+                // fairness_key gives concurrent runs proportional dispatch on a
+                // shared queue instead of FIFO starvation.
+                let priority = if state.plan.priority_scheduling {
+                    Some(
+                        temporalio_common::Priority::builder()
+                            .maybe_priority_key(
+                                state.plan.nodes.get(&unique_id).and_then(|n| n.priority),
+                            )
+                            .fairness_key(truncate_fairness_key(&state.plan.invocation_id))
+                            .build(),
+                    )
+                } else {
+                    None
+                };
+                let future = ctx.execute_activity(
+                    DbtActivities::execute_node,
+                    node_input,
+                    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(
+                        state.timeouts.node_secs,
+                    ))
+                    .heartbeat_timeout(Duration::from_secs(state.timeouts.node_heartbeat_secs))
+                    .maybe_activity_id(activity_label.clone())
+                    .maybe_summary(activity_label)
+                    .cancellation_type(ActivityCancellationType::TryCancel)
+                    .retry_policy(build_retry_policy(state.retry_config))
+                    .maybe_priority(priority)
                     .build(),
-            )
-        } else {
-            None
+                );
+                futures.push_back((unique_id, future));
+            }
         };
-        let future = ctx.execute_activity(
-            DbtActivities::execute_node,
-            node_input,
-            ActivityOptions::with_start_to_close_timeout(Duration::from_secs(
-                state.timeouts.node_secs,
-            ))
-            .heartbeat_timeout(Duration::from_secs(state.timeouts.node_heartbeat_secs))
-            .maybe_activity_id(activity_label.clone())
-            .maybe_summary(activity_label)
-            .cancellation_type(ActivityCancellationType::TryCancel)
-            .retry_policy(build_retry_policy(state.retry_config))
-            .maybe_priority(priority)
-            .build(),
-        );
-        futures.push((unique_id, future));
-    }
+    fill_window(&mut pending, &mut futures);
 
     // Collect results for this level. Track which nodes have been processed
     // so we can mark the rest as cancelled if the workflow is cancelled mid-level.
-    let level_node_ids: Vec<String> = futures.iter().map(|(id, _)| id.clone()).collect();
     let mut processed_in_level = BTreeSet::new();
 
-    for (unique_id, future) in futures {
+    while let Some((unique_id, future)) = futures.pop_front() {
         let label = node_label(state.plan, &unique_id);
+
+        // One node leaving the window lets the next one in.
+        fill_window(&mut pending, &mut futures);
 
         match future.await {
             Ok(result) => {
@@ -439,6 +485,43 @@ fn truncate_fairness_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_ACTIVITIES_IN_FLIGHT, take_startable};
+    use std::collections::VecDeque;
+
+    /// A wide level must not put one command per node into a single workflow
+    /// task: worker concurrency bounds what executes, not what is scheduled,
+    /// and the server has its own limits on incomplete activities.
+    #[test]
+    fn a_level_wider_than_the_window_starts_only_what_fits() {
+        let mut pending: VecDeque<usize> = (0..1_200).collect();
+
+        let first = take_startable(&mut pending, 0);
+        assert_eq!(first.len(), MAX_ACTIVITIES_IN_FLIGHT);
+        assert_eq!(first[0], 0, "the level's own order is preserved");
+        assert_eq!(pending.len(), 1_200 - MAX_ACTIVITIES_IN_FLIGHT);
+    }
+
+    #[test]
+    fn a_full_window_starts_nothing_and_one_completion_starts_one() {
+        let mut pending: VecDeque<usize> = (0..10).collect();
+
+        assert!(take_startable(&mut pending, MAX_ACTIVITIES_IN_FLIGHT).is_empty());
+        assert_eq!(pending.len(), 10, "nothing was taken");
+
+        let next = take_startable(&mut pending, MAX_ACTIVITIES_IN_FLIGHT - 1);
+        assert_eq!(next, vec![0], "one slot freed starts exactly one node");
+    }
+
+    /// A level narrower than the window is scheduled exactly as it was before
+    /// the window existed — which is what keeps replay of an in-flight run
+    /// seeing the same commands in the same order.
+    #[test]
+    fn a_narrow_level_is_started_in_one_go() {
+        let mut pending: VecDeque<usize> = (0..7).collect();
+        assert_eq!(take_startable(&mut pending, 0), (0..7).collect::<Vec<_>>());
+        assert!(pending.is_empty());
+    }
+
     use super::{should_continue_as_new, truncate_fairness_key};
 
     // --- continue-as-new policy ---

@@ -133,6 +133,9 @@ pub async fn run_project_hooks_inner(
     let mut render_env = render_env::prepare_render_env(
         state,
         &render_env::RenderOverrides {
+            // Hooks run on the worker's own source: a hook is not a node, and
+            // nothing cancels one individually.
+            cancellation: &state.cancellation_source.token(),
             env: &input.env,
             target: input.target.as_deref(),
             vars: &input.vars,

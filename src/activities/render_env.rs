@@ -32,6 +32,14 @@ pub struct RenderOverrides<'a> {
     pub vars: &'a BTreeMap<String, serde_json::Value>,
     /// `--full-refresh` for this workflow.
     pub full_refresh: bool,
+    /// The token the adapter aborts on.
+    ///
+    /// One per unit of work, not the worker's own: the token is what lets a
+    /// cancelled activity stop the query it started, and a shared source would
+    /// mean cancelling one node cancels every node on the worker. It must
+    /// outlive the render — the engine holds only a `Weak` ref to its source,
+    /// so a dropped source reads as "already cancelled".
+    pub cancellation: &'a dbt_common::cancellation::CancellationToken,
 }
 
 /// A configured render environment, valid for one activity invocation.
@@ -116,7 +124,7 @@ pub fn prepare_render_env(
     let adapter = Arc::new(dbt_adapter::Adapter::new(
         Arc::new(adapter_impl),
         None, // time_machine
-        state.cancellation_source.token(),
+        overrides.cancellation.clone(),
     ));
 
     // Registers adapter/api/dialect globals and sets lenient undefined behavior.

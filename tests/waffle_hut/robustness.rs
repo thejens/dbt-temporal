@@ -209,11 +209,22 @@ async fn test_project_dir_stays_readonly() -> Result<()> {
 
             let client = connect_client(&infra.temporal_addr).await?;
 
-            // Launch two workflows concurrently running all models.
+            // Two concurrent workflows, over disjoint models. What is under
+            // test is that neither writes into the project directory; pointing
+            // both at the same models would instead have them race to create
+            // one relation, which the warehouse refuses and dbt would too.
             tracing::info!("Read-only project dir: launching 2 concurrent workflows");
             let (result_a, result_b) = tokio::join!(
-                run_dbt_workflow(&client, &task_queue, make_input("run", None, None, true)),
-                run_dbt_workflow(&client, &task_queue, make_input("run", None, None, true)),
+                run_dbt_workflow(
+                    &client,
+                    &task_queue,
+                    make_input("run", Some("stg_customers"), None, true)
+                ),
+                run_dbt_workflow(
+                    &client,
+                    &task_queue,
+                    make_input("run", Some("stg_payments"), None, true)
+                ),
             );
 
             let run_a = result_a.context("workflow A failed")?;

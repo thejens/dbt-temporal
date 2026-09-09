@@ -128,8 +128,13 @@ from {{ source('waffle_hut', 'customers') }}
 
             // --- Workflow A: env override with MY_LABEL=value_alpha ---
             tracing::info!("Model env_var test: workflow A with MY_LABEL=value_alpha");
+            // Distinct schemas: the two workflows materialize the same model at
+            // the same time, and two concurrent `create table` statements for
+            // one relation collide in the warehouse, not in this repo. What is
+            // under test is env isolation, so give each run its own schema.
             let mut env_a = pg_env(infra);
             env_a.insert("MY_LABEL".to_string(), "value_alpha".to_string());
+            env_a.insert("DB_SCHEMA".to_string(), "env_var_model_alpha".to_string());
 
             let mut input_a = make_input_with_env("run", None, env_a);
             input_a.select = Some("stg_customers".to_string());
@@ -138,6 +143,7 @@ from {{ source('waffle_hut', 'customers') }}
             tracing::info!("Model env_var test: workflow B with MY_LABEL=value_beta");
             let mut env_b = pg_env(infra);
             env_b.insert("MY_LABEL".to_string(), "value_beta".to_string());
+            env_b.insert("DB_SCHEMA".to_string(), "env_var_model_beta".to_string());
 
             let mut input_b = make_input_with_env("run", None, env_b);
             input_b.select = Some("stg_customers".to_string());

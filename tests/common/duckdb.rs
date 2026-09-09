@@ -287,6 +287,28 @@ impl Harness {
             .await
     }
 
+    /// Run a node with a cancellation source the caller controls — the source
+    /// the adapter aborts on.
+    pub async fn run_uid_with_cancellation(
+        &self,
+        unique_id: &str,
+        cancellation: &dbt_common::cancellation::CancellationToken,
+    ) -> Result<NodeExecutionResult, anyhow::Error> {
+        let input = serde_json::from_value(serde_json::json!({
+            "unique_id": unique_id,
+            "invocation_id": uuid::Uuid::new_v4().to_string(),
+            "project": PROJECT,
+            "command": "build",
+        }))
+        .unwrap();
+        dbt_temporal::activities::execute_node::execute_node_cancellable(
+            &self.activities,
+            input,
+            cancellation,
+        )
+        .await
+    }
+
     /// Like [`run_uid`](Self::run_uid), with a `--target` override — the path
     /// that re-resolves the profile against a different `outputs:` block, with
     /// no `env` override involved.

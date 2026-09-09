@@ -34,6 +34,21 @@ artifact write) are tagged `ArtifactStore` and retried. That matters most for
 `store_artifacts`, which runs after every node has finished: without it a single
 5xx would discard a completed run's results.
 
+## Cancellation
+
+A node's compile-and-materialize phase is synchronous: once dbt is inside a
+query, nothing in that call stack yields. It therefore runs on a blocking
+thread, leaving the activity's own task free to heartbeat and to notice
+cancellation — previously a long query stalled both, so the server's heartbeat
+timeout could reschedule the node on another worker while the first attempt was
+still writing.
+
+Each activity carries its own `CancellationTokenSource`, handed to the adapter
+through the render environment. Cancelling the activity cancels that source, so
+dbt aborts the statement it is running, and the activity then **joins** the
+work rather than dropping it — an abandoned blocking thread would keep going
+against the warehouse with nothing waiting for it.
+
 ## Retry Configuration
 
 The `execute_node` activity retries transient adapter errors with exponential backoff. Defaults can be overridden in `dbt_temporal.yml`:

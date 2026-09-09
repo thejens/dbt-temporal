@@ -261,9 +261,14 @@ from {{ source('waffle_hut', 'customers') }}
             let client = connect_client(&infra.temporal_addr).await?;
 
             // Build env maps for two workflows with distinct tags.
+            // Distinct schemas: the two workflows materialize the same model at
+            // the same time, and two concurrent `create table` statements for
+            // one relation collide in the warehouse, not in this repo. What is
+            // under test is env isolation, so give each run its own schema.
             let build_env = |tag: &str| -> std::collections::BTreeMap<String, String> {
                 let mut env = pg_env(infra);
                 env.insert("MY_TAG".to_string(), tag.to_string());
+                env.insert("DB_SCHEMA".to_string(), format!("parallel_{tag}"));
                 env
             };
 

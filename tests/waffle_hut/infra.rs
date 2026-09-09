@@ -137,13 +137,20 @@ pub fn shared_infra() -> &'static SharedInfra {
                 tracing::info!("=== Starting shared test infrastructure ===");
 
                 // Start Postgres testcontainer
+                use testcontainers::ImageExt;
                 use testcontainers::runners::AsyncRunner;
                 use testcontainers_modules::postgres::Postgres;
 
+                // Every test in this binary builds its own worker, and a
+                // worker's connection pools live as long as the test's task —
+                // so the suite's demand on one shared server is the sum of all
+                // of them, not one test's worth. The image default of 100 runs
+                // out near the end of the run.
                 let pg_container = Postgres::default()
                     .with_db_name("waffle_hut")
                     .with_user("test")
                     .with_password("test")
+                    .with_cmd(["postgres", "-c", "max_connections=500"])
                     .start()
                     .await
                     .context("starting postgres testcontainer")?;

@@ -237,6 +237,8 @@ pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         timing: vec![],
         failures: None,
         freshness: None,
+        // Nothing ran, so nothing was written.
+        relation_name: None,
     }
 }
 
@@ -251,6 +253,8 @@ pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
         timing: vec![],
         failures: None,
         freshness: None,
+        // Nothing ran, so nothing was written.
+        relation_name: None,
     }
 }
 
@@ -265,6 +269,8 @@ pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         timing: vec![],
         failures: None,
         freshness: None,
+        // Nothing ran, so nothing was written.
+        relation_name: None,
     }
 }
 
@@ -373,6 +379,20 @@ pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
 pub struct RunClock {
     pub started_at: Option<std::time::SystemTime>,
     pub elapsed_secs: f64,
+}
+
+/// What the run resolved to, for the artifact work that has to describe it.
+///
+/// The clock and the connection travel together because both answer "which
+/// run": how long it took, and which warehouse it reached. Artifact generation
+/// needs the second for the same reason node execution does — a workflow that
+/// overrides the target or the profile's env is not describing the warehouse
+/// the worker started against.
+#[derive(Debug, Clone, Copy)]
+pub struct RunFacts<'a> {
+    pub clock: RunClock,
+    pub env: &'a BTreeMap<String, String>,
+    pub target: Option<&'a str>,
 }
 
 pub fn elapsed_secs(
@@ -1094,6 +1114,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            relation_name: None,
         }
     }
 

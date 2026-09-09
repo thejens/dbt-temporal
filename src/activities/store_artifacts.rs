@@ -181,7 +181,18 @@ async fn generate_and_store_catalog(
     let catalog_json =
         super::node_telemetry::invocation_span(&input.invocation_id, "dbt docs generate")
             .in_scope(|| {
-                super::catalog::build_catalog_json(state, &input.node_results, &input.invocation_id)
+                super::catalog::build_catalog_json(
+                    state,
+                    &input.node_results,
+                    &input.invocation_id,
+                    &crate::activities::render_env::RenderOverrides {
+                        env: &input.env,
+                        target: input.target.as_deref(),
+                        // Neither reaches a `get_columns_in_relation` call.
+                        vars: &std::collections::BTreeMap::new(),
+                        full_refresh: false,
+                    },
+                )
             })?;
     store
         .store(&input.invocation_id, "catalog.json", catalog_json.as_bytes())
@@ -270,7 +281,9 @@ fn run_result_output(
         unique_id: result.unique_id.clone(),
         compiled: Some(result.compiled_code.is_some()),
         compiled_code: result.compiled_code.clone(),
-        relation_name: None,
+        // The relation the node actually wrote, which is what a consumer needs
+        // to find the table this row describes.
+        relation_name: result.relation_name.clone(),
         batch_results: None,
         static_analysis_off_reason: None,
     }
@@ -389,6 +402,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            relation_name: None,
         }
     }
 
@@ -417,6 +431,8 @@ mod tests {
             manifest_json: None,
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         }
@@ -508,6 +524,8 @@ mod tests {
             manifest_json: None,
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 12.5,
         };
@@ -605,6 +623,8 @@ mod tests {
             manifest_json: None,
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         };
@@ -668,6 +688,8 @@ mod tests {
             manifest_json: Some("{\"manifest\":\"yes\"}".to_string()),
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         };
@@ -700,6 +722,8 @@ mod tests {
             manifest_json: None,
             manifest_ref: Some("/already/stored/manifest.json".to_string()),
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         };
@@ -722,6 +746,8 @@ mod tests {
             manifest_json: None,
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         };
@@ -747,6 +773,8 @@ mod tests {
             manifest_ref: None,
             started_at: None,
             elapsed_time: 0.0,
+            env: BTreeMap::new(),
+            target: None,
             run_log: Some("line a\nline b".to_string()),
         };
 
@@ -776,6 +804,8 @@ mod tests {
             manifest_ref: None,
             started_at: None,
             elapsed_time: 0.0,
+            env: BTreeMap::new(),
+            target: None,
             run_log: Some("would-be-log".to_string()),
         };
 
@@ -807,6 +837,8 @@ mod tests {
             manifest_json: Some("{}".to_string()),
             manifest_ref: None,
             run_log: None,
+            env: BTreeMap::new(),
+            target: None,
             started_at: None,
             elapsed_time: 0.0,
         };

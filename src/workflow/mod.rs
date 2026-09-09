@@ -31,8 +31,8 @@ use crate::types::{
 };
 
 use self::helpers::{
-    RunClock, build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
-    format_final_details, upsert_memo_state,
+    RunClock, RunFacts, build_effective_env, build_freshness_summary_line, build_summary_lines,
+    elapsed_secs, format_final_details, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
@@ -240,9 +240,13 @@ impl DbtRunWorkflow {
             &levels.all_results,
             &levels.log_lines,
             &timeouts,
-            RunClock {
-                started_at: run_started_at,
-                elapsed_secs: elapsed_secs(run_started_at, ctx.workflow_time()),
+            RunFacts {
+                clock: RunClock {
+                    started_at: run_started_at,
+                    elapsed_secs: elapsed_secs(run_started_at, ctx.workflow_time()),
+                },
+                env: &effective_env,
+                target: input.target.as_deref(),
             },
         )
         .await?;

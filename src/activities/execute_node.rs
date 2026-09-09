@@ -342,6 +342,19 @@ fn ensure_target_schema(
     Ok(())
 }
 
+/// The relation the node wrote, as `database.schema.identifier`.
+///
+/// Read from the patched `this` rather than from startup metadata: a workflow
+/// that overrides the target or the profile's env writes somewhere else
+/// entirely, and the catalog and `run_results.json` have no other way to learn
+/// where.
+fn executed_relation_name(node_context: &BTreeMap<String, minijinja::Value>) -> Option<String> {
+    let this = node_context.get("this")?;
+    let part =
+        |name: &str| -> Option<String> { Some(this.get_attr(name).ok()?.as_str()?.to_string()) };
+    Some(format!("{}.{}.{}", part("database")?, part("schema")?, part("identifier")?))
+}
+
 /// True if the node is one we expect `create_schema(this)` to be called for
 /// before materialization. Tests and operations don't get a schema-create
 /// pass — they only read. Unit tests qualify because the `unit`
@@ -926,6 +939,8 @@ pub async fn execute_node_inner(
             }],
             failures: None,
             freshness: None,
+            // Compile-only: nothing was written.
+            relation_name: None,
         });
     }
 
@@ -1002,6 +1017,7 @@ pub async fn execute_node_inner(
             timing: build_timing_entries(compile_start, compile_end, execute_start, execute_end),
             failures: None,
             freshness: Some(outcome),
+            relation_name: executed_relation_name(&node_context),
         });
     }
 
@@ -1174,6 +1190,7 @@ pub async fn execute_node_inner(
         timing,
         failures,
         freshness: None,
+        relation_name: executed_relation_name(&node_context),
     })
 }
 

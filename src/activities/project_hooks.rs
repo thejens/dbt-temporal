@@ -382,6 +382,7 @@ mod tests {
             timing: vec![],
             failures,
             freshness: None,
+            relation_name: None,
         }
     }
 

@@ -228,6 +228,19 @@ impl Harness {
             .expect("project registered")
     }
 
+    /// Run a statement for its effect — DDL, or seeding a table the project
+    /// treats as a pre-existing source.
+    pub fn exec(&self, sql: &str) {
+        let engine = self.state().adapter_engines.default_engine();
+        let cts = CancellationTokenSource::new();
+        let mut conn = engine
+            .new_connection(None, None)
+            .expect("open duckdb connection");
+        engine
+            .execute(None, conn.as_mut(), &QueryCtx::new("setup"), sql, cts.token())
+            .unwrap_or_else(|e| panic!("statement failed: {sql}: {e:?}"));
+    }
+
     /// Read one value back out of the warehouse, rendered as a string.
     ///
     /// For assertions that a node produced the *right data*, not merely that it

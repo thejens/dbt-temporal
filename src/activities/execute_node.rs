@@ -13,12 +13,9 @@ use anyhow::Context;
 use bytes::Bytes;
 use dbt_schemas::schemas::telemetry::NodeType;
 use raw_sql::resolve_raw_sql;
-use schema_patch::{
-    apply_patched_relation, apply_schema_map_to_context, build_database_rewrite_map,
-    build_default_schema_rewrite_map, build_schema_rewrite_map, compute_patched_relation,
-};
+use schema_patch::{apply_relation_to_context, resolve_relations};
 use schema_patcher::has_env_var_in_config_schema_or_database;
-use sql_rewrite::{RelationRewrite, rewrite_relations};
+use sql_rewrite::rewrite_relations;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
 use tracing::{info, warn};
@@ -828,51 +825,26 @@ fn execute_node_body(
         );
     }
 
-    // Patch `this`, `schema`, `database` when per-workflow env overrides are in play.
+    // Resolve where this node's relation — and every relation its SQL can
+    // name — lives for this workflow, then patch `this`, `schema` and
+    // `database` in its Jinja context.
     //
-    // Two strategies, chosen by whether the project overrides generate_schema_name:
-    //
-    // Custom macro path: re-execute `generate_schema_name` via the already-cloned
-    // Jinja env (env_var overridden, target patched). This matches vanilla dbt's
-    // per-run evaluation and handles any macro logic the user has defined. Also
-    // builds a rewrite map for SQL text patching below.
-    //
-    // Default macro path: reconstruct the schema using dbt's default
-    // `<target_schema>[_<custom>]` pattern from the profile-rebuilt target.schema.
-    let schemas = if state.has_custom_schema_name_macro && !input.env.is_empty() {
-        let schema_map = build_schema_rewrite_map(state, jinja_env).map_err(|e| {
-            DbtTemporalError::Compilation(format!("building schema rewrite map: {e:#}"))
-        })?;
-        apply_schema_map_to_context(
-            state,
-            base,
-            &schema_map,
-            env_database.as_deref(),
-            &mut node_context,
-        )
-        .map_err(|e| DbtTemporalError::Compilation(format!("{e:#}")))?;
-        schema_map
-    } else {
-        if let Some(patch) = compute_patched_relation(
-            state,
-            base,
-            env_schema.as_deref(),
-            env_database.as_deref(),
-            unique_id,
-        ) {
-            apply_patched_relation(base, &patch, &mut node_context);
-        }
-        build_default_schema_rewrite_map(state, env_schema.as_deref(), env_database.as_deref())
-    };
-    // The node's own relation is patched in its Jinja context above; this
-    // rewrites the relations already baked into the compiled text — the
-    // upstream `ref()`s the startup manifest resolved against the startup
-    // schema, plus this node's own name where the materialization interpolates
-    // the compiled SQL rather than `this`.
-    let relation_rewrite = RelationRewrite {
-        schemas,
-        databases: build_database_rewrite_map(state, env_database.as_deref()),
-    };
+    // The compiled text needs the same treatment separately: the startup
+    // manifest baked the startup schemas into every upstream `ref()`, and a
+    // materialization interpolates that text rather than re-deriving it from
+    // `this`.
+    let resolved = resolve_relations(
+        state,
+        jinja_env,
+        unique_id,
+        env_schema.as_deref(),
+        env_database.as_deref(),
+    )?;
+    if let Some(ref own) = resolved.own {
+        apply_relation_to_context(base, own, &mut node_context)
+            .map_err(|e| DbtTemporalError::Compilation(format!("{e:#}")))?;
+    }
+    let relation_rewrite = resolved.rewrite;
 
     // Resolve raw SQL: build_run_node_context does NOT populate the top-level
     // "sql" context variable — that's the caller's responsibility. The

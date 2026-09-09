@@ -68,9 +68,14 @@ pub struct WorkerState {
     pub default_schema: String,
     /// Profile-level default database at worker startup.
     pub default_database: String,
-    /// Whether the project overrides `generate_schema_name` (non-default naming may
-    /// cause stale `this.schema` context variables with per-workflow env overrides).
+    /// Whether the project overrides `generate_schema_name`. When it does, a
+    /// per-workflow env override has to re-run the macro rather than
+    /// reconstruct dbt's default pattern — the project's answer is the only
+    /// one that is right.
     pub has_custom_schema_name_macro: bool,
+    /// The same for `generate_database_name`, tracked separately because a
+    /// project can override either one alone.
+    pub has_custom_database_name_macro: bool,
     /// Keeps the CancellationTokenSource alive so the BridgeAdapter token
     /// passed per-activity isn't immediately cancelled (the token holds a Weak
     /// ref to this source; if the source is dropped the token fires).

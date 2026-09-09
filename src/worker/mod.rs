@@ -18,6 +18,7 @@ use crate::config::{
     DbtTemporalConfig, PriorityScheduling, RegisteredSearchAttributes, SearchAttributeConfig,
     WriteArtifacts, WriteCatalog, WriteRunLog,
 };
+use crate::model_store::FetchedProjects;
 use crate::project_registry::ProjectRegistry;
 use crate::worker_state::WorkerState;
 use crate::workflow::DbtRunWorkflow;
@@ -52,9 +53,17 @@ pub async fn build_worker_with_auth(
     auth_override: Option<Arc<dyn dbt_auth::Auth>>,
 ) -> Result<Worker> {
     // Resolve project sources: local paths pass through, remote URLs are fetched.
-    let project_dirs = resolve_project_sources(&config.dbt_project_dirs).await?;
+    let sources = resolve_project_sources(&config.dbt_project_dirs).await?;
+    let project_dirs: Vec<std::path::PathBuf> = sources
+        .iter()
+        .flat_map(|source| source.projects.iter().cloned())
+        .collect();
 
-    let registry = build_project_registry(&project_dirs, config, auth_override.clone()).await?;
+    // The registry takes the sources with it: a fetched directory has to
+    // outlive every project loaded from it, and nothing else lives that long.
+    let registry = build_project_registry(&project_dirs, config, auth_override.clone())
+        .await?
+        .with_sources(sources);
     let artifact_store = if config.write_artifacts {
         Some(build_artifact_store(config)?)
     } else {
@@ -67,21 +76,23 @@ pub async fn build_worker_with_auth(
 }
 
 /// Partition project source entries into local paths and remote URLs.
-/// Fetches remote sources and merges all resolved directories.
-async fn resolve_project_sources(entries: &[String]) -> Result<Vec<std::path::PathBuf>> {
-    let mut project_dirs = Vec::new();
+///
+/// Fetches remote sources and returns one [`FetchedProjects`] per entry. Each
+/// owns the directory it fetched into, so the caller has to keep them for as
+/// long as the projects are in use — see [`ProjectRegistry`].
+async fn resolve_project_sources(entries: &[String]) -> Result<Vec<FetchedProjects>> {
+    let mut sources = Vec::new();
 
     for entry in entries {
         if crate::config::is_remote_source(entry) {
             info!(url = %entry, "fetching dbt projects from remote source");
-            let dirs = crate::model_store::fetch_models(entry).await?;
-            project_dirs.extend(dirs);
+            sources.push(crate::model_store::fetch_models(entry).await?);
         } else {
-            project_dirs.push(std::path::PathBuf::from(entry));
+            sources.push(FetchedProjects::borrowed(vec![std::path::PathBuf::from(entry)]));
         }
     }
 
-    Ok(project_dirs)
+    Ok(sources)
 }
 
 #[allow(clippy::large_futures)] // Each project initialization loads dbt manifests, producing large futures.
@@ -661,9 +672,9 @@ mod tests {
         std::fs::write(tmp.join("dbt_project.yml"), "name: test")?;
 
         let entries = vec![tmp.to_string_lossy().to_string()];
-        let dirs = resolve_project_sources(&entries).await?;
-        assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0], tmp);
+        let sources = resolve_project_sources(&entries).await?;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].projects, vec![tmp.clone()]);
 
         std::fs::remove_dir_all(&tmp)?;
         Ok(())

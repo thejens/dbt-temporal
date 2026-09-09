@@ -1,6 +1,17 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tracing::info;
+
+use super::FetchedProjects;
+
+/// How long a clone may take before the worker gives up on it.
+///
+/// A worker that cannot start is visible; a worker stuck in `git clone` looks
+/// like a slow start-up forever. Generous enough for a large shallow clone over
+/// a slow link, short enough that an unreachable host or a prompt nobody can
+/// answer surfaces as an error.
+const CLONE_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// Parsed components of a git model store URL.
 struct GitUrl<'a> {
@@ -41,12 +52,13 @@ fn parse_git_url(url: &str) -> Result<GitUrl<'_>> {
 /// rewrite) rather than the clone URL itself — an argv-embedded token is visible in the
 /// process list while git runs, and git persists the remote URL verbatim into the cloned
 /// repo's `.git/config`.
-pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
+pub async fn fetch(url: &str) -> Result<FetchedProjects> {
     let parsed = parse_git_url(url)?;
 
-    let dest = std::env::temp_dir().join(format!("dbtt-models-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dest)
-        .with_context(|| format!("creating model store dir {}", dest.display()))?;
+    // Owned from here on: every `?` below removes the directory rather than
+    // leaving a half-cloned repository behind.
+    let dir = super::fetch_dir()?;
+    let dest = dir.path();
 
     info!(branch = parsed.branch, dest = %dest.display(), "cloning model store from git");
 
@@ -59,13 +71,32 @@ pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
         parsed.branch,
         parsed.repo_url,
     ])
-    .arg(&dest);
+    .arg(dest)
+    // Nobody is at a terminal. Without this a private repo with no usable
+    // token leaves git waiting on a username prompt until something kills the
+    // worker, which reads as a hang rather than an authentication failure.
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_ASKPASS", "")
+    .env("SSH_ASKPASS", "")
+    // Kill the child if this future is dropped — the timeout below does exactly
+    // that, and an orphaned clone would keep writing into a directory the
+    // worker is about to remove.
+    .kill_on_drop(true);
     if let Some((key, value)) = token_rewrite_config(parsed.repo_url)? {
         cmd.env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", key)
             .env("GIT_CONFIG_VALUE_0", value);
     }
-    let output = cmd.output().await.context("running git clone")?;
+    let output = tokio::time::timeout(CLONE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git clone of {} timed out after {}s",
+                redact_token(parsed.repo_url),
+                CLONE_TIMEOUT.as_secs()
+            )
+        })?
+        .context("running git clone")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -77,17 +108,38 @@ pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
 
     let scan_root = match parsed.subdir {
         Some(sub) => {
-            let root = dest.join(sub);
+            let root = confined_subdir(dest, sub)?;
             if !root.is_dir() {
                 anyhow::bail!("subdirectory '{sub}' not found in cloned repository");
             }
             root
         }
-        None => dest,
+        None => dest.to_path_buf(),
     };
 
-    let dirs = super::scan_for_projects(&scan_root)?;
-    Ok(dirs)
+    let projects = super::scan_for_projects(&scan_root)?;
+    Ok(FetchedProjects::owned(dir, projects))
+}
+
+/// Resolve a URL's `:subdir` fragment inside the clone.
+///
+/// The fragment comes from configuration, but configuration is not always
+/// written by hand — `DBT_PROJECT_DIRS` supports `${VAR}` expansion, so the
+/// value can arrive from the environment. A `..` in it would point the project
+/// scan somewhere outside the clone entirely, so it is refused rather than
+/// normalized away.
+fn confined_subdir(clone: &Path, subdir: &str) -> Result<PathBuf> {
+    let mut out = clone.to_path_buf();
+    for component in Path::new(subdir).components() {
+        match component {
+            Component::Normal(segment) => out.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("subdirectory '{subdir}' escapes the cloned repository")
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Read the git auth token from `GITHUB_TOKEN` or `GIT_TOKEN` (first non-empty wins).
@@ -128,6 +180,7 @@ fn redact_token(msg: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -322,10 +375,10 @@ mod tests {
         run(&["commit", "-m", "init"])?;
 
         let file_url = format!("git+file://{}#main:subdir", repo_dir.display());
-        let dirs = fetch(&file_url).await?;
+        let fetched = fetch(&file_url).await?;
 
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("my_project"));
+        assert_eq!(fetched.projects.len(), 1);
+        assert!(fetched.projects[0].ends_with("my_project"));
 
         std::fs::remove_dir_all(&repo_dir).ok();
         Ok(())
@@ -354,13 +407,63 @@ mod tests {
         run(&["commit", "-m", "init"])?;
 
         let file_url = format!("git+file://{}#main:dbt", repo_dir.display());
-        let dirs = fetch(&file_url).await?;
+        let fetched = fetch(&file_url).await?;
 
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("dbt"));
+        assert_eq!(fetched.projects.len(), 1);
+        assert!(fetched.projects[0].ends_with("dbt"));
 
         std::fs::remove_dir_all(&repo_dir).ok();
         Ok(())
+    }
+
+    /// `DBT_PROJECT_DIRS` expands `${VAR}`, so a subdir fragment can arrive from
+    /// the environment. A `..` in one would point the project scan outside the
+    /// clone entirely.
+    #[test]
+    fn a_subdir_that_climbs_out_of_the_clone_is_refused() {
+        let clone = Path::new("/tmp/clone");
+        for subdir in ["../elsewhere", "a/../../elsewhere", "/etc"] {
+            let err =
+                confined_subdir(clone, subdir).expect_err("a climbing subdir must be refused");
+            assert!(
+                err.to_string().contains("escapes the cloned repository"),
+                "unexpected error for {subdir}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_subdir_resolves_under_the_clone() -> Result<()> {
+        let clone = Path::new("/tmp/clone");
+        assert_eq!(confined_subdir(clone, "dbt")?, clone.join("dbt"));
+        assert_eq!(confined_subdir(clone, "./a/b")?, clone.join("a").join("b"));
+        assert_eq!(confined_subdir(clone, "")?, clone.to_path_buf());
+        Ok(())
+    }
+
+    /// A failed clone used to leave its half-written directory behind under a
+    /// UUID name nothing would ever look at again.
+    #[tokio::test]
+    async fn a_failed_clone_leaves_nothing_behind() {
+        let before = temp_model_dirs();
+        fetch("git+file:///nonexistent-dbtt-repo#main")
+            .await
+            .expect_err("cloning a repository that does not exist must fail");
+        assert_eq!(temp_model_dirs(), before, "the fetch directory must be gone");
+    }
+
+    /// Names of the model-store directories currently in the system temp dir.
+    fn temp_model_dirs() -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("dbtt-models-"))
+            .collect();
+        names.sort();
+        names
     }
 
     #[tokio::test]

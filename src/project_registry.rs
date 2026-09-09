@@ -15,6 +15,13 @@ pub type ProjectRegistry = Registry<WorkerState>;
 pub struct Registry<T> {
     projects: BTreeMap<String, Arc<T>>,
     default_project: Option<String>,
+    /// The model stores the projects were loaded from.
+    ///
+    /// Held, not read. A fetched store owns a temp directory that has to
+    /// outlive every project loaded out of it, and the registry is the only
+    /// thing that lives exactly that long — it is reachable from every activity
+    /// for as long as one can look a project up, and gone once none can.
+    sources: Vec<crate::model_store::FetchedProjects>,
 }
 
 impl<T> std::fmt::Debug for Registry<T> {
@@ -22,6 +29,7 @@ impl<T> std::fmt::Debug for Registry<T> {
         f.debug_struct("Registry")
             .field("projects", &self.projects.keys().collect::<Vec<_>>())
             .field("default_project", &self.default_project)
+            .field("sources", &self.sources.len())
             .finish()
     }
 }
@@ -36,7 +44,15 @@ impl<T> Registry<T> {
         Self {
             projects,
             default_project,
+            sources: Vec::new(),
         }
+    }
+
+    /// Take ownership of the model stores these projects were loaded from.
+    #[must_use]
+    pub fn with_sources(mut self, sources: Vec<crate::model_store::FetchedProjects>) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Look up a project by name. If `name` is None, use the default (single-project case).

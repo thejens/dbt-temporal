@@ -5,6 +5,41 @@ mod object_store_backend;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+/// A fetched model store, and the dbt projects found inside it.
+///
+/// Owning the directory is the point. A fetch used to allocate a UUID-named
+/// directory under the system temp dir and return only paths, so nothing could
+/// ever remove it: a worker that restarts often enough fills its temp
+/// filesystem with copies of the same project, and a clone that failed halfway
+/// left a partial one behind under a name nothing would look at again. The
+/// directory now goes away when the registry that loaded from it does.
+#[derive(Debug)]
+pub struct FetchedProjects {
+    /// Removed on drop. `None` for a project directory the worker was pointed
+    /// at rather than fetched — that one belongs to whoever created it.
+    _dir: Option<tempfile::TempDir>,
+    /// Project roots discovered inside.
+    pub projects: Vec<PathBuf>,
+}
+
+impl FetchedProjects {
+    /// A fetched store whose directory this value owns.
+    const fn owned(dir: tempfile::TempDir, projects: Vec<PathBuf>) -> Self {
+        Self {
+            _dir: Some(dir),
+            projects,
+        }
+    }
+
+    /// A local path the worker was pointed at, which it must not remove.
+    pub const fn borrowed(projects: Vec<PathBuf>) -> Self {
+        Self {
+            _dir: None,
+            projects,
+        }
+    }
+}
+
 /// Fetch dbt project(s) from a model store to local disk.
 ///
 /// Supported URL schemes:
@@ -13,8 +48,9 @@ use std::path::PathBuf;
 /// - `gs://bucket/prefix` — download from GCS (requires `gcs` feature)
 /// - `s3://bucket/prefix` — download from S3/Minio (requires `aws` feature)
 ///
-/// Returns the discovered project directories.
-pub async fn fetch_models(url: &str) -> Result<Vec<PathBuf>> {
+/// The returned value owns the directory it fetched into; keep it for as long
+/// as the projects are in use.
+pub async fn fetch_models(url: &str) -> Result<FetchedProjects> {
     if url.starts_with("git+") {
         git::fetch(url).await
     } else {
@@ -30,6 +66,18 @@ pub async fn fetch_models(url: &str) -> Result<Vec<PathBuf>> {
             )
         }
     }
+}
+
+/// Create the temp directory a fetch downloads into.
+///
+/// `tempfile` rather than a hand-rolled UUID path: it creates the directory
+/// with the right permissions, and its `TempDir` is what gives the caller
+/// something to own.
+fn fetch_dir() -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("dbtt-models-")
+        .tempdir()
+        .context("creating model store directory")
 }
 
 /// Scan a directory for dbt projects. If the directory itself is a project, returns it.

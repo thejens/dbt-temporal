@@ -232,7 +232,9 @@ models:
                 .find(|(k, _)| k.contains("error_failing"));
             assert!(warn_status.is_some(), "warn-severity test missing from memo");
             assert!(error_status.is_some(), "error-severity test missing from memo");
-            assert_eq!(*warn_status.unwrap().1, NodeStatus::Success, "severity=warn must succeed");
+            // A warn-severity test that found rows completed and reported
+            // something: `warn`, not `success` and not a failure.
+            assert_eq!(*warn_status.unwrap().1, NodeStatus::Warn, "severity=warn must warn");
             assert_eq!(*error_status.unwrap().1, NodeStatus::Error, "severity=error must error");
             Ok(())
         })

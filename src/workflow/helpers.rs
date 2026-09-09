@@ -98,6 +98,7 @@ pub struct NodeStatusSummary {
     pub pending: usize,
     pub running: usize,
     pub success: usize,
+    pub warn: usize,
     pub error: usize,
     pub skipped: usize,
     pub cancelled: usize,
@@ -115,6 +116,7 @@ impl NodeStatusSummary {
                 NodeStatus::Pending => summary.pending += 1,
                 NodeStatus::Running => summary.running += 1,
                 NodeStatus::Success => summary.success += 1,
+                NodeStatus::Warn => summary.warn += 1,
                 NodeStatus::Error => summary.error += 1,
                 NodeStatus::Skipped => summary.skipped += 1,
                 NodeStatus::Cancelled => summary.cancelled += 1,
@@ -202,6 +204,7 @@ fn bounded_node_status(tree: &NodeStatusTree) -> NodeStatusTree {
         &[NodeStatus::Pending][..],
         &[
             NodeStatus::Error,
+            NodeStatus::Warn,
             NodeStatus::Cancelled,
             NodeStatus::Success,
             NodeStatus::Skipped,
@@ -318,6 +321,7 @@ pub fn build_summary_lines(
     total_nodes: usize,
     elapsed_secs: f64,
     pass: usize,
+    warn: usize,
     error: usize,
     skip: usize,
 ) -> [String; 2] {
@@ -326,17 +330,15 @@ pub fn build_summary_lines(
             "Finished running {total_nodes} node{} in {elapsed_secs:.2}s.",
             plural(total_nodes)
         ),
-        format!("Done. PASS={pass} ERROR={error} SKIP={skip} TOTAL={total_nodes}"),
+        format!("Done. PASS={pass} WARN={warn} ERROR={error} SKIP={skip} TOTAL={total_nodes}"),
     ]
 }
 
 /// The extra summary line a freshness run closes with.
 ///
-/// dbt grades a freshness check `pass` / `warn` / `error`, but `NodeStatus`
-/// carries only the two outcomes an activity can have. A warn therefore rides
-/// on the node's `FreshnessOutcome`, and without this line the run log would
-/// report a warned node as a plain pass — the one number an SLA run exists to
-/// show.
+/// The node-level tally counts a warned check once; this line reports the
+/// grading dbt gives each *measurement* (`pass` / `warn` / `error`) from the
+/// `FreshnessOutcome`, which is the number an SLA run exists to show.
 pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
     let with_status = |status: &str| {
         results
@@ -461,6 +463,10 @@ pub const fn classify_result_status(status: NodeStatus) -> NodeStatus {
     match status {
         NodeStatus::Error => NodeStatus::Error,
         NodeStatus::Skipped => NodeStatus::Skipped,
+        // A warned node completed. It is not a failure and must not gate the
+        // run — it is kept apart from `Success` only so the run can say it
+        // found something.
+        NodeStatus::Warn => NodeStatus::Warn,
         _ => NodeStatus::Success,
     }
 }
@@ -472,6 +478,10 @@ pub fn format_result_tag(status: NodeStatus, message: Option<&str>, execution_ti
         NodeStatus::Success => {
             let detail = message.unwrap_or("OK");
             format!("{detail} in {execution_time:.2}s")
+        }
+        NodeStatus::Warn => {
+            let detail = message.unwrap_or("warning");
+            format!("WARN {detail} in {execution_time:.2}s")
         }
         NodeStatus::Error => {
             let msg = message.unwrap_or("error");
@@ -1133,14 +1143,14 @@ mod tests {
 
     #[test]
     fn build_summary_lines_pluralises_node_count() {
-        let lines = build_summary_lines(5, 2.345_678, 4, 0, 1);
+        let lines = build_summary_lines(5, 2.345_678, 3, 1, 0, 1);
         assert_eq!(lines[0], "Finished running 5 nodes in 2.35s.");
-        assert_eq!(lines[1], "Done. PASS=4 ERROR=0 SKIP=1 TOTAL=5");
+        assert_eq!(lines[1], "Done. PASS=3 WARN=1 ERROR=0 SKIP=1 TOTAL=5");
     }
 
     #[test]
     fn build_summary_lines_singular_for_one_node() {
-        let lines = build_summary_lines(1, 0.5, 1, 0, 0);
+        let lines = build_summary_lines(1, 0.5, 1, 0, 0, 0);
         assert_eq!(lines[0], "Finished running 1 node in 0.50s.");
     }
 

@@ -467,11 +467,17 @@ fn build_segment_state(
 fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64, command: &str) {
     let count_status = |s: NodeStatus| levels.all_results.iter().filter(|r| r.status == s).count();
     let pass = count_status(NodeStatus::Success);
+    let warn = count_status(NodeStatus::Warn);
     let error = count_status(NodeStatus::Error);
     let skip = count_status(NodeStatus::Skipped);
-    levels
-        .log_lines
-        .extend(build_summary_lines(levels.total_nodes, elapsed, pass, error, skip));
+    levels.log_lines.extend(build_summary_lines(
+        levels.total_nodes,
+        elapsed,
+        pass,
+        warn,
+        error,
+        skip,
+    ));
     if is_freshness_command(command) {
         levels
             .log_lines

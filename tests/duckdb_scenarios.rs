@@ -176,7 +176,7 @@ async fn warn_severity_test_does_not_fail_the_run() {
         .run_uid("test.spike.warn_only")
         .await
         .expect("warn-severity test should not error");
-    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Warn, "{result:?}");
 }
 
 /// `error_if` is a threshold, and dbt evaluates it in the warehouse. Deciding
@@ -198,7 +198,9 @@ async fn a_test_below_its_error_if_threshold_does_not_fail() {
         .run_uid("test.spike.tolerates_some")
         .await
         .expect("2 failures is under the configured threshold of 100");
-    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    // Under `error_if` but over the default `warn_if`, so dbt calls it a warn —
+    // not a failure, and not silence either.
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Warn, "{result:?}");
     assert_eq!(result.failures, Some(2), "the count is still reported: {result:?}");
 }
 
@@ -238,7 +240,7 @@ async fn a_test_between_its_warn_and_error_thresholds_warns() {
         .run_uid("test.spike.warns_only")
         .await
         .expect("over warn_if but under error_if must not fail the run");
-    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Warn, "{result:?}");
     assert_eq!(result.failures, Some(2), "{result:?}");
 }
 

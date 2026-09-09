@@ -162,7 +162,7 @@ Concurrency: 3 parallel levels
 ...
 
 Finished running 10 nodes in 15.30s.
-Done. PASS=8 ERROR=1 SKIP=1 TOTAL=10
+Done. PASS=7 WARN=1 ERROR=1 SKIP=1 TOTAL=10
 ```
 
 The log path is returned in `DbtRunOutput.log_path` and `StoreArtifactsOutput.log_path`. Set `WRITE_RUN_LOG=false` to disable.
@@ -304,11 +304,13 @@ The workflow stores live metadata in [Temporal memos](https://docs.temporal.io/w
 | Memo key | Updated | Contents |
 |----------|---------|----------|
 | `command` | Once (at start) | Workflow input metadata: command, project, select, exclude, target, full_refresh, fail_fast, vars |
-| `node_status` | After each DAG level | Map of `unique_id` → status (`pending`, `running`, `success`, `error`, `skipped`, `cancelled`) |
+| `node_status` | After each DAG level | Map of `unique_id` → status (`pending`, `running`, `success`, `warn`, `error`, `skipped`, `cancelled`) |
 | `node_status_summary` | After each DAG level | How many nodes are in each state, plus how many `node_status` left out |
 | `log` | After each DAG level | Tail of the CLI-style run log (last 200 lines) |
 
 `node_status` and `log` are each capped in **bytes** (16 KB and 12 KB) to stay within Temporal memo size limits, because neither an entry count nor a line count bounds what is written: node ids are unique-id strings, and one adapter error can outweigh a hundred progress lines.
+
+A node reports `warn` when it completed and found something worth seeing: a data test over its `warn_if` threshold but under `error_if`, or a source past `warn_after` but not `error_after`. It is not a failure and never gates the run — it is kept apart from `success` so a run that found something is not reported as one that found nothing, which is how dbt reports it too.
 
 When `node_status` cannot show every node it keeps the running ones first, then pending, then finished — what a run is doing now and what is next. `node_status_summary` always totals the whole run, so a trimmed tree still adds up, and its `omitted` count says how many nodes are not shown. The full run log is written to the artifact store at workflow completion.
 
@@ -324,7 +326,7 @@ temporal workflow query -w <workflow-id> --type run_status
 temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 ```
 
-`run_status` returns `{phase, total_nodes, total_levels, completed_levels, succeeded, failed, skipped, running, fail_fast}`. The snapshot refreshes at every level boundary. `set_fail_fast` overrides the workflow input's `fail_fast` for the remainder of the run and returns the applied value.
+`run_status` returns `{phase, total_nodes, total_levels, completed_levels, succeeded, warned, failed, skipped, running, fail_fast}`. The snapshot refreshes at every level boundary. `set_fail_fast` overrides the workflow input's `fail_fast` for the remainder of the run and returns the applied value.
 
 ### Per-Node Activity Names
 

@@ -232,11 +232,17 @@ pub fn build_unit_test_sql(
     let model_sql = super::super::node_helpers::inject_ephemeral_ctes(
         &model_sql,
         &unit.__common_attr__.name,
+        // The SQL being inlined is the tested *model's*, so its ephemeral
+        // references resolve against the model's dependencies, not the unit
+        // test's.
+        &model.__base_attr__.depends_on.nodes,
         nodes,
         jinja_env,
         node_context,
-        in_dir,
-        ephemeral_dir,
+        super::super::node_helpers::EphemeralDirs {
+            in_dir,
+            ephemeral_dir,
+        },
     )?;
 
     Ok(prepend_fixture_ctes(&model_sql, &fixture_ctes))

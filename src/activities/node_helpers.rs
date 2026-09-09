@@ -103,11 +103,11 @@ pub fn render_materialization(
 pub fn inject_ephemeral_ctes(
     compiled_sql: &str,
     user_node_name: &str,
+    depends_on: &[String],
     nodes: &dbt_schemas::schemas::Nodes,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
-    in_dir: &Path,
-    ephemeral_dir: &Path,
+    dirs: EphemeralDirs<'_>,
 ) -> Result<String, DbtTemporalError> {
     if !compiled_sql.contains(DBT_CTE_PREFIX) {
         return Ok(compiled_sql.to_string());
@@ -120,11 +120,11 @@ pub fn inject_ephemeral_ctes(
     let mut visited = BTreeSet::new();
     persist_ephemeral_chain(
         compiled_sql,
+        depends_on,
         nodes,
         jinja_env,
         node_context,
-        in_dir,
-        ephemeral_dir,
+        dirs,
         &mut visited,
     )?;
 
@@ -134,13 +134,64 @@ pub fn inject_ephemeral_ctes(
         &mut spans,
         user_node_name,
         false, // not an ephemeral — wraps and returns without persisting
-        ephemeral_dir,
+        dirs.ephemeral_dir,
     )
     .map_err(|e| {
         DbtTemporalError::Compilation(format!(
             "wrapping ephemeral CTEs for {user_node_name}: {e:#}"
         ))
     })
+}
+
+/// Where the ephemeral walk reads from and writes to.
+///
+/// `ephemeral_dir` must be unique per activity: the persist step writes
+/// `<name>.sql` files there, so concurrent activities sharing one would race on
+/// the cumulative-CTE-chain layout.
+#[derive(Debug, Clone, Copy)]
+pub struct EphemeralDirs<'a> {
+    /// Project source root, where an ephemeral's raw SQL is read from.
+    pub in_dir: &'a Path,
+    /// The activity's private scratch directory for persisted CTE chains.
+    pub ephemeral_dir: &'a Path,
+}
+
+/// The ephemeral models among a node's resolved dependencies, indexed by the
+/// name their CTE carries.
+///
+/// Two dependencies with the same name would produce two `__dbt__cte__<name>`
+/// markers that no reader can tell apart, so that is refused rather than
+/// silently resolved to one of them.
+fn ephemeral_dependencies<'a>(
+    depends_on: &[String],
+    nodes: &'a dbt_schemas::schemas::Nodes,
+) -> Result<
+    BTreeMap<&'a str, (&'a str, &'a dyn dbt_schemas::schemas::nodes::InternalDbtNode)>,
+    DbtTemporalError,
+> {
+    let mut by_name: BTreeMap<&str, (&str, &dyn dbt_schemas::schemas::nodes::InternalDbtNode)> =
+        BTreeMap::new();
+    for (unique_id, node) in nodes.iter() {
+        if !depends_on.iter().any(|dep| dep == unique_id) {
+            continue;
+        }
+        if !node
+            .base()
+            .materialized
+            .to_string()
+            .eq_ignore_ascii_case("ephemeral")
+        {
+            continue;
+        }
+        let name = node.common().name.as_str();
+        if let Some((existing, _)) = by_name.insert(name, (unique_id.as_str(), node)) {
+            return Err(DbtTemporalError::Compilation(format!(
+                "two ephemeral dependencies are both named '{name}' ({existing} and \
+                 {unique_id}); their CTEs cannot be told apart in compiled SQL"
+            )));
+        }
+    }
+    Ok(by_name)
 }
 
 /// Recursively compile each ephemeral referenced (directly or transitively) by
@@ -152,29 +203,36 @@ pub fn inject_ephemeral_ctes(
 /// already be on disk.
 fn persist_ephemeral_chain(
     sql: &str,
+    depends_on: &[String],
     nodes: &dbt_schemas::schemas::Nodes,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
-    in_dir: &Path,
-    ephemeral_dir: &Path,
+    dirs: EphemeralDirs<'_>,
     visited: &mut BTreeSet<String>,
 ) -> Result<(), DbtTemporalError> {
+    let candidates = ephemeral_dependencies(depends_on, nodes)?;
+
     for name in extract_ephemeral_names(sql) {
-        if !visited.insert(name.clone()) {
+        // The CTE name is what the SQL carries, but *which* node it names is
+        // decided by the depending node's resolved dependencies — not by
+        // scanning the whole project for a model with that name, which picks
+        // an arbitrary one when two packages both define `base`.
+        let Some(&(unique_id, node)) = candidates.get(name.as_str()) else {
+            return Err(DbtTemporalError::Compilation(format!(
+                "compiled SQL references ephemeral model '{name}', which is not among the \
+                 node's ephemeral dependencies ({})",
+                if candidates.is_empty() {
+                    "none".to_string()
+                } else {
+                    candidates.keys().copied().collect::<Vec<_>>().join(", ")
+                }
+            )));
+        };
+        if !visited.insert(unique_id.to_string()) {
             continue;
         }
 
-        let Some((_, node)) = nodes.iter().find(|(_, n)| {
-            n.common().name == name
-                && n.base()
-                    .materialized
-                    .to_string()
-                    .eq_ignore_ascii_case("ephemeral")
-        }) else {
-            continue;
-        };
-
-        let raw_path = in_dir.join(&node.common().original_file_path);
+        let raw_path = dirs.in_dir.join(&node.common().original_file_path);
         let raw_sql = std::fs::read_to_string(&raw_path).map_err(|e| {
             DbtTemporalError::Compilation(format!(
                 "reading ephemeral model '{name}' at {}: {e:#}",
@@ -193,14 +251,16 @@ fn persist_ephemeral_chain(
             DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e:#}"))
         })?;
 
-        // Recurse first so this ephemeral's deps land on disk before we persist it.
+        // Recurse first so this ephemeral's deps land on disk before we persist
+        // it — and from *its* dependencies, so a nested ephemeral is resolved
+        // against the node that actually references it.
         persist_ephemeral_chain(
             &compiled,
+            &node.base().depends_on.nodes,
             nodes,
             jinja_env,
             node_context,
-            in_dir,
-            ephemeral_dir,
+            dirs,
             visited,
         )?;
 
@@ -210,7 +270,7 @@ fn persist_ephemeral_chain(
             &mut spans,
             &name,
             true, // ephemeral — persists cumulative CTE chain to disk
-            ephemeral_dir,
+            dirs.ephemeral_dir,
         )
         .map_err(|e| {
             DbtTemporalError::Compilation(format!(
@@ -669,11 +729,14 @@ mod tests {
         let out = inject_ephemeral_ctes(
             user_sql,
             "user_model",
+            &["model.shop.alpha".to_string()],
             &nodes,
             &env,
             &ctx,
-            &in_dir,
-            &ephemeral_dir,
+            EphemeralDirs {
+                in_dir: &in_dir,
+                ephemeral_dir: &ephemeral_dir,
+            },
         )?;
 
         assert!(
@@ -729,11 +792,14 @@ mod tests {
         let err = inject_ephemeral_ctes(
             "select * from __dbt__cte__missing",
             "user_model",
+            &["model.shop.missing".to_string()],
             &nodes,
             &env,
             &ctx,
-            &in_dir,
-            &ephemeral_dir,
+            EphemeralDirs {
+                in_dir: &in_dir,
+                ephemeral_dir: &ephemeral_dir,
+            },
         )
         .expect_err("missing ephemeral source must fail");
         let msg = err.to_string();
@@ -741,13 +807,72 @@ mod tests {
         Ok(())
     }
 
+    /// Two packages may each define an ephemeral called `base`. Scanning the
+    /// whole project for a model with that name picked whichever the node map
+    /// yielded first, so a model could be compiled around a different
+    /// package's ephemeral entirely. The depending node's own dependencies say
+    /// which one it meant.
     #[test]
-    fn inject_ephemeral_ctes_persist_skips_non_ephemeral_models() -> anyhow::Result<()> {
-        // The find() filter inside persist_ephemeral_chain only matches nodes
-        // whose `materialized` is "ephemeral". A node with the same name but
-        // a non-ephemeral materialization is silently skipped, so no file is
-        // written for it. The wrapper step then fails when it can't find the
-        // persisted file — exercising the wrap-error branch.
+    fn inject_ephemeral_ctes_picks_the_dependency_not_the_first_same_named_model()
+    -> anyhow::Result<()> {
+        use std::sync::Arc as A;
+
+        use dbt_schemas::schemas::common::DbtMaterialization;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel, NodeBaseAttributes};
+
+        let dir = tempfile::tempdir()?;
+        let in_dir = dir.path().join("project");
+        let ephemeral_dir = dir.path().join("ephemeral");
+        std::fs::create_dir_all(&ephemeral_dir)?;
+
+        // `model.shop.base` sorts before `model.vendor.base`, so a first-match
+        // scan finds the wrong one.
+        let mut nodes = build_nodes_with_ephemeral(&in_dir, "base", "select 'shop' as who")?;
+        let rel = "models/vendor_base.sql";
+        let abs = in_dir.join(rel);
+        std::fs::write(&abs, "select 'vendor' as who")?;
+        nodes.models.insert(
+            "model.vendor.base".to_string(),
+            A::new(DbtModel {
+                __common_attr__: CommonAttributes {
+                    unique_id: "model.vendor.base".to_string(),
+                    name: "base".to_string(),
+                    original_file_path: std::path::PathBuf::from(rel).into(),
+                    ..CommonAttributes::default()
+                },
+                __base_attr__: NodeBaseAttributes {
+                    materialized: DbtMaterialization::Ephemeral,
+                    ..NodeBaseAttributes::default()
+                },
+                ..DbtModel::default()
+            }),
+        );
+
+        let env = jinja_env_with_templates(&[]);
+        let ctx = BTreeMap::<String, minijinja::Value>::new();
+        let out = inject_ephemeral_ctes(
+            "select * from __dbt__cte__base",
+            "user_model",
+            &["model.vendor.base".to_string()],
+            &nodes,
+            &env,
+            &ctx,
+            EphemeralDirs {
+                in_dir: &in_dir,
+                ephemeral_dir: &ephemeral_dir,
+            },
+        )?;
+
+        assert!(out.contains("select 'vendor' as who"), "got:\n{out}");
+        assert!(!out.contains("select 'shop' as who"), "got:\n{out}");
+        Ok(())
+    }
+
+    /// A CTE marker naming a dependency that is not ephemeral has no body to
+    /// inline. It used to be skipped, and the failure surfaced later as a
+    /// missing persisted file; it is now reported against the name in the SQL.
+    #[test]
+    fn inject_ephemeral_ctes_reports_a_non_ephemeral_dependency() -> anyhow::Result<()> {
         use std::sync::Arc as A;
 
         use dbt_schemas::schemas::Nodes;
@@ -780,15 +905,18 @@ mod tests {
         let err = inject_ephemeral_ctes(
             "select * from __dbt__cte__alpha",
             "user_model",
+            &["model.shop.alpha".to_string()],
             &nodes,
             &env,
             &ctx,
-            &in_dir,
-            &ephemeral_dir,
+            EphemeralDirs {
+                in_dir: &in_dir,
+                ephemeral_dir: &ephemeral_dir,
+            },
         )
-        .expect_err("non-ephemeral skip + missing wrap file = wrap error");
+        .expect_err("a non-ephemeral dependency has no CTE body to inline");
         let msg = err.to_string();
-        assert!(msg.contains("user_model") || msg.contains("alpha"), "got: {msg}");
+        assert!(msg.contains("alpha"), "should name the ephemeral in the SQL: {msg}");
         Ok(())
     }
 
@@ -803,8 +931,18 @@ mod tests {
         let ctx = BTreeMap::<String, minijinja::Value>::new();
 
         let plain = "select 1 as id";
-        let out =
-            inject_ephemeral_ctes(plain, "user_model", &nodes, &env, &ctx, dir.path(), dir.path())?;
+        let out = inject_ephemeral_ctes(
+            plain,
+            "user_model",
+            &[],
+            &nodes,
+            &env,
+            &ctx,
+            EphemeralDirs {
+                in_dir: dir.path(),
+                ephemeral_dir: dir.path(),
+            },
+        )?;
         assert_eq!(out, plain);
         Ok(())
     }

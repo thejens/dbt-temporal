@@ -563,8 +563,27 @@ async fn initialize_project_inner(
         );
     }
 
+    // Derived from the resolved project, so it cannot change while the worker
+    // lives — and every microbatch activity used to rebuild it by scanning
+    // every model.
+    let event_time_columns = Arc::new(
+        resolver_state
+            .nodes
+            .models
+            .iter()
+            .filter_map(|(unique_id, model)| {
+                model
+                    .deprecated_config
+                    .event_time
+                    .clone()
+                    .map(|column| (unique_id.clone(), column))
+            })
+            .collect::<BTreeMap<_, _>>(),
+    );
+
     Ok(WorkerState {
         adapter_settings,
+        event_time_columns,
         project_name,
         resolver_state: Arc::new(resolver_state),
         jinja_env,

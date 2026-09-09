@@ -7,7 +7,7 @@ use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
 
-use crate::types::{DbtRunInput, ExecutionPlan, NodeInfo, is_freshness_command};
+use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo};
 use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
@@ -37,12 +37,18 @@ pub fn select_command_node_ids(
     state: &WorkerState,
     input: &DbtRunInput,
 ) -> Result<Vec<String>, anyhow::Error> {
-    let command = input.command.as_str();
+    let command = DbtCommand::parse(&input.command).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown command {:?} — expected one of: {}",
+            input.command,
+            DbtCommand::ALL.map(DbtCommand::as_str).join(", ")
+        )
+    })?;
     let include_types =
         parse_resource_types(&input.resource_types).context("invalid --resource-type")?;
     let exclude_types = parse_resource_types(&input.exclude_resource_types)
         .context("invalid --exclude-resource-type")?;
-    let freshness_command = is_freshness_command(command);
+    let freshness_command = command.is_freshness();
     let nodes = &state.resolver_state.nodes;
     let mut skipped_macro_defs: Vec<String> = Vec::new();
     let mut unmeasurable_slas: Vec<String> = Vec::new();
@@ -198,8 +204,8 @@ fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'
 ///
 /// Functions are absent from this list because they *are* executed — see
 /// `command_includes_node_type`.
-fn warn_unsupported_resource_types(state: &WorkerState, command: &str) {
-    if !matches!(command, "build" | "list") {
+fn warn_unsupported_resource_types(state: &WorkerState, command: DbtCommand) {
+    if !command.builds_whole_graph() {
         return;
     }
     let nodes = &state.resolver_state.nodes;
@@ -436,7 +442,7 @@ pub async fn plan_project_inner(
     //
     // The freshness commands are the exception: they have no task graph at all,
     // so every measured node goes into one level.
-    let deps = if is_freshness_command(&input.command) {
+    let deps = if DbtCommand::parse(&input.command).is_some_and(DbtCommand::is_freshness) {
         independent_nodes(&selected_ids)
     } else {
         let mut deps = build_dependency_map(&state.resolver_state.nodes, &selected_ids);
@@ -643,17 +649,17 @@ fn resource_type_allowed(rt: NodeType, include: &[NodeType], exclude: &[NodeType
 /// `compile` renders SQL templates without executing — seeds are CSV (no SQL),
 /// so they're excluded from compile to match `dbt compile` semantics. `run`
 /// matches dbt's "models only" default; `build` matches its full graph.
-fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
+const fn command_includes_node_type(command: DbtCommand, rt: NodeType) -> bool {
     match command {
-        "run" => matches!(rt, NodeType::Model),
+        DbtCommand::Run => matches!(rt, NodeType::Model),
         // `dbt source freshness`: checks sources only. Sources without
         // freshness criteria are filtered out separately in the planner.
-        "source-freshness" => matches!(rt, NodeType::Source),
+        DbtCommand::SourceFreshness => matches!(rt, NodeType::Source),
         // `dbt freshness`: sources plus models carrying a freshness SLA.
         // Which of those are actually measurable — and which declare a rule
         // with no way to measure it — is decided in the planner.
-        "freshness" => matches!(rt, NodeType::Source | NodeType::Model),
-        "build" => matches!(
+        DbtCommand::Freshness => matches!(rt, NodeType::Source | NodeType::Model),
+        DbtCommand::Build => matches!(
             rt,
             NodeType::Model
                 | NodeType::Test
@@ -664,18 +670,18 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
         ),
         // Unit tests are hard-excluded from compile, matching dbt-core: their
         // SQL is assembled at execution time from fixtures + warehouse probes.
-        "compile" => {
+        DbtCommand::Compile => {
             matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot | NodeType::Function)
         }
         // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
-        "test" => matches!(rt, NodeType::Test),
+        DbtCommand::Test => matches!(rt, NodeType::Test),
         // seed / snapshot mirror the single-resource dbt commands of the same
         // name. Both assume the rest of the graph is already in place.
-        "seed" => matches!(rt, NodeType::Seed),
-        "snapshot" => matches!(rt, NodeType::Snapshot),
+        DbtCommand::Seed => matches!(rt, NodeType::Seed),
+        DbtCommand::Snapshot => matches!(rt, NodeType::Snapshot),
         // list selects the full graph (same as build) — the workflow returns node metadata
         // without executing; no SQL is compiled or sent to the warehouse.
-        "list" => matches!(
+        DbtCommand::List => matches!(
             rt,
             NodeType::Model
                 | NodeType::Test
@@ -684,7 +690,6 @@ fn command_includes_node_type(command: &str, rt: NodeType) -> bool {
                 | NodeType::UnitTest
                 | NodeType::Function
         ),
-        _ => false,
     }
 }
 
@@ -840,10 +845,10 @@ mod tests {
 
     #[test]
     fn run_command_only_includes_models() {
-        assert!(command_includes_node_type("run", NodeType::Model));
-        assert!(!command_includes_node_type("run", NodeType::Test));
-        assert!(!command_includes_node_type("run", NodeType::Seed));
-        assert!(!command_includes_node_type("run", NodeType::Snapshot));
+        assert!(command_includes_node_type(DbtCommand::Run, NodeType::Model));
+        assert!(!command_includes_node_type(DbtCommand::Run, NodeType::Test));
+        assert!(!command_includes_node_type(DbtCommand::Run, NodeType::Seed));
+        assert!(!command_includes_node_type(DbtCommand::Run, NodeType::Snapshot));
     }
 
     #[test]
@@ -854,7 +859,10 @@ mod tests {
             NodeType::Seed,
             NodeType::Snapshot,
         ] {
-            assert!(command_includes_node_type("build", rt), "build should include {rt:?}");
+            assert!(
+                command_includes_node_type(DbtCommand::Build, rt),
+                "build should include {rt:?}"
+            );
         }
     }
 
@@ -862,37 +870,53 @@ mod tests {
     fn compile_command_includes_sql_nodes_but_not_seeds() {
         // Regression: an earlier version returned false for any non-{run, build}
         // command, producing "no nodes found for command 'compile'" on real projects.
-        assert!(command_includes_node_type("compile", NodeType::Model));
-        assert!(command_includes_node_type("compile", NodeType::Test));
-        assert!(command_includes_node_type("compile", NodeType::Snapshot));
+        assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Model));
+        assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Test));
+        assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Snapshot));
         // Seeds are CSV — there's no SQL to compile.
-        assert!(!command_includes_node_type("compile", NodeType::Seed));
+        assert!(!command_includes_node_type(DbtCommand::Compile, NodeType::Seed));
     }
 
+    /// An unknown command used to match no arm and plan an empty run, which
+    /// then failed with "no nodes found" — technically an error, but one that
+    /// blames the selection rather than the typo.
     #[test]
-    fn unknown_command_excludes_everything() {
-        assert!(!command_includes_node_type("materialize", NodeType::Model));
-        assert!(!command_includes_node_type("", NodeType::Model));
+    fn an_unknown_command_is_not_a_command() {
+        assert!(DbtCommand::parse("materialize").is_none());
+        assert!(DbtCommand::parse("").is_none());
+        assert!(DbtCommand::parse("Build").is_none(), "spelling is dbt's, not case-insensitive");
+    }
+
+    /// Every command round-trips through its wire spelling, so the enum cannot
+    /// silently rename one.
+    #[test]
+    fn every_command_round_trips_through_its_wire_name() {
+        for command in DbtCommand::ALL {
+            assert_eq!(DbtCommand::parse(command.as_str()), Some(command));
+        }
     }
 
     #[test]
     fn freshness_commands_cover_the_node_types_they_measure() {
         // `dbt source freshness` predates model freshness and stays
         // sources-only; the unified spelling adds SLA-carrying models.
-        assert!(command_includes_node_type("source-freshness", NodeType::Source));
-        assert!(!command_includes_node_type("source-freshness", NodeType::Model));
-        assert!(command_includes_node_type("freshness", NodeType::Source));
-        assert!(command_includes_node_type("freshness", NodeType::Model));
+        assert!(command_includes_node_type(DbtCommand::SourceFreshness, NodeType::Source));
+        assert!(!command_includes_node_type(DbtCommand::SourceFreshness, NodeType::Model));
+        assert!(command_includes_node_type(DbtCommand::Freshness, NodeType::Source));
+        assert!(command_includes_node_type(DbtCommand::Freshness, NodeType::Model));
         for rt in [
             NodeType::Seed,
             NodeType::Snapshot,
             NodeType::Test,
             NodeType::UnitTest,
         ] {
-            assert!(!command_includes_node_type("freshness", rt), "{rt:?} is not measurable");
+            assert!(
+                !command_includes_node_type(DbtCommand::Freshness, rt),
+                "{rt:?} is not measurable"
+            );
         }
         // Sources never take part in a build.
-        assert!(!command_includes_node_type("build", NodeType::Source));
+        assert!(!command_includes_node_type(DbtCommand::Build, NodeType::Source));
     }
 
     #[test]
@@ -923,40 +947,40 @@ mod tests {
 
     #[test]
     fn test_command_includes_only_tests() {
-        assert!(command_includes_node_type("test", NodeType::Test));
-        assert!(!command_includes_node_type("test", NodeType::Model));
-        assert!(!command_includes_node_type("test", NodeType::Seed));
-        assert!(!command_includes_node_type("test", NodeType::Snapshot));
+        assert!(command_includes_node_type(DbtCommand::Test, NodeType::Test));
+        assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Model));
+        assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Seed));
+        assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Snapshot));
     }
 
     /// Functions are dbt Core v2 nodes with a real materialization, so the
     /// graph-building commands schedule them like any other buildable node.
     #[test]
     fn graph_commands_schedule_functions() {
-        for command in ["build", "compile", "list"] {
+        for command in [DbtCommand::Build, DbtCommand::Compile, DbtCommand::List] {
             assert!(
                 command_includes_node_type(command, NodeType::Function),
                 "{command} should schedule functions"
             );
         }
         // `run` is models-only, matching dbt.
-        assert!(!command_includes_node_type("run", NodeType::Function));
+        assert!(!command_includes_node_type(DbtCommand::Run, NodeType::Function));
     }
 
     #[test]
     fn seed_command_includes_only_seeds() {
-        assert!(command_includes_node_type("seed", NodeType::Seed));
-        assert!(!command_includes_node_type("seed", NodeType::Model));
-        assert!(!command_includes_node_type("seed", NodeType::Test));
-        assert!(!command_includes_node_type("seed", NodeType::Snapshot));
+        assert!(command_includes_node_type(DbtCommand::Seed, NodeType::Seed));
+        assert!(!command_includes_node_type(DbtCommand::Seed, NodeType::Model));
+        assert!(!command_includes_node_type(DbtCommand::Seed, NodeType::Test));
+        assert!(!command_includes_node_type(DbtCommand::Seed, NodeType::Snapshot));
     }
 
     #[test]
     fn snapshot_command_includes_only_snapshots() {
-        assert!(command_includes_node_type("snapshot", NodeType::Snapshot));
-        assert!(!command_includes_node_type("snapshot", NodeType::Model));
-        assert!(!command_includes_node_type("snapshot", NodeType::Test));
-        assert!(!command_includes_node_type("snapshot", NodeType::Seed));
+        assert!(command_includes_node_type(DbtCommand::Snapshot, NodeType::Snapshot));
+        assert!(!command_includes_node_type(DbtCommand::Snapshot, NodeType::Model));
+        assert!(!command_includes_node_type(DbtCommand::Snapshot, NodeType::Test));
+        assert!(!command_includes_node_type(DbtCommand::Snapshot, NodeType::Seed));
     }
 
     /// Resource types with no execution path must stay out of every command's
@@ -964,9 +988,7 @@ mod tests {
     /// Functions are deliberately absent: they *are* executed.
     #[test]
     fn no_command_schedules_unsupported_resource_types() {
-        for command in [
-            "run", "build", "compile", "test", "seed", "snapshot", "list",
-        ] {
+        for command in DbtCommand::ALL {
             for rt in [
                 NodeType::Exposure,
                 NodeType::Metric,
@@ -991,7 +1013,7 @@ mod tests {
             NodeType::Snapshot,
             NodeType::UnitTest,
         ] {
-            assert!(command_includes_node_type("list", rt), "list should include {rt:?}");
+            assert!(command_includes_node_type(DbtCommand::List, rt), "list should include {rt:?}");
         }
     }
 

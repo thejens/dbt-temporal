@@ -26,8 +26,8 @@ use temporalio_sdk::{
 };
 
 use crate::types::{
-    DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState, RunSegmentControl,
-    RunSegmentState, RunStatusSnapshot, TimeoutConfig, is_freshness_command,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState,
+    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
@@ -134,7 +134,7 @@ impl DbtRunWorkflow {
         });
 
         // list: return the selected node set without executing any SQL.
-        if input.command == "list" {
+        if DbtCommand::parse(&input.command) == Some(DbtCommand::List) {
             let out = build_list_output(&plan, elapsed_secs(start, ctx.workflow_time()));
             upsert_terminal_status(ctx, &plan, "passed")?;
             ctx.set_current_details("list".to_string());
@@ -491,7 +491,7 @@ fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64, 
         error,
         skip,
     ));
-    if is_freshness_command(command) {
+    if DbtCommand::parse(command).is_some_and(DbtCommand::is_freshness) {
         levels
             .log_lines
             .push(build_freshness_summary_line(&levels.all_results));

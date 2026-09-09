@@ -247,3 +247,19 @@ models:
     assert_eq!(ids.len(), 1, "only the measurable model: {ids:?}");
     assert!(ids[0].ends_with(".measurable"), "got: {ids:?}");
 }
+
+/// A misspelled command used to match no arm of the planner's dispatch and
+/// select nothing, so the run failed with "no nodes found" — an error that
+/// blames the selection rather than the typo, and looks identical to a genuine
+/// empty selection.
+#[tokio::test]
+async fn a_misspelled_command_says_so() {
+    let harness = Harness::build(&[("m", "select 1 as id")]).await;
+
+    let err = select_command_node_ids(harness.state(), &build_input("materialize"))
+        .expect_err("an unknown command must be rejected");
+    let message = err.to_string();
+    assert!(message.contains("unknown command"), "got: {message}");
+    assert!(message.contains("materialize"), "should quote what was asked for: {message}");
+    assert!(message.contains("build, run"), "should list what exists: {message}");
+}

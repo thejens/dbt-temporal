@@ -72,6 +72,10 @@ pub fn rebuild_adapter_engines_with_env(
         &rendered.configs,
         rendered.default_adapter,
         state.resolver_state.root_project_quoting,
+        // The same project settings the startup engines were built with: a
+        // workflow that overrides credentials is not also opting out of the
+        // project's query comment or behaviour flags.
+        &state.adapter_settings,
         state.auth_override.as_ref(),
     )?;
 
@@ -214,6 +218,7 @@ mod tests {
             std::slice::from_ref(&config),
             dbt_adapter::AdapterType::DuckDB,
             dbt_schemas::schemas::common::ResolvedQuoting::default(),
+            &crate::worker::adapter::AdapterSettings::default(),
             None,
         )?;
 

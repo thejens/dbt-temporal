@@ -51,6 +51,7 @@ pub fn raw_engine() -> Arc<dyn dbt_adapter::AdapterEngine> {
     dbt_temporal::worker::adapter::build_adapter_engine(
         &db_config,
         ResolvedQuoting::default(),
+        &dbt_temporal::worker::adapter::AdapterSettings::default(),
         None,
     )
     .expect("build duckdb adapter engine")

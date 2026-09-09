@@ -238,6 +238,7 @@ pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         failures: None,
         freshness: None,
         // Nothing ran, so nothing was written.
+        compiled_code_ref: None,
         relation_name: None,
     }
 }
@@ -254,6 +255,7 @@ pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
         failures: None,
         freshness: None,
         // Nothing ran, so nothing was written.
+        compiled_code_ref: None,
         relation_name: None,
     }
 }
@@ -270,6 +272,7 @@ pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
         failures: None,
         freshness: None,
         // Nothing ran, so nothing was written.
+        compiled_code_ref: None,
         relation_name: None,
     }
 }
@@ -1133,6 +1136,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         }
     }

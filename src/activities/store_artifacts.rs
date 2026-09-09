@@ -1,4 +1,5 @@
 use anyhow::Context;
+use std::collections::BTreeMap;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
 
@@ -67,8 +68,12 @@ pub async fn store_artifacts_inner(
         anyhow::anyhow!("ArtifactStore not configured but store_artifacts was called")
     })?;
 
+    // The nodes wrote their compiled SQL to the store instead of carrying it
+    // through the workflow; read it back for the one artifact that reports it.
+    let compiled_sql = load_compiled_sql(store.as_ref(), &input.node_results).await;
+
     let run_results_json =
-        build_run_results_json(&input).context("serializing run_results.json")?;
+        build_run_results_json(&input, &compiled_sql).context("serializing run_results.json")?;
 
     let run_results_path = store
         .store(&input.invocation_id, "run_results.json", run_results_json.as_bytes())
@@ -190,7 +195,7 @@ async fn generate_and_store_catalog(
                         env: &input.env,
                         target: input.target.as_deref(),
                         // Neither reaches a `get_columns_in_relation` call.
-                        vars: &std::collections::BTreeMap::new(),
+                        vars: &BTreeMap::new(),
                         full_refresh: false,
                     },
                 )
@@ -199,6 +204,44 @@ async fn generate_and_store_catalog(
         .store(&input.invocation_id, "catalog.json", catalog_json.as_bytes())
         .await
         .context("storing catalog.json")
+}
+
+/// Fetch each node's compiled SQL back from the store, keyed by unique id.
+///
+/// A node that failed to store its SQL, or one from a run without artifact
+/// storage, simply has none here and keeps whatever it carried inline. A
+/// failure to read one is logged rather than fatal: `run_results.json` without
+/// one node's compiled SQL is worth far more than no artifact at all, and this
+/// runs after every node has already finished.
+async fn load_compiled_sql(
+    store: &dyn ArtifactStore,
+    results: &[crate::types::NodeExecutionResult],
+) -> BTreeMap<String, String> {
+    let mut compiled = BTreeMap::new();
+    for result in results {
+        let Some(reference) = result.compiled_code_ref.as_deref() else {
+            continue;
+        };
+        match store.retrieve(reference).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(sql) => {
+                    compiled.insert(result.unique_id.clone(), sql);
+                }
+                Err(e) => tracing::warn!(
+                    node = %result.unique_id,
+                    error = %e,
+                    "compiled SQL is not UTF-8; omitting it from run_results.json"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                node = %result.unique_id,
+                reference,
+                error = %format!("{e:#}"),
+                "could not read back compiled SQL; omitting it from run_results.json"
+            ),
+        }
+    }
+    compiled
 }
 
 /// dbt version stamped into artifact metadata.
@@ -219,7 +262,10 @@ const RUN_RESULTS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/run-results/v6.
 /// Serialized through upstream's own `RunResultsArtifact` rather than a
 /// hand-written JSON object: the artifact is read by dbt's own tooling, and a
 /// field this worker forgets is a field those consumers do not find.
-fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow::Error> {
+fn build_run_results_json(
+    input: &StoreArtifactsInput,
+    compiled_sql: &BTreeMap<String, String>,
+) -> Result<String, anyhow::Error> {
     use dbt_schemas::schemas::{RunResultsArgs, RunResultsArtifact, RunResultsMetadata};
     use std::collections::BTreeMap;
 
@@ -238,7 +284,11 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
                 env!("CARGO_PKG_VERSION").to_string(),
             )]),
         },
-        results: input.node_results.iter().map(run_result_output).collect(),
+        results: input
+            .node_results
+            .iter()
+            .map(|result| run_result_output(result, compiled_sql))
+            .collect(),
         elapsed_time: input.elapsed_time,
         args: RunResultsArgs {
             command: command.to_string(),
@@ -252,6 +302,7 @@ fn build_run_results_json(input: &StoreArtifactsInput) -> Result<String, anyhow:
 /// Convert one node result into dbt's `run_results.json` row.
 fn run_result_output(
     result: &crate::types::NodeExecutionResult,
+    compiled_sql: &BTreeMap<String, String>,
 ) -> dbt_schemas::schemas::RunResultOutput {
     use dbt_schemas::schemas::{RunResultOutput, TimingInfo};
 
@@ -280,8 +331,13 @@ fn run_result_output(
         message: result.message.clone(),
         failures: result.failures,
         unique_id: result.unique_id.clone(),
-        compiled: Some(result.compiled_code.is_some()),
-        compiled_code: result.compiled_code.clone(),
+        compiled: Some(result.compiled_code.is_some() || result.compiled_code_ref.is_some()),
+        // Read back from the store when the node spilled it there, otherwise
+        // whatever it carried inline.
+        compiled_code: compiled_sql
+            .get(&result.unique_id)
+            .cloned()
+            .or_else(|| result.compiled_code.clone()),
         // The relation the node actually wrote, which is what a consumer needs
         // to find the table this row describes.
         relation_name: result.relation_name.clone(),
@@ -389,6 +445,7 @@ fn build_freshness_json(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::artifact_store::LocalArtifactStore;
     use crate::types::{NodeExecutionResult, NodeStatus};
     use std::collections::BTreeMap;
 
@@ -403,6 +460,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         }
     }
@@ -471,6 +529,63 @@ mod tests {
         Ok(())
     }
 
+    /// Compiled SQL crosses Temporal once, to the store, and comes back only
+    /// here — the one artifact that reports it. The workflow accumulator, the
+    /// checkpoint and the hook payloads carry a reference instead.
+    #[tokio::test]
+    async fn run_results_reads_compiled_sql_back_from_the_store() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = LocalArtifactStore::new(dir.path().to_path_buf());
+        let reference = store
+            .store(
+                "inv-9",
+                &crate::activities::execute_node::compiled_sql_artifact_name("model.p.m"),
+                b"select 1 as id",
+            )
+            .await?;
+
+        let mut spilled = sample_result("model.p.m", NodeStatus::Success, 1.0);
+        spilled.compiled_code = None;
+        spilled.compiled_code_ref = Some(reference);
+
+        let compiled = load_compiled_sql(&store, std::slice::from_ref(&spilled)).await;
+        let input = StoreArtifactsInput {
+            node_results: vec![spilled],
+            ..freshness_input("build", vec![])
+        };
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_run_results_json(&input, &compiled)?)?;
+        let row = &parsed["results"][0];
+        assert_eq!(row["compiled_code"], "select 1 as id", "{parsed}");
+        assert_eq!(row["compiled"], true, "{parsed}");
+        Ok(())
+    }
+
+    /// A reference that cannot be read costs that node's SQL, not the whole
+    /// artifact — every node has already finished by the time this runs.
+    #[tokio::test]
+    async fn an_unreadable_reference_does_not_lose_the_artifact() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = LocalArtifactStore::new(dir.path().to_path_buf());
+
+        let mut spilled = sample_result("model.p.m", NodeStatus::Success, 1.0);
+        spilled.compiled_code = None;
+        spilled.compiled_code_ref = Some("inv-9/compiled/nothing-here.sql".to_string());
+
+        let compiled = load_compiled_sql(&store, std::slice::from_ref(&spilled)).await;
+        assert!(compiled.is_empty(), "nothing was read");
+
+        let input = StoreArtifactsInput {
+            node_results: vec![spilled],
+            ..freshness_input("build", vec![])
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_run_results_json(&input, &compiled)?)?;
+        assert_eq!(parsed["results"][0]["unique_id"], "model.p.m", "the row survives: {parsed}");
+        Ok(())
+    }
+
     /// A stale source is the one measurement anybody reads a freshness artifact
     /// for. It used to be missing from both: the stale verdict carried no
     /// outcome, the activity failed instead of returning one, and the filter
@@ -531,7 +646,7 @@ mod tests {
             elapsed_time: 12.5,
         };
 
-        let json_str = build_run_results_json(&input)?;
+        let json_str = build_run_results_json(&input, &BTreeMap::new())?;
         let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
 
         assert_eq!(parsed["metadata"]["invocation_id"], "inv-123");
@@ -604,7 +719,8 @@ mod tests {
             ..freshness_input("build", vec![])
         };
 
-        let parsed: serde_json::Value = serde_json::from_str(&build_run_results_json(&input)?)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_run_results_json(&input, &BTreeMap::new())?)?;
         let results = parsed["results"].as_array().context("results array")?;
 
         assert_eq!(results[0]["status"], "pass", "test.p.not_null_id: {parsed}");
@@ -630,7 +746,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let json_str = build_run_results_json(&input)?;
+        let json_str = build_run_results_json(&input, &BTreeMap::new())?;
         let parsed: serde_json::Value = serde_json::from_str(&json_str)?;
 
         assert_eq!(
@@ -654,7 +770,6 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::artifact_store::LocalArtifactStore;
     use crate::config::{
         RegisteredSearchAttributes, SearchAttributeConfig, WriteArtifacts, WriteRunLog,
     };

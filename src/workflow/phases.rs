@@ -644,6 +644,7 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
             failures: None,
             freshness: None,
             // `list` executes nothing.
+            compiled_code_ref: None,
             relation_name: None,
         })
         .collect();
@@ -980,6 +981,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         }];
         let phs = build_project_hooks_input(

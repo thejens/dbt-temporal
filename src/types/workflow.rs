@@ -382,6 +382,17 @@ pub struct NodeExecutionResult {
     /// check detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<FreshnessOutcome>,
+    /// Where the compiled SQL was stored, when it was stored rather than
+    /// carried.
+    ///
+    /// Compiled SQL is the largest thing a node produces and the workflow has
+    /// no use for it: it accumulates every result, copies them into the
+    /// checkpoint at each continuation, and clones them again for the artifact
+    /// activity — so one model's SQL crossed Temporal many times to reach the
+    /// one place that reads it, `run_results.json`. With artifact storage
+    /// configured the activity writes it once and this names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_code_ref: Option<String>,
     /// The relation the node actually wrote, fully qualified.
     ///
     /// Recorded because startup metadata does not describe it: a workflow that
@@ -723,6 +734,7 @@ mod tests {
             }],
             failures: None,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         };
         let json = serde_json::to_string(&result)?;

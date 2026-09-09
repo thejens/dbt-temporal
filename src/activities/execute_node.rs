@@ -747,7 +747,19 @@ pub async fn execute_node_inner(
                 &render_filename,
             )
             .map_err(|e| {
-                DbtTemporalError::Compilation(format!("compiling SQL for {unique_id}: {e:#}"))
+                // Rendering is not only templating: a model body can call
+                // `run_query`, `adapter.get_relation` or another introspection
+                // macro, so a warehouse that is briefly unreachable fails
+                // *here*. Treating every render failure as permanent put those
+                // outside the retry contract entirely — the same distinction
+                // the project-hook path already makes.
+                //
+                // `FsResult<T> = Result<T, Box<FsError>>`, so the deref keeps
+                // the concrete type the classifier downcasts for.
+                crate::error::classify_adapter_execution_error(
+                    &*e,
+                    &format!("compiling SQL for {unique_id}"),
+                )
             })?;
             // Inject ephemeral model CTEs (ref('ephemeral_model') → __dbt__cte__<name>).
             let compiled = inject_ephemeral_ctes(

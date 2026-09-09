@@ -299,6 +299,42 @@ async fn injected_transient_warehouse_faults_all_retry() {
     }
 }
 
+/// A model body reaches the warehouse while it *renders* — `run_query`,
+/// `adapter.get_relation`, any introspection macro. Wrapping every render
+/// failure as a permanent `Compilation` put those transient failures outside
+/// the retry contract, so a briefly unreachable warehouse failed the run
+/// instead of being retried.
+#[tokio::test]
+async fn a_transient_fault_while_rendering_a_model_is_retryable() {
+    let harness = Harness::build(&[(
+        "introspects",
+        "{% set probe = run_query('select 1 as n') %}\nselect 1 as id",
+    )])
+    .await;
+    harness
+        .faults()
+        .fail_connections(AdapterFault::connection_failure());
+
+    let err = harness.run_err("introspects").await;
+    assert!(
+        err.is_retryable() && matches!(err, DbtTemporalError::Adapter(_)),
+        "a transient failure during rendering must retry, got: {err:?}"
+    );
+}
+
+/// …and a template that is simply wrong still does not retry. Rendering errors
+/// are only reclassified when an adapter failure is actually in the chain.
+#[tokio::test]
+async fn a_jinja_error_while_rendering_stays_permanent() {
+    let harness = Harness::build(&[("broken_template", "select {{ 1 / 0 }} as id")]).await;
+
+    let err = harness.run_err("broken_template").await;
+    assert!(
+        !err.is_retryable() && matches!(err, DbtTemporalError::Compilation(_)),
+        "a Jinja error is not a warehouse blip, got: {err:?}"
+    );
+}
+
 /// A permanent warehouse error stays non-retryable even injected at the
 /// connection boundary — the authoritative SQLSTATE class wins.
 #[tokio::test]

@@ -99,6 +99,31 @@ async fn an_explicitly_excluded_test_is_not_added_back() {
     );
 }
 
+/// Upstream evaluates an exclude expression through the same per-atom pipeline
+/// as a select expression, indirect selection included. So excluding a model
+/// drops the tests hanging off it too — otherwise those tests run against a
+/// model the same command declined to build.
+#[tokio::test]
+async fn excluding_a_model_excludes_the_tests_hanging_off_it() {
+    let harness = project().await;
+
+    let without_exclusion = selected_with(&harness, "a", IndirectSelection::Eager);
+    assert!(
+        has_test_on(&without_exclusion, "not_null_a_id"),
+        "fixture check: a's test is normally pulled in: {without_exclusion:?}"
+    );
+
+    let ids = selected_for_command(&harness, "build", "a", Some("a"), IndirectSelection::Eager);
+    assert!(
+        !ids.iter().any(|id| id == "model.spike.a"),
+        "the excluded model must not run: {ids:?}"
+    );
+    assert!(
+        !has_test_on(&ids, "not_null_a_id"),
+        "and neither must its test, which has nothing left to test: {ids:?}"
+    );
+}
+
 /// The same failure at type scope: `--exclude resource_type:test` excluded
 /// every test, and then indirect selection put them back.
 #[tokio::test]

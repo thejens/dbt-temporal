@@ -187,6 +187,10 @@ the model without the test, and `--exclude resource_type:test` keeps every test
 out. Expanding after the exclusion instead would let the model put its tests
 straight back.
 
+The exclusion expands too, as it does in dbt: `--exclude my_model` drops the
+model **and the tests hanging off it**, because a test left behind would query
+a model the same command declined to build.
+
 **Behavior change:** before this was implemented dbt-temporal effectively
 behaved as `empty`, so `build --select my_model` ran the model and skipped its
 tests. The default is now `eager`, matching dbt, and such a run executes more

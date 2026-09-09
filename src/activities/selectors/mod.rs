@@ -101,7 +101,15 @@ pub fn apply_selectors(
 
     if let Some(expr) = exclude_expr {
         let matched = resolve_expression(nodes, &full_deps, &reverse_deps, ctx, &expr)?;
-        selected_ids.retain(|uid| !matched.contains(uid.as_str()));
+        // The exclusion expands too. Upstream evaluates an exclude expression
+        // through the same per-atom pipeline as a select expression, indirect
+        // selection included, so `--exclude my_model` drops the model *and* the
+        // tests hanging off it. Subtracting only the literal matches left those
+        // tests in the run, querying a model the same command had declined to
+        // build.
+        let excluded = expand_indirect(matched.into_iter().collect());
+        let excluded: BTreeSet<&str> = excluded.iter().map(String::as_str).collect();
+        selected_ids.retain(|uid| !excluded.contains(uid.as_str()));
     }
 
     Ok(selected_ids)

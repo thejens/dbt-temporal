@@ -71,6 +71,10 @@ pub struct WorkerState {
     /// passed per-activity isn't immediately cancelled (the token holds a Weak
     /// ref to this source; if the source is dropped the token fires).
     pub cancellation_source: CancellationTokenSource,
+    /// Project- and profile-level execution settings the engines were built
+    /// with, so a per-workflow rebuild produces engines configured the same way
+    /// rather than falling back to adapter defaults.
+    pub adapter_settings: crate::worker::adapter::AdapterSettings,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,

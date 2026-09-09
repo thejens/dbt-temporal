@@ -6,6 +6,62 @@ use crate::artifact_store::{ArtifactStore, LocalArtifactStore};
 use crate::config::DbtTemporalConfig;
 use crate::worker::engines::AdapterEngines;
 
+/// The project- and profile-level execution settings an engine needs beyond
+/// credentials.
+///
+/// dbt resolves all of these while loading the project. Building engines with
+/// their defaults instead dropped every one: a project's `query_comment` never
+/// reached the warehouse, so nothing on the platform could attribute a query to
+/// the model that issued it (on BigQuery, `job-label` never set a label at
+/// all); `flags:` behaviour overrides were ignored, so a project opting into or
+/// out of an adapter behaviour got the opposite; and the target's `threads` was
+/// never seen by the connection pool.
+#[derive(Debug, Clone, Default)]
+pub struct AdapterSettings {
+    /// `query_comment:` from the root `dbt_project.yml`.
+    pub query_comment: Option<dbt_schemas::schemas::project::QueryComment>,
+    /// `flags:` from the root `dbt_project.yml`, reduced to the booleans the
+    /// engine reads as behaviour overrides.
+    pub behavior_flags: std::collections::BTreeMap<String, bool>,
+    /// The active target's `threads`.
+    pub threads: Option<usize>,
+}
+
+impl AdapterSettings {
+    /// Read the settings out of a loaded project.
+    pub fn from_state(state: &dbt_schemas::state::DbtState) -> Self {
+        // The root project is the first package; the rest are its dependencies,
+        // and dbt takes these settings from the root only.
+        let root = state.packages.first();
+        Self {
+            query_comment: root.and_then(|p| (*p.dbt_project.query_comment).clone()),
+            behavior_flags: root
+                .and_then(|p| p.dbt_project.flags.as_ref())
+                .and_then(dbt_yaml::Value::as_mapping)
+                .map(|flags| {
+                    flags
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            Some((key.as_str()?.to_string(), yml_flag_as_bool(value)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            threads: state.dbt_profile.threads,
+        }
+    }
+}
+
+/// Read one `flags:` entry as a behaviour override, the way upstream's adapter
+/// factory does — a true boolean or the string "true", anything else false.
+fn yml_flag_as_bool(value: &dbt_yaml::Value) -> bool {
+    value.as_bool().unwrap_or_else(|| {
+        value
+            .as_str()
+            .is_some_and(|s| s == "true" || s.parse::<bool>().unwrap_or(false))
+    })
+}
+
 /// Build one engine per adapter the active target declares.
 ///
 /// `configs` is the target's adapters in declaration order — one config each,
@@ -17,15 +73,17 @@ pub fn build_adapter_engines(
     configs: &[dbt_schemas::schemas::profiles::DbConfig],
     default_adapter: dbt_adapter::AdapterType,
     quoting: dbt_schemas::schemas::common::ResolvedQuoting,
+    settings: &AdapterSettings,
     auth_override: Option<&Arc<dyn dbt_auth::Auth>>,
 ) -> Result<AdapterEngines> {
     let engines = configs
         .iter()
         .map(|config| {
-            let engine = build_adapter_engine(config, quoting, auth_override.map(Arc::clone))
-                .with_context(|| {
-                    format!("building the '{}' adapter engine", config.adapter_type())
-                })?;
+            let engine =
+                build_adapter_engine(config, quoting, settings, auth_override.map(Arc::clone))
+                    .with_context(|| {
+                        format!("building the '{}' adapter engine", config.adapter_type())
+                    })?;
             Ok((config.adapter_type(), engine))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -37,6 +95,7 @@ pub fn build_adapter_engines(
 pub fn build_adapter_engine(
     db_config: &dbt_schemas::schemas::profiles::DbConfig,
     quoting: dbt_schemas::schemas::common::ResolvedQuoting,
+    settings: &AdapterSettings,
     auth_override: Option<Arc<dyn dbt_auth::Auth>>,
 ) -> Result<Arc<dyn dbt_adapter::AdapterEngine>> {
     use dbt_adapter::adapter::adapter_factory::backend_of;
@@ -59,7 +118,15 @@ pub fn build_adapter_engine(
 
     let stmt_splitter: Arc<dyn dbt_adapter::stmt_splitter::StmtSplitter> =
         Arc::new(DefaultStmtSplitter);
-    let query_comment = QueryCommentConfig::from_query_comment(None, adapter_type, false, None);
+    // `use_default = true` matches upstream's adapter factory: with no
+    // `query_comment:` in the project, dbt still stamps its own comment on every
+    // query, which is what makes a statement traceable back to an invocation.
+    let query_comment = QueryCommentConfig::from_query_comment(
+        settings.query_comment.clone(),
+        adapter_type,
+        true,
+        None,
+    );
     let type_ops: Arc<dyn dbt_adapter::sql_types::TypeOps> =
         Arc::new(DefaultTypeOps::new(adapter_type));
     let relation_cache = Arc::new(RelationCache::default());
@@ -73,9 +140,10 @@ pub fn build_adapter_engine(
         type_ops,
         stmt_splitter,
         relation_cache,
-        std::collections::BTreeMap::new(), // behavior_flag_overrides
-        None,                              // threads
-        None,                              // dbt_cloud_project_id
+        settings.behavior_flags.clone(),
+        settings.threads,
+        None, // dbt_cloud_project_id — set by dbt platform, which a self-hosted
+              // worker has no session for.
     );
 
     Ok(Arc::new(engine))
@@ -107,6 +175,35 @@ pub fn build_artifact_store(config: &DbtTemporalConfig) -> Result<Arc<dyn Artifa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `flags:` values reach the engine as booleans, read the way upstream's
+    /// adapter factory reads them — a project that writes `flag: "true"` in
+    /// YAML means the same thing as `flag: true`.
+    #[test]
+    fn behaviour_flags_read_booleans_and_boolean_strings() {
+        let yes = dbt_yaml::Value::bool(true);
+        let no = dbt_yaml::Value::bool(false);
+        assert!(yml_flag_as_bool(&yes));
+        assert!(!yml_flag_as_bool(&no));
+
+        assert!(yml_flag_as_bool(&dbt_yaml::Value::string("true".to_string())));
+        assert!(!yml_flag_as_bool(&dbt_yaml::Value::string("false".to_string())));
+
+        // Anything that is not a boolean is not an override.
+        assert!(!yml_flag_as_bool(&dbt_yaml::Value::string("yes".to_string())));
+        assert!(!yml_flag_as_bool(&dbt_yaml::Value::null()));
+    }
+
+    /// The default settings are what a locally-built engine (the project-check
+    /// index) uses: no project to take a comment or flags from.
+    #[test]
+    fn default_settings_carry_nothing() {
+        let settings = AdapterSettings::default();
+        assert!(settings.query_comment.is_none());
+        assert!(settings.behavior_flags.is_empty());
+        assert!(settings.threads.is_none());
+    }
+
     use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
 
     fn test_config() -> DbtTemporalConfig {

@@ -133,6 +133,9 @@ fn duckdb_engine() -> Result<Arc<dyn AdapterEngine>> {
     crate::worker::adapter::build_adapter_engine(
         &DbConfig::DuckDB(Box::new(config)),
         DEFAULT_RESOLVED_QUOTING,
+        // The check index is a local DuckDB over the project's own metadata —
+        // no warehouse to comment on, no project behaviour to honour.
+        &crate::worker::adapter::AdapterSettings::default(),
         None,
     )
     .context("building the duckdb engine for the project-check index")

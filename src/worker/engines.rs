@@ -167,7 +167,7 @@ impl AdapterEngines {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::worker::adapter::build_adapter_engine;
+    use crate::worker::adapter::{AdapterSettings, build_adapter_engine};
     use dbt_schemas::schemas::common::ResolvedQuoting;
     use dbt_schemas::schemas::profiles::{DbConfig, DuckDbConfig, PostgresDbConfig};
 
@@ -180,7 +180,8 @@ mod tests {
             schema: Some("main".to_string()),
             ..Default::default()
         }));
-        build_adapter_engine(&config, ResolvedQuoting::default(), None).unwrap()
+        build_adapter_engine(&config, ResolvedQuoting::default(), &AdapterSettings::default(), None)
+            .unwrap()
     }
 
     fn postgres_engine() -> Arc<dyn AdapterEngine> {
@@ -190,7 +191,8 @@ mod tests {
             schema: Some("public".to_string()),
             ..Default::default()
         }));
-        build_adapter_engine(&config, ResolvedQuoting::default(), None).unwrap()
+        build_adapter_engine(&config, ResolvedQuoting::default(), &AdapterSettings::default(), None)
+            .unwrap()
     }
 
     fn pair() -> AdapterEngines {

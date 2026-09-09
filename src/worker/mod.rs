@@ -487,10 +487,15 @@ async fn initialize_project_inner(
         .values()
         .map(|adapter| adapter.config().clone())
         .collect();
+    // Query comment, behaviour flags and threads come from the loaded project;
+    // an engine built without them silently runs with dbt's defaults replaced
+    // by the adapter's.
+    let adapter_settings = adapter::AdapterSettings::from_state(&dbt_state);
     let adapter_engines = adapter::build_adapter_engines(
         &target_configs,
         dbt_state.dbt_profile.default_adapter,
         resolver_state.root_project_quoting,
+        &adapter_settings,
         auth_override.as_ref(),
     )?;
     if target_configs.len() > 1 {
@@ -559,6 +564,7 @@ async fn initialize_project_inner(
     }
 
     Ok(WorkerState {
+        adapter_settings,
         project_name,
         resolver_state: Arc::new(resolver_state),
         jinja_env,

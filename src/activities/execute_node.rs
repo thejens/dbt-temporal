@@ -607,12 +607,65 @@ pub async fn execute_node_cancellable(
     // — so the node span has to be re-entered on the far side of the handoff,
     // or the first dbt macro to open a span panics the thread.
     let span = tracing::Span::current();
-    tokio::task::spawn_blocking(move || {
+    let invocation_id = input.invocation_id.clone();
+    let mut result = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
         execute_node_body(&state, &input, defer_nodes.as_deref(), &token)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("node execution task failed: {e}"))?
+    .map_err(|e| anyhow::anyhow!("node execution task failed: {e}"))??;
+
+    spill_compiled_sql(activities, &invocation_id, &mut result).await?;
+    Ok(result)
+}
+
+/// Move the node's compiled SQL to the artifact store, leaving a reference.
+///
+/// The workflow accumulates every result, copies them into the checkpoint at
+/// each continuation and clones them again for the artifact activity — so a
+/// model's SQL crossed Temporal many times over to reach the one place that
+/// reads it. Written once here instead, and read back by `store_artifacts`
+/// when it assembles `run_results.json`.
+///
+/// Without artifact storage the SQL stays inline: nothing writes artifacts for
+/// that run, so nothing would ever read the reference.
+async fn spill_compiled_sql(
+    activities: &DbtActivities,
+    invocation_id: &str,
+    result: &mut NodeExecutionResult,
+) -> Result<(), anyhow::Error> {
+    if !activities.write_artifacts.0 {
+        return Ok(());
+    }
+    let (Some(store), Some(sql)) =
+        (activities.artifact_store.as_ref(), result.compiled_code.take())
+    else {
+        return Ok(());
+    };
+
+    match store
+        .store(invocation_id, &compiled_sql_artifact_name(&result.unique_id), sql.as_bytes())
+        .await
+    {
+        Ok(path) => {
+            result.compiled_code_ref = Some(path);
+            Ok(())
+        }
+        Err(e) => {
+            // Put it back rather than losing it: an artifact-store blip should
+            // not silently empty `compiled_code` in run_results.json.
+            result.compiled_code = Some(sql);
+            Err(DbtTemporalError::ArtifactStore(
+                e.context(format!("storing compiled SQL for {}", result.unique_id)),
+            )
+            .into())
+        }
+    }
+}
+
+/// Artifact name for one node's compiled SQL.
+pub fn compiled_sql_artifact_name(unique_id: &str) -> String {
+    format!("compiled/{unique_id}.sql")
 }
 
 /// The synchronous half of a node execution: compile, materialize, decode.
@@ -1027,6 +1080,7 @@ fn execute_node_body(
             failures: None,
             freshness: None,
             // Compile-only: nothing was written.
+            compiled_code_ref: None,
             relation_name: None,
         });
     }
@@ -1104,6 +1158,7 @@ fn execute_node_body(
             timing: build_timing_entries(compile_start, compile_end, execute_start, execute_end),
             failures: None,
             freshness: Some(outcome),
+            compiled_code_ref: None,
             relation_name: executed_relation_name(&node_context),
         });
     }
@@ -1277,6 +1332,7 @@ fn execute_node_body(
         timing,
         failures,
         freshness: None,
+        compiled_code_ref: None,
         relation_name: executed_relation_name(&node_context),
     })
 }

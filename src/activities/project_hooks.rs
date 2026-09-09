@@ -385,6 +385,7 @@ mod tests {
             timing: vec![],
             failures,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         }
     }

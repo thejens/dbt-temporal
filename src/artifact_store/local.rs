@@ -90,7 +90,14 @@ impl ArtifactStore for LocalArtifactStore {
         // activity or a killed worker leaves it there for good, where the next
         // reader takes it for a complete artifact. Rename within one directory
         // is atomic, so a reader sees either no file or the whole file.
-        let tmp = dir.join(format!(".{}.{}.tmp", filename, uuid::Uuid::new_v4()));
+        // The scratch name comes from the resolved leaf, not from `filename` —
+        // a nested artifact name like `compiled/<id>.sql` would otherwise put
+        // the scratch file in a directory that does not exist.
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("artifact path has no file name: {}", path.display()))?
+            .to_string_lossy();
+        let tmp = dir.join(format!(".{}.{}.tmp", leaf, uuid::Uuid::new_v4()));
         if let Err(e) = tokio::fs::write(&tmp, content).await {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(anyhow::Error::new(e))
@@ -143,6 +150,22 @@ mod tests {
 
         let path = store.store("deep/inv", "file.txt", b"hello").await?;
         assert!(Path::new(&path).exists());
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// Compiled SQL is stored under `compiled/<unique_id>.sql`, so the leaf and
+    /// the caller-supplied name are not the same thing.
+    #[tokio::test]
+    async fn store_accepts_a_nested_filename() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("dbtt-artifact-{}", uuid::Uuid::new_v4()));
+        let store = LocalArtifactStore::new(dir.clone());
+
+        let path = store
+            .store("inv-123", "compiled/model.proj.my_model.sql", b"select 1")
+            .await?;
+        assert_eq!(store.retrieve(&path).await?, b"select 1");
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

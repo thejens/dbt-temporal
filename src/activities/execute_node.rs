@@ -767,11 +767,14 @@ pub async fn execute_node_inner(
             let compiled = inject_ephemeral_ctes(
                 &compiled,
                 &common.name,
+                &base.depends_on.nodes,
                 &state.resolver_state.nodes,
                 jinja_env,
                 &node_context,
-                &state.io_args.in_dir,
-                &ephemeral_dir,
+                super::node_helpers::EphemeralDirs {
+                    in_dir: &state.io_args.in_dir,
+                    ephemeral_dir: &ephemeral_dir,
+                },
             )?;
             // Patch ref() schemas in compiled SQL so downstream refs resolve to the
             // correct per-workflow schemas.

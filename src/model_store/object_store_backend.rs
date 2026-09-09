@@ -1,18 +1,18 @@
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
-use std::path::PathBuf;
 use tracing::info;
 
 /// Fetch dbt project(s) from an object store (GCS, S3/Minio).
 ///
 /// Downloads all files under the URL prefix to a local temp directory,
 /// then scans for `dbt_project.yml` to find project roots.
-pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
+pub async fn fetch(url: &str) -> Result<super::FetchedProjects> {
     let (store, prefix) = crate::artifact_store::parse_object_store_url(url)?;
 
-    let dest = std::env::temp_dir().join(format!("dbtt-models-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dest)
-        .with_context(|| format!("creating model store dir {}", dest.display()))?;
+    // Owned from here on: a download that fails partway removes what it wrote
+    // instead of leaving an incomplete project behind.
+    let dir = super::fetch_dir()?;
+    let dest = dir.path().to_path_buf();
 
     info!(url = url, dest = %dest.display(), "downloading models from object store");
 
@@ -47,6 +47,6 @@ pub async fn fetch(url: &str) -> Result<Vec<PathBuf>> {
 
     info!(files = count, "downloaded model store files");
 
-    let dirs = super::scan_for_projects(&dest)?;
-    Ok(dirs)
+    let projects = super::scan_for_projects(&dest)?;
+    Ok(super::FetchedProjects::owned(dir, projects))
 }

@@ -91,6 +91,10 @@ pub struct WorkerState {
     /// project with three hundred models in one schema issues three hundred
     /// identical `CREATE SCHEMA IF NOT EXISTS` statements.
     pub created_schemas: crate::worker::schemas::CreatedSchemas,
+    /// Defer manifests this worker has decoded, shared across the activities
+    /// of a run. Loading one per node meant every activity downloaded and
+    /// deserialized the same artifact.
+    pub defer_manifests: crate::worker::defer_cache::DeferManifestCache,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,

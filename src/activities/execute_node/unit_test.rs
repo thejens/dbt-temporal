@@ -136,12 +136,10 @@ pub fn build_unit_test_sql(
     // replace_subquery_refs_with_cte_names. Rendering in the unit test's
     // context is safe: ref/source resolution only depends on the package,
     // which the unit test shares with its model.
-    let model_path = model.__common_attr__.path.to_string_lossy().to_string();
     let raw_sql = super::raw_sql::resolve_raw_sql(
         state,
         &model.__common_attr__,
         dbt_schemas::schemas::telemetry::NodeType::Model,
-        &model_path,
     )
     .map_err(|(path, e)| {
         DbtTemporalError::Compilation(format!(

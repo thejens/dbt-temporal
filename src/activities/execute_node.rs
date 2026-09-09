@@ -223,14 +223,14 @@ impl ActivityWorkspace {
             .with_context(|| format!("creating ephemeral dir {}", ephemeral_dir.display()))?;
 
         let node_path = node.common().path.clone();
-        let cache_key = node_path.to_string_lossy().to_string();
+        let cache_key = node.common().unique_id.as_str();
         write_cached_sql(
             &state.compiled_sql_cache,
-            &cache_key,
+            cache_key,
             &compiled_sql_path(node, &state.io_args.in_dir, &out_dir),
         )?;
         if node.resource_type() == NodeType::Snapshot {
-            write_cached_sql(&state.snapshot_sql_cache, &cache_key, &out_dir.join(&node_path))?;
+            write_cached_sql(&state.snapshot_sql_cache, cache_key, &out_dir.join(&node_path))?;
         }
 
         Ok(Self {
@@ -552,7 +552,6 @@ pub async fn execute_node_inner(
     // Extract sql_header from model config (only models have this field).
     let sql_header = get_sql_header(&state.resolver_state.nodes, unique_id, rt);
 
-    let node_path = common.path.to_string_lossy().to_string();
     let workspace = ActivityWorkspace::new(state, node, &input.invocation_id)?;
     // Destructure so the TempDir guard stays owned by this scope — dropping
     // `workspace` early would delete the directory `io_args` points at.
@@ -686,7 +685,7 @@ pub async fn execute_node_inner(
     let raw_sql_result = if rt == NodeType::UnitTest || measures_freshness {
         Ok(String::new())
     } else {
-        resolve_raw_sql(state, common, rt, &node_path)
+        resolve_raw_sql(state, common, rt)
     };
 
     // For generic tests, inject _dbt_generic_test_kwargs from test metadata.

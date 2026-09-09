@@ -19,7 +19,6 @@ pub fn resolve_raw_sql(
     state: &WorkerState,
     common: &CommonAttributes,
     rt: NodeType,
-    node_path: &str,
 ) -> Result<String, (PathBuf, std::io::Error)> {
     resolve_raw_sql_inner(
         &state.test_sql_cache,
@@ -27,7 +26,6 @@ pub fn resolve_raw_sql(
         &state.io_args.out_dir,
         common,
         rt,
-        node_path,
     )
 }
 
@@ -37,7 +35,6 @@ fn resolve_raw_sql_inner(
     out_dir: &Path,
     common: &CommonAttributes,
     rt: NodeType,
-    node_path: &str,
 ) -> Result<String, (PathBuf, std::io::Error)> {
     if rt == NodeType::Seed {
         // Seeds have no SQL body — data comes from the agate_table loaded
@@ -47,7 +44,7 @@ fn resolve_raw_sql_inner(
     }
 
     if rt == NodeType::Test {
-        if let Some(sql) = test_sql_cache.get(node_path) {
+        if let Some(sql) = test_sql_cache.get(&common.unique_id) {
             return Ok(sql.clone());
         }
         let candidates: [(PathBuf, &'static str); 4] = [
@@ -113,6 +110,7 @@ mod tests {
         raw_code: Option<&str>,
     ) -> CommonAttributes {
         CommonAttributes {
+            unique_id: format!("test.pkg.{path}"),
             original_file_path: PathBuf::from(original_file_path).into(),
             path: PathBuf::from(path).into(),
             raw_code: raw_code.map(String::from),
@@ -130,7 +128,6 @@ mod tests {
             Path::new("/out"),
             &common,
             NodeType::Seed,
-            "seed.x",
         );
         assert_eq!(r.unwrap(), "");
     }
@@ -138,7 +135,7 @@ mod tests {
     #[test]
     fn test_uses_cache_first() {
         let mut cache = BTreeMap::new();
-        cache.insert("models/t.sql".to_string(), "SELECT 1".to_string());
+        cache.insert("test.pkg.models/t.sql".to_string(), "SELECT 1".to_string());
         let common = make_common("models/t.sql", "models/t.sql", None);
         let r = resolve_raw_sql_inner(
             &cache,
@@ -146,7 +143,6 @@ mod tests {
             Path::new("/out"),
             &common,
             NodeType::Test,
-            "models/t.sql",
         );
         assert_eq!(r.unwrap(), "SELECT 1");
     }
@@ -160,14 +156,7 @@ mod tests {
 
         let cache = BTreeMap::new();
         let common = make_common("tests/t.sql", "compiled/tests/t.sql", None);
-        let r = resolve_raw_sql_inner(
-            &cache,
-            Path::new("/in"),
-            &out,
-            &common,
-            NodeType::Test,
-            "tests/t.sql",
-        );
+        let r = resolve_raw_sql_inner(&cache, Path::new("/in"), &out, &common, NodeType::Test);
         assert_eq!(r.unwrap(), "SELECT FROM out");
     }
 
@@ -184,7 +173,7 @@ mod tests {
 
         let cache = BTreeMap::new();
         let common = make_common("tests/t.sql", "tests/t.sql", None);
-        let r = resolve_raw_sql_inner(&cache, &in_d, &out, &common, NodeType::Test, "k");
+        let r = resolve_raw_sql_inner(&cache, &in_d, &out, &common, NodeType::Test);
         assert_eq!(r.unwrap(), "SELECT FROM in");
     }
 
@@ -199,7 +188,6 @@ mod tests {
             &dir.path().join("nope-out"),
             &common,
             NodeType::Test,
-            "k",
         );
         assert_eq!(r.unwrap(), "SELECT raw_code");
     }
@@ -215,7 +203,6 @@ mod tests {
             &dir.path().join("nope-out"),
             &common,
             NodeType::Test,
-            "k",
         )
         .unwrap_err();
         assert_eq!(err.1.kind(), std::io::ErrorKind::NotFound);
@@ -232,7 +219,6 @@ mod tests {
             &dir.path().join("nope-out"),
             &common,
             NodeType::Test,
-            "k",
         )
         .unwrap_err();
         assert_eq!(err.1.kind(), std::io::ErrorKind::NotFound);
@@ -248,7 +234,6 @@ mod tests {
             Path::new("/out"),
             &common,
             NodeType::Model,
-            "k",
         );
         assert_eq!(r.unwrap(), "SELECT inline");
     }
@@ -262,8 +247,7 @@ mod tests {
 
         let cache = BTreeMap::new();
         let common = make_common("models/m.sql", "models/m.sql", Some(""));
-        let r =
-            resolve_raw_sql_inner(&cache, &in_d, Path::new("/out"), &common, NodeType::Model, "k");
+        let r = resolve_raw_sql_inner(&cache, &in_d, Path::new("/out"), &common, NodeType::Model);
         assert_eq!(r.unwrap(), "SELECT FROM disk");
     }
 
@@ -276,8 +260,7 @@ mod tests {
 
         let cache = BTreeMap::new();
         let common = make_common("models/m.sql", "models/m.sql", Some("--placeholder--"));
-        let r =
-            resolve_raw_sql_inner(&cache, &in_d, Path::new("/out"), &common, NodeType::Model, "k");
+        let r = resolve_raw_sql_inner(&cache, &in_d, Path::new("/out"), &common, NodeType::Model);
         assert_eq!(r.unwrap(), "SELECT FROM disk");
     }
 
@@ -286,15 +269,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = BTreeMap::new();
         let common = make_common("models/missing.sql", "models/missing.sql", None);
-        let err = resolve_raw_sql_inner(
-            &cache,
-            dir.path(),
-            Path::new("/out"),
-            &common,
-            NodeType::Model,
-            "k",
-        )
-        .unwrap_err();
+        let err =
+            resolve_raw_sql_inner(&cache, dir.path(), Path::new("/out"), &common, NodeType::Model)
+                .unwrap_err();
         assert_eq!(err.0, dir.path().join("models/missing.sql"));
         assert_eq!(err.1.kind(), std::io::ErrorKind::NotFound);
     }

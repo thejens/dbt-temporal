@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use dbt_schemas::schemas::nodes::NodeBaseAttributes;
+use dbt_schemas::schemas::telemetry::NodeType;
 
 use crate::error::DbtTemporalError;
 use crate::worker_state::WorkerState;
@@ -107,6 +108,16 @@ fn compute_patched_relation_inner(
     })
 }
 
+/// Whether a node's schema takes part in the per-workflow rewrite.
+///
+/// Sources do not: their schema is declared in YAML and names a table dbt did
+/// not create, so moving it to the workflow's schema points every `source()`
+/// at something that was never there. A source sharing the models' schema —
+/// the ordinary case in a dev project — is exactly when that bites.
+fn takes_part_in_the_rewrite(node: &dyn dbt_schemas::schemas::InternalDbtNodeAttributes) -> bool {
+    node.resource_type() != NodeType::Source
+}
+
 /// Build a schema rewrite map by re-executing `generate_schema_name` with the
 /// per-workflow Jinja env for every distinct (resolved-schema, custom-schema-input)
 /// combination in the project.
@@ -126,6 +137,9 @@ pub fn build_schema_rewrite_map(
     // not set an explicit schema override.
     let mut schema_to_input: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
     for (_, node) in state.resolver_state.nodes.iter() {
+        if !takes_part_in_the_rewrite(node) {
+            continue;
+        }
         let base_schema = node.base().schema.clone();
         let custom_schema_name = node
             .base()
@@ -155,6 +169,47 @@ pub fn build_schema_rewrite_map(
         }
     }
     Ok(map)
+}
+
+/// Build the schema rewrite map for the **default** `generate_schema_name`
+/// path, covering every distinct schema in the project.
+///
+/// The single-token substitution this replaces only knew the startup default
+/// schema, so a model configured into `<default>_marketing` kept naming the
+/// startup schema in every downstream `ref()` — the run wrote to the right
+/// relation and read from the wrong one. Reusing the per-node reconstruction
+/// gives every schema the same treatment the node's own relation gets.
+pub fn build_default_schema_rewrite_map(
+    state: &WorkerState,
+    env_schema: Option<&str>,
+    env_database: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    if env_schema.is_none() {
+        return map;
+    }
+    for (unique_id, node) in state.resolver_state.nodes.iter() {
+        if !takes_part_in_the_rewrite(node) {
+            continue;
+        }
+        let base = node.base();
+        if map.contains_key(&base.schema) {
+            continue;
+        }
+        if let Some(patch) = compute_patched_relation_inner(
+            &state.default_schema,
+            &state.default_database,
+            &base.schema,
+            &base.database,
+            env_schema,
+            env_database,
+            unique_id,
+        ) && patch.patched_schema
+        {
+            map.insert(base.schema.clone(), patch.schema);
+        }
+    }
+    map
 }
 
 /// Render `{{ generate_schema_name(custom_schema_name, node) }}` through the
@@ -285,25 +340,7 @@ pub fn apply_patched_relation(
     }
 }
 
-/// Patch schema references in compiled SQL using a rewrite map.
-///
-/// Replaces every quoted occurrence of each old schema with the new schema.
-/// Handles both double-quoted identifiers (`"schema"`) used by PostgreSQL,
-/// Snowflake, and Redshift, and backtick-quoted identifiers (`` `schema` ``)
-/// used by BigQuery.
-pub fn patch_sql_with_schema_map(compiled: String, map: &BTreeMap<String, String>) -> String {
-    if map.is_empty() {
-        return compiled;
-    }
-    let mut result = compiled;
-    for (old, new) in map {
-        result = result.replace(&format!("\"{old}\""), &format!("\"{new}\""));
-        result = result.replace(&format!("`{old}`"), &format!("`{new}`"));
-    }
-    result
-}
-
-/// Build a database rewrite map for SQL text patching.
+/// Build a database rewrite map for relation rewriting.
 ///
 /// Only replaces the worker-startup default database — nodes configured with
 /// non-default databases are left unchanged (matching the relation-level logic
@@ -323,7 +360,9 @@ pub fn build_database_rewrite_map(
         .resolver_state
         .nodes
         .iter()
-        .filter(|(_, n)| n.base().database == state.default_database)
+        .filter(|(_, n)| {
+            takes_part_in_the_rewrite(*n) && n.base().database == state.default_database
+        })
         .map(|(_, n)| n.base().database.clone())
         .collect();
 
@@ -465,58 +504,6 @@ mod tests {
         .expect("schema patch alone should still produce a result");
         assert_eq!(result.database, "warehouse");
         assert!(!result.patched_database);
-    }
-
-    // --- patch_sql_with_schema_map ---
-
-    #[test]
-    fn patches_double_quoted_schema_in_sql() {
-        let mut map = BTreeMap::new();
-        map.insert("dbt_dev".to_string(), "dbt_tenant1".to_string());
-        let sql = r#"SELECT * FROM "dbt_dev"."orders""#.to_string();
-        let patched = patch_sql_with_schema_map(sql, &map);
-        assert_eq!(patched, r#"SELECT * FROM "dbt_tenant1"."orders""#);
-    }
-
-    #[test]
-    fn patches_backtick_quoted_schema_in_sql() {
-        let mut map = BTreeMap::new();
-        map.insert("dbt_dev".to_string(), "dbt_tenant1".to_string());
-        let sql = "SELECT * FROM `my-project`.`dbt_dev`.`orders`".to_string();
-        let patched = patch_sql_with_schema_map(sql, &map);
-        assert_eq!(patched, "SELECT * FROM `my-project`.`dbt_tenant1`.`orders`");
-    }
-
-    #[test]
-    fn patches_multiple_schemas() {
-        let mut map = BTreeMap::new();
-        map.insert("dbt_dev_analytics".to_string(), "dbt_t1_analytics".to_string());
-        map.insert("dbt_dev_raw".to_string(), "dbt_t1_raw".to_string());
-        let sql =
-            r#"SELECT * FROM "dbt_dev_analytics"."a" JOIN "dbt_dev_raw"."b" ON TRUE"#.to_string();
-        let patched = patch_sql_with_schema_map(sql, &map);
-        assert_eq!(
-            patched,
-            r#"SELECT * FROM "dbt_t1_analytics"."a" JOIN "dbt_t1_raw"."b" ON TRUE"#
-        );
-    }
-
-    #[test]
-    fn no_op_on_empty_map() {
-        let sql = r#"SELECT * FROM "dbt_dev"."orders""#.to_string();
-        let patched = patch_sql_with_schema_map(sql.clone(), &BTreeMap::new());
-        assert_eq!(patched, sql);
-    }
-
-    #[test]
-    fn does_not_patch_unquoted_schema_names() {
-        // Unquoted identifiers are not touched — only safe to replace quoted ones
-        // where we can be sure of identifier boundaries.
-        let mut map = BTreeMap::new();
-        map.insert("raw".to_string(), "workflow_42".to_string());
-        let sql = "SELECT raw FROM raw.orders".to_string();
-        let patched = patch_sql_with_schema_map(sql.clone(), &map);
-        assert_eq!(patched, sql); // unchanged
     }
 
     // --- render_schema_name_macro ---

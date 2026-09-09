@@ -98,6 +98,11 @@ async-trait = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 filetime = "0.2"
+# Selector value matching. dbt runs every selector value through this crate's
+# `Pattern`, so what a selector matches is defined by it — using anything else,
+# including a faithful reimplementation, is a divergence waiting to happen.
+# Pinned to the same version dbt-core's workspace uses.
+glob = "0.3.2"
 arrow-select = "56"
 # Unit test result comparison (patched to the sdf-labs fork like all arrow crates).
 arrow-array = "56"

@@ -305,9 +305,12 @@ The workflow stores live metadata in [Temporal memos](https://docs.temporal.io/w
 |----------|---------|----------|
 | `command` | Once (at start) | Workflow input metadata: command, project, select, exclude, target, full_refresh, fail_fast, vars |
 | `node_status` | After each DAG level | Map of `unique_id` → status (`pending`, `running`, `success`, `error`, `skipped`, `cancelled`) |
+| `node_status_summary` | After each DAG level | How many nodes are in each state, plus how many `node_status` left out |
 | `log` | After each DAG level | Tail of the CLI-style run log (last 200 lines) |
 
-Both `node_status` and `log` are truncated to stay within Temporal memo size limits (2000 node entries, 200 log lines). The full run log is written to the artifact store at workflow completion.
+`node_status` and `log` are each capped in **bytes** (16 KB and 12 KB) to stay within Temporal memo size limits, because neither an entry count nor a line count bounds what is written: node ids are unique-id strings, and one adapter error can outweigh a hundred progress lines.
+
+When `node_status` cannot show every node it keeps the running ones first, then pending, then finished — what a run is doing now and what is next. `node_status_summary` always totals the whole run, so a trimmed tree still adds up, and its `omitted` count says how many nodes are not shown. The full run log is written to the artifact store at workflow completion.
 
 ### Live Run Control (query & update handlers)
 

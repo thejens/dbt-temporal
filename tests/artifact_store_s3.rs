@@ -6,6 +6,7 @@
 #![cfg(feature = "aws")]
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::minio::MinIO;
 
@@ -72,8 +73,8 @@ async fn setup() -> Result<(testcontainers::ContainerAsync<MinIO>, ObjectStoreAr
 async fn test_store_and_retrieve() -> Result<()> {
     let (_container, store) = setup().await?;
 
-    let content = b"hello world from dbt-temporal";
-    let path = store.store("inv-001", "test.json", content).await?;
+    let content = Bytes::from_static(b"hello world from dbt-temporal");
+    let path = store.store("inv-001", "test.json", content.clone()).await?;
 
     assert_eq!(path, "dbt-artifacts/inv-001/test.json");
 
@@ -88,8 +89,10 @@ async fn test_store_large_payload() -> Result<()> {
     let (_container, store) = setup().await?;
 
     // 1 MB payload.
-    let content: Vec<u8> = (0u8..=255).cycle().take(1_000_000).collect();
-    let path = store.store("inv-002", "manifest.json", &content).await?;
+    let content = Bytes::from((0u8..=255).cycle().take(1_000_000).collect::<Vec<u8>>());
+    let path = store
+        .store("inv-002", "manifest.json", content.clone())
+        .await?;
 
     let retrieved = store.retrieve(&path).await?;
     assert_eq!(retrieved.len(), content.len());
@@ -102,12 +105,14 @@ async fn test_store_large_payload() -> Result<()> {
 async fn test_store_multiple_files_same_invocation() -> Result<()> {
     let (_container, store) = setup().await?;
 
-    let manifest = br#"{"metadata":{},"nodes":{}}"#;
-    let run_results = br#"{"results":[]}"#;
+    let manifest = Bytes::from_static(br#"{"metadata":{},"nodes":{}}"#);
+    let run_results = Bytes::from_static(br#"{"results":[]}"#);
 
-    let p1 = store.store("inv-003", "manifest.json", manifest).await?;
+    let p1 = store
+        .store("inv-003", "manifest.json", manifest.clone())
+        .await?;
     let p2 = store
-        .store("inv-003", "run_results.json", run_results)
+        .store("inv-003", "run_results.json", run_results.clone())
         .await?;
 
     assert_eq!(p1, "dbt-artifacts/inv-003/manifest.json");
@@ -133,12 +138,16 @@ async fn test_retrieve_nonexistent_returns_error() -> Result<()> {
 async fn test_overwrite_existing_file() -> Result<()> {
     let (_container, store) = setup().await?;
 
-    let path = store.store("inv-004", "data.json", b"v1").await?;
-    assert_eq!(store.retrieve(&path).await?, b"v1");
+    let path = store
+        .store("inv-004", "data.json", Bytes::from_static(b"v1"))
+        .await?;
+    assert_eq!(store.retrieve(&path).await?, Bytes::from_static(b"v1"));
 
-    let path2 = store.store("inv-004", "data.json", b"v2").await?;
+    let path2 = store
+        .store("inv-004", "data.json", Bytes::from_static(b"v2"))
+        .await?;
     assert_eq!(path, path2);
-    assert_eq!(store.retrieve(&path).await?, b"v2");
+    assert_eq!(store.retrieve(&path).await?, Bytes::from_static(b"v2"));
 
     Ok(())
 }

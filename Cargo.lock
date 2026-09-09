@@ -2907,6 +2907,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "bytes",
  "chrono",
  "csv",
  "dbt-adapter",

@@ -1,5 +1,7 @@
 use anyhow::Context;
 use std::collections::BTreeMap;
+
+use bytes::Bytes;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
 
@@ -76,7 +78,7 @@ pub async fn store_artifacts_inner(
         build_run_results_json(&input, &compiled_sql).context("serializing run_results.json")?;
 
     let run_results_path = store
-        .store(&input.invocation_id, "run_results.json", run_results_json.as_bytes())
+        .store(&input.invocation_id, "run_results.json", run_results_json.into_bytes().into())
         .await
         .map_err(|e| store_io_error("storing run_results.json", e))?;
 
@@ -85,7 +87,11 @@ pub async fn store_artifacts_inner(
     // Store manifest (if inline) or note existing ref.
     let manifest_path = if let Some(manifest_json) = &input.manifest_json {
         store
-            .store(&input.invocation_id, "manifest.json", manifest_json.as_bytes())
+            .store(
+                &input.invocation_id,
+                "manifest.json",
+                Bytes::copy_from_slice(manifest_json.as_bytes()),
+            )
             .await
             .map_err(|e| store_io_error("storing manifest.json", e))?
     } else if let Some(manifest_ref) = &input.manifest_ref {
@@ -101,7 +107,7 @@ pub async fn store_artifacts_inner(
     let log_path = if let Some(run_log) = &input.run_log {
         if activities.write_run_log.0 {
             let path = store
-                .store(&input.invocation_id, "log.txt", run_log.as_bytes())
+                .store(&input.invocation_id, "log.txt", Bytes::copy_from_slice(run_log.as_bytes()))
                 .await
                 .map_err(|e| store_io_error("storing log.txt", e))?;
             info!(path = %path, "stored log.txt");
@@ -146,7 +152,7 @@ pub async fn store_artifacts_inner(
             let sources_json =
                 build_freshness_json(&input, true).context("serializing sources.json")?;
             let path = store
-                .store(&input.invocation_id, "sources.json", sources_json.as_bytes())
+                .store(&input.invocation_id, "sources.json", sources_json.into_bytes().into())
                 .await
                 .map_err(|e| store_io_error("storing sources.json", e))?;
             info!(path = %path, "stored sources.json");
@@ -155,7 +161,7 @@ pub async fn store_artifacts_inner(
             let freshness_json =
                 build_freshness_json(&input, false).context("serializing freshness.json")?;
             let path = store
-                .store(&input.invocation_id, "freshness.json", freshness_json.as_bytes())
+                .store(&input.invocation_id, "freshness.json", freshness_json.into_bytes().into())
                 .await
                 .map_err(|e| store_io_error("storing freshness.json", e))?;
             info!(path = %path, "stored freshness.json");
@@ -201,7 +207,7 @@ async fn generate_and_store_catalog(
                 )
             })?;
     store
-        .store(&input.invocation_id, "catalog.json", catalog_json.as_bytes())
+        .store(&input.invocation_id, "catalog.json", catalog_json.into_bytes().into())
         .await
         .context("storing catalog.json")
 }
@@ -223,7 +229,7 @@ async fn load_compiled_sql(
             continue;
         };
         match store.retrieve(reference).await {
-            Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
                 Ok(sql) => {
                     compiled.insert(result.unique_id.clone(), sql);
                 }
@@ -540,7 +546,7 @@ mod tests {
             .store(
                 "inv-9",
                 &crate::activities::execute_node::compiled_sql_artifact_name("model.p.m"),
-                b"select 1 as id",
+                Bytes::from_static(b"select 1 as id"),
             )
             .await?;
 

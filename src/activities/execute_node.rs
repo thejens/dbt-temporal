@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
+use bytes::Bytes;
 use dbt_schemas::schemas::telemetry::NodeType;
 use raw_sql::resolve_raw_sql;
 use schema_patch::{
@@ -644,7 +645,11 @@ async fn spill_compiled_sql(
     };
 
     match store
-        .store(invocation_id, &compiled_sql_artifact_name(&result.unique_id), sql.as_bytes())
+        .store(
+            invocation_id,
+            &compiled_sql_artifact_name(&result.unique_id),
+            Bytes::copy_from_slice(sql.as_bytes()),
+        )
         .await
     {
         Ok(path) => {

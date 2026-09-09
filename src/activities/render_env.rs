@@ -111,9 +111,8 @@ pub fn prepare_render_env(
         // This node's adapter, not the default's: a target declaring several
         // adapters gives each its own schema and database.
         let resolved = result.target_for(adapter_type);
-        let (schema, database) = (resolved.schema, resolved.database);
         rebuild_guard = Some(result);
-        (engine, Some(schema), Some(database))
+        (engine, Some(resolved.schema), resolved.database)
     } else {
         (state.adapter_engines.get(adapter_type, context)?, None, None)
     };
@@ -145,12 +144,13 @@ pub fn prepare_render_env(
     // Must run after `configure_compile_and_run_jinja_environment`: it reads
     // the current `target` back out by rendering a template, which needs the
     // fully configured environment.
-    if let (Some(schema), Some(database)) = (env_schema.as_deref(), env_database.as_deref()) {
-        patch_target_global(&mut jinja_env, schema, database, overrides.target).map_err(|e| {
-            DbtTemporalError::Configuration(format!(
-                "applying the resolved target to the render context for {context}: {e:#}"
-            ))
-        })?;
+    if let Some(schema) = env_schema.as_deref() {
+        patch_target_global(&mut jinja_env, schema, env_database.as_deref(), overrides.target)
+            .map_err(|e| {
+                DbtTemporalError::Configuration(format!(
+                    "applying the resolved target to the render context for {context}: {e:#}"
+                ))
+            })?;
     }
 
     Ok(RenderEnv {

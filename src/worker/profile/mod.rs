@@ -32,10 +32,15 @@ pub struct RebuildResult {
 }
 
 /// The schema and database one adapter's target resolves to.
+///
+/// `database` stays `None` when the target does not declare one — DuckDB and
+/// SQLite name their database by their file. Flattening that to an empty
+/// string reads as "the workflow moved every relation to the database called
+/// ``", which is what then goes into the compiled SQL.
 #[derive(Debug, Clone, Default)]
 pub struct AdapterTarget {
     pub schema: String,
-    pub database: String,
+    pub database: Option<String>,
 }
 
 impl RebuildResult {
@@ -60,6 +65,14 @@ impl std::fmt::Debug for RebuildResult {
             .field("targets", &self.targets)
             .field("default_adapter", &self.default_adapter)
             .finish_non_exhaustive()
+    }
+}
+
+/// Read one rendered target's schema and database.
+fn adapter_target(config: &dbt_schemas::schemas::profiles::DbConfig) -> AdapterTarget {
+    AdapterTarget {
+        schema: config.get_schema().cloned().unwrap_or_default(),
+        database: config.get_database().cloned().filter(|d| !d.is_empty()),
     }
 }
 
@@ -97,15 +110,7 @@ pub fn rebuild_adapter_engines_with_env(
     let targets: Vec<(dbt_adapter::AdapterType, AdapterTarget)> = rendered
         .configs
         .iter()
-        .map(|config| {
-            (
-                config.adapter_type(),
-                AdapterTarget {
-                    schema: config.get_schema().cloned().unwrap_or_default(),
-                    database: config.get_database().cloned().unwrap_or_default(),
-                },
-            )
-        })
+        .map(|config| (config.adapter_type(), adapter_target(config)))
         .collect();
 
     let engines = super::adapter::build_adapter_engines(
@@ -358,7 +363,7 @@ mod tests {
                     dbt_adapter::AdapterType::DuckDB,
                     AdapterTarget {
                         schema: "wf_42".to_string(),
-                        database: "warehouse".to_string(),
+                        database: Some("warehouse".to_string()),
                     },
                 )],
                 default_adapter: dbt_adapter::AdapterType::DuckDB,
@@ -369,6 +374,23 @@ mod tests {
         assert!(rendered.contains("warehouse"), "{rendered}");
         assert!(rendered.contains(".."), "expected finish_non_exhaustive marker: {rendered}");
         Ok(())
+    }
+
+    /// DuckDB names its database by its file, so its profile declares none.
+    /// Reporting that as an empty string made every downstream relation in the
+    /// compiled SQL claim it lived in a database called ``.
+    #[test]
+    fn a_target_without_a_database_resolves_to_none() {
+        let config = dbt_schemas::schemas::profiles::DbConfig::DuckDB(Box::new(
+            dbt_schemas::schemas::profiles::DuckDbConfig {
+                path: Some(":memory:".to_string()),
+                schema: Some("wf_42".to_string()),
+                ..Default::default()
+            },
+        ));
+        let target = adapter_target(&config);
+        assert_eq!(target.schema, "wf_42");
+        assert_eq!(target.database, None);
     }
 
     /// A target declaring several adapters gives each its own schema and
@@ -396,14 +418,14 @@ mod tests {
                     dbt_adapter::AdapterType::DuckDB,
                     AdapterTarget {
                         schema: "duck_schema".to_string(),
-                        database: "duck_db".to_string(),
+                        database: Some("duck_db".to_string()),
                     },
                 ),
                 (
                     dbt_adapter::AdapterType::Postgres,
                     AdapterTarget {
                         schema: "pg_schema".to_string(),
-                        database: "pg_db".to_string(),
+                        database: Some("pg_db".to_string()),
                     },
                 ),
             ],

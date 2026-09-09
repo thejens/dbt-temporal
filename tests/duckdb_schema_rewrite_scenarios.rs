@@ -1,7 +1,8 @@
-//! Custom `generate_schema_name` macro re-execution (`build_schema_rewrite_map` /
-//! `apply_schema_map_to_context` / `patch_sql_with_schema_map` in
-//! `src/activities/execute_node/schema_patch.rs`), exercised end-to-end through
-//! `execute_node_inner` against a real DuckDB project.
+//! Per-workflow schema resolution (`build_schema_rewrite_map` /
+//! `build_default_schema_rewrite_map` / `apply_schema_map_to_context` in
+//! `src/activities/execute_node/schema_patch.rs`, and the relation rewrite in
+//! `sql_rewrite.rs`), exercised end-to-end through `execute_node_inner`
+//! against a real DuckDB project.
 //!
 //! The pure helper functions have direct unit tests in `schema_patch.rs`
 //! itself; these scenarios cover the integration this repo's own workaround

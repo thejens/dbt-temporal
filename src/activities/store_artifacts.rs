@@ -52,6 +52,44 @@ pub async fn store_artifacts_outer(
     }
 }
 
+/// Prepend every earlier segment's results and log to this one's.
+///
+/// A missing or unreadable checkpoint is fatal: writing `run_results.json`
+/// without the nodes an earlier segment ran would describe the run as smaller
+/// than it was, and nothing downstream could tell.
+async fn collect_prior_segments(
+    store: &dyn ArtifactStore,
+    mut input: StoreArtifactsInput,
+) -> Result<StoreArtifactsInput, anyhow::Error> {
+    if input.prior_segments.is_empty() {
+        return Ok(input);
+    }
+
+    let mut results = Vec::with_capacity(input.node_results.len());
+    let mut log = Vec::new();
+    for state_ref in &input.prior_segments {
+        let (segment_results, segment_log) =
+            crate::activities::segment_state::read_segment_payload(store, state_ref)
+                .await
+                .map_err(|e| store_io_error("collecting an earlier segment", e))?;
+        results.extend(segment_results);
+        log.extend(segment_log);
+    }
+    info!(
+        segments = input.prior_segments.len(),
+        results = results.len(),
+        "collected earlier segments for artifact assembly"
+    );
+
+    results.append(&mut input.node_results);
+    input.node_results = results;
+    if let Some(tail) = input.run_log.take() {
+        log.push(tail);
+    }
+    input.run_log = Some(log.join("\n"));
+    Ok(input)
+}
+
 /// Tag an artifact-store I/O failure as retryable, preserving the call context.
 fn store_io_error(context: &'static str, e: anyhow::Error) -> anyhow::Error {
     DbtTemporalError::ArtifactStore(e.context(context)).into()
@@ -69,6 +107,11 @@ pub async fn store_artifacts_inner(
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         anyhow::anyhow!("ArtifactStore not configured but store_artifacts was called")
     })?;
+
+    // A run that continued as new left each earlier segment's results and log
+    // in that segment's own checkpoint rather than dragging them through every
+    // history since. Collect them so the artifacts describe the whole run.
+    let input = collect_prior_segments(store.as_ref(), input).await?;
 
     // The nodes wrote their compiled SQL to the store instead of carrying it
     // through the workflow; read it back for the one artifact that reports it.
@@ -489,6 +532,7 @@ mod tests {
         node_results: Vec<NodeExecutionResult>,
     ) -> StoreArtifactsInput {
         StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-9".into(),
             project: None,
             command: Some(command.into()),
@@ -556,6 +600,7 @@ mod tests {
 
         let compiled = load_compiled_sql(&store, std::slice::from_ref(&spilled)).await;
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             node_results: vec![spilled],
             ..freshness_input("build", vec![])
         };
@@ -583,6 +628,7 @@ mod tests {
         assert!(compiled.is_empty(), "nothing was read");
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             node_results: vec![spilled],
             ..freshness_input("build", vec![])
         };
@@ -636,6 +682,7 @@ mod tests {
     #[test]
     fn build_run_results_json_structure() -> anyhow::Result<()> {
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-123".into(),
             project: None,
             command: None,
@@ -716,6 +763,7 @@ mod tests {
     #[test]
     fn test_nodes_report_dbt_test_statuses() -> anyhow::Result<()> {
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             node_results: vec![
                 sample_result("test.p.not_null_id", NodeStatus::Success, 0.1),
                 sample_result("test.p.unique_id", NodeStatus::Error, 0.1),
@@ -739,6 +787,7 @@ mod tests {
     #[test]
     fn build_run_results_json_empty_results() -> anyhow::Result<()> {
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-empty".into(),
             project: None,
             command: None,
@@ -781,6 +830,24 @@ mod tests {
     };
     use crate::project_registry::ProjectRegistry;
 
+    /// The plan a checkpoint carries; nothing in these tests reads it.
+    fn minimal_plan() -> crate::types::ExecutionPlan {
+        crate::types::ExecutionPlan {
+            project: "p".to_string(),
+            nodes: BTreeMap::new(),
+            levels: Vec::new(),
+            manifest_json: None,
+            manifest_ref: None,
+            invocation_id: "inv-multi".to_string(),
+            search_attributes: BTreeMap::new(),
+            write_artifacts: true,
+            has_on_run_start: false,
+            has_on_run_end: false,
+            priority_scheduling: false,
+            has_project_checks: false,
+        }
+    }
+
     fn activities_with_local_store(
         base_dir: std::path::PathBuf,
         write_run_log: bool,
@@ -797,12 +864,126 @@ mod tests {
         }
     }
 
+    /// A run that continued as new left each segment's results in that
+    /// segment's checkpoint. `run_results.json` has to describe the whole run,
+    /// so the activity walks the chain rather than reporting only the last leg.
+    #[tokio::test]
+    async fn store_artifacts_inner_collects_every_segment() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let activities = activities_with_local_store(dir.path().to_path_buf(), true);
+        let store = Arc::clone(
+            activities
+                .artifact_store
+                .as_ref()
+                .expect("store configured"),
+        );
+
+        // Two earlier segments, each holding its own results and log.
+        let mut refs = Vec::new();
+        for (segment, node) in [(1u32, "model.first"), (2, "model.second")] {
+            let state = crate::types::RunSegmentState {
+                schema_version: 1,
+                invocation_id: "inv-multi".into(),
+                segment,
+                plan: minimal_plan(),
+                prior_segments: refs.clone(),
+                all_results: vec![sample_result(node, NodeStatus::Success, 0.1)],
+                log_lines: vec![format!("segment {segment} line")],
+                node_status: crate::types::NodeStatusTree {
+                    nodes: BTreeMap::new(),
+                },
+                failed_nodes: Vec::new(),
+                had_failure: false,
+                effective_env: BTreeMap::new(),
+                hook_errors: Vec::new(),
+                total_nodes: 3,
+                node_counter: usize::try_from(segment)?,
+                next_level: usize::try_from(segment)?,
+                started_at: None,
+            };
+            let json = serde_json::to_vec(&state)?;
+            refs.push(
+                store
+                    .store("inv-multi", &format!("run_segment_state_{segment}.json"), json.into())
+                    .await?,
+            );
+        }
+
+        let input = StoreArtifactsInput {
+            prior_segments: refs,
+            invocation_id: "inv-multi".into(),
+            project: None,
+            command: None,
+            node_results: vec![sample_result("model.last", NodeStatus::Success, 0.1)],
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: Some("final line".to_string()),
+            env: BTreeMap::new(),
+            target: None,
+            started_at: None,
+            elapsed_time: 0.0,
+        };
+
+        let out = store_artifacts_inner(&activities, input).await?;
+        let run_results = std::fs::read_to_string(&out.run_results_path)?;
+        let parsed: serde_json::Value = serde_json::from_str(&run_results)?;
+        let ids: Vec<&str> = parsed["results"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("results is array"))?
+            .iter()
+            .filter_map(|r| r["unique_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["model.first", "model.second", "model.last"], "in run order");
+
+        let log = std::fs::read_to_string(out.log_path.as_ref().expect("log written"))?;
+        assert_eq!(log, "segment 1 line\nsegment 2 line\nfinal line");
+        Ok(())
+    }
+
+    /// A checkpoint that cannot be read is fatal: `run_results.json` without an
+    /// earlier segment's nodes describes the run as smaller than it was, and
+    /// nothing downstream could tell.
+    #[tokio::test]
+    async fn store_artifacts_inner_refuses_a_missing_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+
+        let input = StoreArtifactsInput {
+            prior_segments: vec![
+                dir.path()
+                    .join("inv-multi/run_segment_state_1.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            invocation_id: "inv-multi".into(),
+            project: None,
+            command: None,
+            node_results: vec![sample_result("model.last", NodeStatus::Success, 0.1)],
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: None,
+            env: BTreeMap::new(),
+            target: None,
+            started_at: None,
+            elapsed_time: 0.0,
+        };
+
+        let err = store_artifacts_inner(&activities, input)
+            .await
+            .expect_err("a missing checkpoint must be reported");
+        assert!(
+            format!("{err:#}").contains("collecting an earlier segment"),
+            "unexpected error: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn store_artifacts_inner_writes_run_results_and_inline_manifest() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let activities = activities_with_local_store(dir.path().to_path_buf(), false);
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-1".into(),
             project: None,
             command: None,
@@ -837,6 +1018,7 @@ mod tests {
         let activities = activities_with_local_store(dir.path().to_path_buf(), false);
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-2".into(),
             project: None,
             command: None,
@@ -861,6 +1043,7 @@ mod tests {
         let activities = activities_with_local_store(dir.path().to_path_buf(), false);
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-3".into(),
             project: None,
             command: None,
@@ -887,6 +1070,7 @@ mod tests {
         let activities = activities_with_local_store(dir.path().to_path_buf(), true);
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-log".into(),
             project: None,
             command: None,
@@ -918,6 +1102,7 @@ mod tests {
         let activities = activities_with_local_store(dir.path().to_path_buf(), false);
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-skiplog".into(),
             project: None,
             command: None,
@@ -952,6 +1137,7 @@ mod tests {
         };
 
         let input = StoreArtifactsInput {
+            prior_segments: Vec::new(),
             invocation_id: "inv-noop".into(),
             project: None,
             command: None,

@@ -33,7 +33,7 @@ use crate::project_registry::ProjectRegistry;
 use crate::types::{
     DbtRunInput, ExecutionPlan, LoadSegmentStateInput, NodeExecutionInput, NodeExecutionResult,
     ProjectChecksInput, ProjectChecksOutput, ProjectHooksInput, ResolveConfigInput,
-    ResolvedProjectConfig, RunSegmentState, SaveSegmentStateInput, StoreArtifactsInput,
+    ResolvedProjectConfig, RunSegmentControl, SaveSegmentStateInput, StoreArtifactsInput,
     StoreArtifactsOutput,
 };
 
@@ -143,7 +143,7 @@ impl DbtActivities {
         self: Arc<Self>,
         _ctx: ActivityContext,
         input: LoadSegmentStateInput,
-    ) -> Result<RunSegmentState, ActivityError> {
+    ) -> Result<RunSegmentControl, ActivityError> {
         segment_state::load_segment_state_inner(&self, input)
             .await
             .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))

@@ -194,7 +194,7 @@ pub async fn save_segment_state(
 pub async fn load_segment_state(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     resume: &crate::types::RunResumeState,
-) -> Result<RunSegmentState, WorkflowTermination> {
+) -> Result<crate::types::RunSegmentControl, WorkflowTermination> {
     ctx.execute_activity(
         DbtActivities::load_segment_state,
         LoadSegmentStateInput {
@@ -215,6 +215,17 @@ pub async fn load_segment_state(
     })
 }
 
+/// What the run produced, as the artifact activity needs it.
+///
+/// A continued run's earlier segments are named, not carried: their results and
+/// log stay in their own checkpoints until the activity collects them.
+#[derive(Clone, Copy)]
+pub struct RunRecord<'a> {
+    pub results: &'a [NodeExecutionResult],
+    pub log_lines: &'a [String],
+    pub prior_segments: &'a [String],
+}
+
 /// Build the input for `store_artifacts` from the plan + run accumulators.
 ///
 /// `command` travels with the results because the artifact set is
@@ -223,18 +234,18 @@ pub async fn load_segment_state(
 pub fn build_store_artifacts_input(
     plan: &ExecutionPlan,
     command: &str,
-    all_results: &[NodeExecutionResult],
-    log_lines: &[String],
+    record: RunRecord<'_>,
     facts: crate::workflow::helpers::RunFacts<'_>,
 ) -> StoreArtifactsInput {
     StoreArtifactsInput {
         invocation_id: plan.invocation_id.clone(),
         project: Some(plan.project.clone()),
         command: Some(command.to_string()),
-        node_results: all_results.to_vec(),
+        node_results: record.results.to_vec(),
+        prior_segments: record.prior_segments.to_vec(),
         manifest_json: plan.manifest_json.clone(),
         manifest_ref: plan.manifest_ref.clone(),
-        run_log: Some(log_lines.join("\n")),
+        run_log: Some(record.log_lines.join("\n")),
         env: facts.env.clone(),
         target: facts.target.map(ToString::to_string),
         started_at: facts
@@ -535,8 +546,7 @@ pub async fn store_run_artifacts(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
     command: &str,
-    all_results: &[NodeExecutionResult],
-    log_lines: &[String],
+    record: RunRecord<'_>,
     timeouts: &TimeoutConfig,
     facts: crate::workflow::helpers::RunFacts<'_>,
 ) -> Result<(Option<StoreArtifactsOutput>, Option<String>), WorkflowTermination> {
@@ -546,7 +556,7 @@ pub async fn store_run_artifacts(
     let artifacts: StoreArtifactsOutput = ctx
         .execute_activity(
             DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, command, all_results, log_lines, facts),
+            build_store_artifacts_input(plan, command, record, facts),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(
                 timeouts.store_artifacts_secs,
             )),
@@ -1007,8 +1017,16 @@ mod tests {
             ..empty_plan()
         };
         let log_lines = vec!["line one".to_string(), "line two".to_string()];
-        let store_input =
-            build_store_artifacts_input(&plan, "build", &[], &log_lines, test_facts());
+        let store_input = build_store_artifacts_input(
+            &plan,
+            "build",
+            RunRecord {
+                results: &[],
+                log_lines: &log_lines,
+                prior_segments: &[],
+            },
+            test_facts(),
+        );
         assert_eq!(store_input.invocation_id, "inv-store");
         assert_eq!(store_input.manifest_json.as_deref(), Some("{\"k\":1}"));
         assert!(store_input.manifest_ref.is_none());
@@ -1023,7 +1041,16 @@ mod tests {
             manifest_ref: Some("/path/to/manifest.json".to_string()),
             ..empty_plan()
         };
-        let store_input = build_store_artifacts_input(&plan, "build", &[], &[], test_facts());
+        let store_input = build_store_artifacts_input(
+            &plan,
+            "build",
+            RunRecord {
+                results: &[],
+                log_lines: &[],
+                prior_segments: &[],
+            },
+            test_facts(),
+        );
         assert!(store_input.manifest_json.is_none());
         assert_eq!(store_input.manifest_ref.as_deref(), Some("/path/to/manifest.json"));
         // Empty log_lines join to empty string — still wrapped in Some.

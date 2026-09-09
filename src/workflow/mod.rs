@@ -26,8 +26,8 @@ use temporalio_sdk::{
 };
 
 use crate::types::{
-    DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState, RunSegmentState,
-    RunStatusSnapshot, TimeoutConfig, is_freshness_command,
+    DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState, RunSegmentControl,
+    RunSegmentState, RunStatusSnapshot, TimeoutConfig, is_freshness_command,
 };
 
 use self::helpers::{
@@ -36,9 +36,10 @@ use self::helpers::{
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
-    HookPolicy, build_list_output, load_segment_state, plan_and_announce, resolve_project_config,
-    run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks, run_project_checks,
-    save_segment_state, store_run_artifacts, upsert_terminal_status, write_command_memo,
+    HookPolicy, RunRecord, build_list_output, load_segment_state, plan_and_announce,
+    resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks,
+    run_project_checks, save_segment_state, store_run_artifacts, upsert_terminal_status,
+    write_command_memo,
 };
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
@@ -237,8 +238,11 @@ impl DbtRunWorkflow {
             ctx,
             &plan,
             &input.command,
-            &levels.all_results,
-            &levels.log_lines,
+            RunRecord {
+                results: &levels.all_results,
+                log_lines: &levels.log_lines,
+                prior_segments: &levels.prior_segments,
+            },
             &timeouts,
             RunFacts {
                 clock: RunClock {
@@ -324,7 +328,7 @@ impl DbtRunWorkflow {
 async fn load_resume_state(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
-) -> Result<Option<RunSegmentState>, WorkflowTermination> {
+) -> Result<Option<RunSegmentControl>, WorkflowTermination> {
     let Some(resume) = input.resume_from.as_ref() else {
         return Ok(None);
     };
@@ -344,7 +348,7 @@ async fn load_resume_state(
 /// rather than failing outright.
 fn build_resume_point(
     plan: &ExecutionPlan,
-    resumed: Option<RunSegmentState>,
+    resumed: Option<RunSegmentControl>,
     can_continue: bool,
 ) -> ResumePoint {
     let Some(state) = resumed else {
@@ -352,8 +356,12 @@ fn build_resume_point(
     };
     ResumePoint {
         start_level: state.next_level,
-        log_lines: state.log_lines,
-        all_results: state.all_results,
+        // The predecessor's log and results stay in its checkpoint; this
+        // segment accumulates only its own, and the artifact activity puts the
+        // run back together from `prior_segments`.
+        log_lines: Vec::new(),
+        all_results: Vec::new(),
+        prior_segments: state.prior_segments,
         node_status: state.node_status,
         failed_nodes: state.failed_nodes.into_iter().collect(),
         had_failure: state.had_failure,
@@ -451,6 +459,7 @@ fn build_segment_state(
         invocation_id: plan.invocation_id.clone(),
         segment,
         plan: plan.clone(),
+        prior_segments: levels.prior_segments.clone(),
         all_results: levels.all_results.clone(),
         log_lines: levels.log_lines.clone(),
         node_status: levels.node_status.clone(),
@@ -515,6 +524,7 @@ mod continuation_tests {
 
     fn outcome() -> levels::LevelExecutionOutcome {
         levels::LevelExecutionOutcome {
+            prior_segments: Vec::new(),
             log_lines: vec!["1 of 2 START model.p.a".to_string()],
             all_results: vec![],
             node_status: NodeStatusTree {
@@ -622,12 +632,32 @@ mod continuation_tests {
         assert!(point.can_continue);
     }
 
+    /// The control view a successor is handed, as `load_segment_state` builds
+    /// it: the checkpoint just read joins the chain of segments to collect.
+    fn control_from(state: RunSegmentState, state_ref: &str) -> RunSegmentControl {
+        let mut prior_segments = state.prior_segments;
+        prior_segments.push(state_ref.to_string());
+        RunSegmentControl {
+            plan: state.plan,
+            prior_segments,
+            node_status: state.node_status,
+            failed_nodes: state.failed_nodes,
+            had_failure: state.had_failure,
+            effective_env: state.effective_env,
+            hook_errors: state.hook_errors,
+            total_nodes: state.total_nodes,
+            node_counter: state.node_counter,
+            next_level: state.next_level,
+            started_at: state.started_at,
+        }
+    }
+
     #[test]
     fn a_resumed_run_picks_up_where_its_predecessor_stopped() {
         let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
         let state = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1, None);
 
-        let point = build_resume_point(&plan(), Some(state), true);
+        let point = build_resume_point(&plan(), Some(control_from(state, "seg-0.json")), true);
 
         assert_eq!(point.start_level, 1, "skips the levels already executed");
         assert_eq!(point.node_counter, 1);
@@ -636,7 +666,40 @@ mod continuation_tests {
             point.failed_nodes.contains("model.p.bad"),
             "downstream skipping depends on this"
         );
-        assert_eq!(point.log_lines.len(), 1);
+    }
+
+    /// The predecessor's log and results stay in its checkpoint. Carrying them
+    /// into the successor is what made every continuation cost the whole run
+    /// so far, twice — once as the activity argument that wrote it and once as
+    /// the activity result that read it back.
+    #[test]
+    fn a_resumed_run_starts_with_empty_accumulators_and_names_its_predecessor() {
+        let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
+        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1, None);
+        assert_eq!(state.log_lines.len(), 1, "the predecessor wrote its log into the checkpoint");
+
+        let point = build_resume_point(&plan(), Some(control_from(state, "seg-0.json")), true);
+
+        assert!(point.log_lines.is_empty());
+        assert!(point.all_results.is_empty());
+        assert_eq!(point.prior_segments, vec!["seg-0.json".to_string()]);
+    }
+
+    /// Each segment adds itself, so the chain the artifact activity walks is
+    /// every segment of the run in order.
+    #[test]
+    fn segments_accumulate_across_continuations() {
+        let env = BTreeMap::new();
+        let first = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1, None);
+        let point = build_resume_point(&plan(), Some(control_from(first, "seg-0.json")), true);
+
+        let mut second_outcome = outcome();
+        second_outcome.prior_segments = point.prior_segments;
+        let second = build_segment_state(&plan(), &second_outcome, &env, &[], 2, 2, None);
+
+        assert_eq!(second.prior_segments, vec!["seg-0.json".to_string()]);
+        let point = build_resume_point(&plan(), Some(control_from(second, "seg-1.json")), true);
+        assert_eq!(point.prior_segments, vec!["seg-0.json".to_string(), "seg-1.json".to_string()]);
     }
 
     /// Without an artifact store there is nowhere to spill, so a resumed point

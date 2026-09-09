@@ -15,7 +15,10 @@ use anyhow::Context;
 use tracing::info;
 
 use crate::error::DbtTemporalError;
-use crate::types::{LoadSegmentStateInput, RunSegmentState, SaveSegmentStateInput};
+use crate::types::{
+    LoadSegmentStateInput, NodeExecutionResult, RunSegmentControl, RunSegmentState,
+    SaveSegmentStateInput,
+};
 
 use super::DbtActivities;
 
@@ -66,11 +69,16 @@ pub async fn save_segment_state_inner(
     Ok(path)
 }
 
-/// Read back the state written by the previous segment.
+/// Read back what the previous segment left for its successor.
+///
+/// Returns the control state only. The segment's own results and log stay in
+/// the checkpoint until the artifact activity collects them: returning them
+/// here would put every segment's payload into the successor's history as an
+/// activity result, which is the cost the continuation exists to avoid.
 pub async fn load_segment_state_inner(
     activities: &DbtActivities,
     input: LoadSegmentStateInput,
-) -> Result<RunSegmentState, anyhow::Error> {
+) -> Result<RunSegmentControl, anyhow::Error> {
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         DbtTemporalError::Configuration(
             "resuming a continued run requires artifact storage".to_string(),
@@ -94,9 +102,45 @@ pub async fn load_segment_state_inner(
         state_ref = %input.state_ref,
         segment = state.segment,
         results = state.all_results.len(),
+        prior_segments = state.prior_segments.len(),
         "restored run state after continue-as-new"
     );
-    Ok(state)
+
+    // The checkpoint just read joins the chain: its own payload has to be
+    // collected at the end too.
+    let mut prior_segments = state.prior_segments;
+    prior_segments.push(input.state_ref);
+
+    Ok(RunSegmentControl {
+        plan: state.plan,
+        prior_segments,
+        node_status: state.node_status,
+        failed_nodes: state.failed_nodes,
+        had_failure: state.had_failure,
+        effective_env: state.effective_env,
+        hook_errors: state.hook_errors,
+        total_nodes: state.total_nodes,
+        node_counter: state.node_counter,
+        next_level: state.next_level,
+        started_at: state.started_at,
+    })
+}
+
+/// Read one segment's results and log back out of its checkpoint.
+///
+/// Used when the run finishes, to assemble artifacts that describe the whole
+/// run rather than only its last segment.
+pub async fn read_segment_payload(
+    store: &dyn crate::artifact_store::ArtifactStore,
+    state_ref: &str,
+) -> Result<(Vec<NodeExecutionResult>, Vec<String>), anyhow::Error> {
+    let bytes = store
+        .retrieve(state_ref)
+        .await
+        .with_context(|| format!("loading run segment state from {state_ref}"))?;
+    let state: RunSegmentState = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing run segment state from {state_ref}"))?;
+    Ok((state.all_results, state.log_lines))
 }
 
 /// Refuse a checkpoint that is not the one this successor was continued from.

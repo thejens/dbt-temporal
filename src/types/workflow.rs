@@ -133,6 +133,29 @@ pub struct RunResumeState {
     pub fail_fast_override: Option<bool>,
 }
 
+/// What a successor needs in order to carry on, without the segment payloads.
+///
+/// `load_segment_state` returns this rather than the whole checkpoint: the
+/// results and log of every segment so far would otherwise come back as an
+/// activity result and land in the successor's history — the same payload the
+/// continuation exists to avoid, paid on the way in instead of the way out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSegmentControl {
+    pub plan: ExecutionPlan,
+    /// Every checkpoint of this run so far, oldest first, including the one
+    /// just read.
+    pub prior_segments: Vec<String>,
+    pub node_status: NodeStatusTree,
+    pub failed_nodes: Vec<String>,
+    pub had_failure: bool,
+    pub effective_env: BTreeMap<String, String>,
+    pub hook_errors: Vec<HookError>,
+    pub total_nodes: usize,
+    pub node_counter: usize,
+    pub next_level: usize,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Input to `save_segment_state`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveSegmentStateInput {
@@ -183,7 +206,18 @@ pub struct RunSegmentState {
     /// The plan, carried forward so a continuation never re-plans. Re-planning
     /// could otherwise pick up a different node set mid-run.
     pub plan: ExecutionPlan,
+    /// Checkpoints written by every earlier segment of this run, oldest first.
+    ///
+    /// Each segment's results and log stay in its own checkpoint; this is how
+    /// the artifact activity finds them again at the end. Bounded by the number
+    /// of continuations, which is a handful even for a very long run.
+    #[serde(default)]
+    pub prior_segments: Vec<String>,
+    /// This segment's node results — not the run's. Carrying every segment's
+    /// forward is what made the checkpoint grow with the run rather than with
+    /// the work in front of it.
     pub all_results: Vec<NodeExecutionResult>,
+    /// This segment's log lines, on the same terms.
     pub log_lines: Vec<String>,
     pub node_status: NodeStatusTree,
     pub failed_nodes: Vec<String>,
@@ -440,7 +474,14 @@ pub struct StoreArtifactsInput {
     /// Project the run executed against — needed for catalog generation.
     #[serde(default)]
     pub project: Option<String>,
+    /// This execution's node results. A run that continued as new left the
+    /// earlier segments' results in their own checkpoints; `prior_segments`
+    /// names them.
     pub node_results: Vec<NodeExecutionResult>,
+    /// Checkpoints of every earlier segment, oldest first. Read back here so
+    /// `run_results.json` describes the whole run and not just its last leg.
+    #[serde(default)]
+    pub prior_segments: Vec<String>,
     /// The command the run executed, so freshness runs can write the artifacts
     /// dbt writes for them. `source-freshness` writes `sources.json` alone;
     /// `freshness` writes `freshness.json` too.
@@ -499,6 +540,13 @@ pub struct DbtRunOutput {
     pub skipped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    /// Results from this execution.
+    ///
+    /// A run long enough to have continued as new reports the final segment's
+    /// nodes here, not the whole run's: carrying every segment's results
+    /// forward is what put the run's entire output into each successor's
+    /// history. `run_results.json` still describes the complete run — the
+    /// artifact activity collects each segment from its own checkpoint.
     pub node_results: Vec<NodeExecutionResult>,
     pub elapsed_time: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

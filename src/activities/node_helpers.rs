@@ -248,7 +248,13 @@ fn persist_ephemeral_chain(
             &raw_path,
         )
         .map_err(|e| {
-            DbtTemporalError::Compilation(format!("compiling ephemeral model '{name}': {e:#}"))
+            // Same reasoning as the model render path: an ephemeral's body can
+            // reach the warehouse through `run_query` or introspection, so a
+            // transient failure here has to stay retryable.
+            crate::error::classify_adapter_execution_error(
+                &*e,
+                &format!("compiling ephemeral model '{name}'"),
+            )
         })?;
 
         // Recurse first so this ephemeral's deps land on disk before we persist

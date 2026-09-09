@@ -20,6 +20,12 @@ same way it does for a node that failed to execute. They stay listed in the
 retry policy's non-retryable types so that an older in-flight run, or any path
 that still raises one, is never retried.
 
+Rendering a model is classified the same way executing one is. A model body
+reaches the warehouse while it renders — `run_query`, `adapter.get_relation`,
+any introspection macro — so a briefly unreachable warehouse fails during
+compilation, and only a render failure with no adapter error in its chain (a
+Jinja syntax or configuration error) stays permanent.
+
 `plan_project` and `store_artifacts` classify the same way `execute_node` does,
 but their default for an *untyped* error is permanent — their own failures mean
 a bad selector or a bug, not a blip. Only their object-store round-trips (the

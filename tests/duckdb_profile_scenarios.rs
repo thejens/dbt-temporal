@@ -38,7 +38,7 @@ async fn rebuild_adapter_engines_with_env_override_picks_up_the_new_schema() {
 
     let rebuild = rebuild_adapter_engines_with_env(harness.state(), None, &env)
         .expect("rebuild should succeed with a valid env override");
-    assert_eq!(rebuild.schema, "custom_schema");
+    assert_eq!(rebuild.target_for(dbt_adapter::AdapterType::DuckDB).schema, "custom_schema");
 
     // Exercise the real `RebuildResult` Debug impl (not a stand-in mock) —
     // schema/database are projected, the engine itself is not leaked.

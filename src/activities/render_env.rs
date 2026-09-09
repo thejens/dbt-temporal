@@ -100,7 +100,10 @@ pub fn prepare_render_env(
                     ))
                 })?;
         let engine = result.engines.get(adapter_type, context)?;
-        let (schema, database) = (result.schema.clone(), result.database.clone());
+        // This node's adapter, not the default's: a target declaring several
+        // adapters gives each its own schema and database.
+        let resolved = result.target_for(adapter_type);
+        let (schema, database) = (resolved.schema, resolved.database);
         rebuild_guard = Some(result);
         (engine, Some(schema), Some(database))
     } else {

@@ -196,21 +196,27 @@ fn render_schema_name_macro(
 /// Also patches `database` when the workflow supplies a new one.
 ///
 /// Used in the custom-macro path after `build_schema_rewrite_map`.
+///
+/// A relation that cannot be built is an error rather than a skipped step. The
+/// bare `schema` and `database` globals are patched either way, so swallowing
+/// it left `this` still pointing at the startup relation while everything
+/// around it named the new one — the materialization would write to the old
+/// schema and the run would report the new.
 pub fn apply_schema_map_to_context(
     state: &WorkerState,
     base: &NodeBaseAttributes,
     schema_map: &BTreeMap<String, String>,
     env_database: Option<&str>,
     node_context: &mut BTreeMap<String, minijinja::Value>,
-) {
+) -> Result<(), anyhow::Error> {
     let new_schema = schema_map.get(&base.schema).map(String::as_str);
     let new_database = env_database.filter(|_| base.database == state.default_database);
 
     let effective_schema = new_schema.unwrap_or(&base.schema);
     let effective_database = new_database.unwrap_or(&base.database);
 
-    if (new_schema.is_some() || new_database.is_some())
-        && let Ok(relation) = dbt_adapter::relation::do_create_relation(
+    if new_schema.is_some() || new_database.is_some() {
+        let relation = dbt_adapter::relation::do_create_relation(
             base.adapter,
             effective_database.to_string(),
             effective_schema.to_string(),
@@ -218,7 +224,13 @@ pub fn apply_schema_map_to_context(
             None,
             base.quoting,
         )
-    {
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "building the patched relation \
+                 {effective_database}.{effective_schema}.{}: {e}",
+                base.alias
+            )
+        })?;
         let relation_value =
             dbt_adapter::relation::RelationObject::new(Arc::from(relation)).into_value();
         node_context.insert("this".to_owned(), relation_value);
@@ -229,6 +241,7 @@ pub fn apply_schema_map_to_context(
     if new_database.is_some() {
         node_context.insert("database".to_owned(), minijinja::Value::from(effective_database));
     }
+    Ok(())
 }
 
 /// Apply a patched relation to the node Jinja context: rebuilds `this`

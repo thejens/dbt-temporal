@@ -135,7 +135,11 @@ pub fn prepare_render_env(
     // the current `target` back out by rendering a template, which needs the
     // fully configured environment.
     if let (Some(schema), Some(database)) = (env_schema.as_deref(), env_database.as_deref()) {
-        patch_target_global(&mut jinja_env, schema, database, overrides.target);
+        patch_target_global(&mut jinja_env, schema, database, overrides.target).map_err(|e| {
+            DbtTemporalError::Configuration(format!(
+                "applying the resolved target to the render context for {context}: {e:#}"
+            ))
+        })?;
     }
 
     Ok(RenderEnv {

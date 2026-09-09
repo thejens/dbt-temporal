@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         &state.resolver_state.nodes,
         unique_id,
         rt,
-    );
+    )?;
     let agate_table = dbt_temporal::activities::node_serialization::build_agate_table(
         &state.resolver_state.nodes,
         unique_id,

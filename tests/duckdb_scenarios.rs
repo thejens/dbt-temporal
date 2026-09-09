@@ -144,6 +144,26 @@ async fn failing_data_test_reports_a_test_failure() {
     assert!(!result.timing.is_empty(), "timings survive the failure: {result:?}");
 }
 
+/// The catalog and `run_results.json` both need to know where a node actually
+/// wrote. Startup metadata cannot say: a run that overrides the target or the
+/// profile's env writes somewhere else entirely.
+#[tokio::test]
+async fn a_materialized_node_records_the_relation_it_wrote() {
+    let harness = Harness::build(&[("m", "select 1 as id")]).await;
+    let result = harness.run_ok("m").await;
+
+    let relation = result
+        .relation_name
+        .as_deref()
+        .expect("a materialized node records its relation");
+    assert_eq!(relation.split('.').count(), 3, "database.schema.identifier: {relation}");
+    assert_eq!(
+        relation.rsplit('.').next(),
+        Some("m"),
+        "identifier is the node's alias: {relation}"
+    );
+}
+
 #[tokio::test]
 async fn passing_data_test_succeeds() {
     let harness = Harness::build_files(&[

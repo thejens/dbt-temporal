@@ -40,13 +40,32 @@ pub fn build_catalog_json(
     state: &WorkerState,
     node_results: &[NodeExecutionResult],
     invocation_id: &str,
+    overrides: &crate::activities::render_env::RenderOverrides<'_>,
 ) -> Result<String, anyhow::Error> {
     let targets = collect_targets(state, node_results);
     anyhow::ensure!(!targets.is_empty(), "no relations to catalog");
 
-    let entries = fetch_columns(state, &targets)?;
+    let entries = fetch_columns(state, &targets, overrides)?;
     let artifact = assemble_catalog(&entries, invocation_id);
     serde_json::to_string_pretty(&artifact).map_err(Into::into)
+}
+
+/// Split a result's recorded relation into its three parts.
+///
+/// `None` when the node recorded none — nothing ran, or the result came from a
+/// worker that predates the field.
+fn executed_relation(result: &NodeExecutionResult) -> Option<(String, String, String)> {
+    let name = result.relation_name.as_deref()?;
+    let mut parts = name.split('.');
+    let database = parts.next()?.to_string();
+    let schema = parts.next()?.to_string();
+    let identifier = parts.next()?.to_string();
+    // A fourth segment means the name is not the three-part relation this
+    // expects; startup metadata is a better guess than a mangled one.
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((database, schema, identifier))
 }
 
 /// Map a node materialization to the dbt catalog's table type label.
@@ -80,11 +99,18 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
         if materialized.eq_ignore_ascii_case("ephemeral") {
             continue;
         }
+        // The relation the node actually wrote, when it recorded one. Startup
+        // metadata describes the warehouse the *worker* started against, so a
+        // run that overrode the target or the profile's env would otherwise be
+        // catalogued against relations it never touched. A result from a worker
+        // that predates the field falls back to that metadata.
+        let (database, schema, identifier) = executed_relation(result)
+            .unwrap_or_else(|| (base.database.clone(), base.schema.clone(), base.alias.clone()));
         targets.push(Target {
             unique_id: uid.clone(),
-            database: base.database.clone(),
-            schema: base.schema.clone(),
-            identifier: base.alias.clone(),
+            database,
+            schema,
+            identifier,
             quoting: base.quoting,
             table_type: table_type_label(&materialized),
             is_source: false,
@@ -123,6 +149,7 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
 fn fetch_columns<'a>(
     state: &WorkerState,
     targets: &'a [Target],
+    overrides: &crate::activities::render_env::RenderOverrides<'_>,
 ) -> Result<Vec<CatalogEntry<'a>>, anyhow::Error> {
     let mut entries = Vec::new();
     for adapter_type in adapters_in_use(targets) {
@@ -130,7 +157,7 @@ fn fetch_columns<'a>(
             .iter()
             .filter(|target| target.adapter == adapter_type)
             .collect();
-        entries.extend(fetch_columns_on(state, adapter_type, &group)?);
+        entries.extend(fetch_columns_on(state, adapter_type, &group, overrides)?);
     }
     Ok(entries)
 }
@@ -151,18 +178,18 @@ fn fetch_columns_on<'a>(
     state: &WorkerState,
     adapter_type: dbt_adapter::AdapterType,
     targets: &[&'a Target],
+    overrides: &crate::activities::render_env::RenderOverrides<'_>,
 ) -> Result<Vec<CatalogEntry<'a>>, anyhow::Error> {
-    let mut jinja_env = (*state.jinja_env).clone();
-    let engine = state
-        .adapter_engines
-        .get(adapter_type, "catalog generation")?;
-    let adapter_impl = dbt_adapter::AdapterImpl::new(engine, None);
-    let adapter = Arc::new(dbt_adapter::Adapter::new(
-        Arc::new(adapter_impl),
-        None,
-        state.cancellation_source.token(),
-    ));
-    dbt_jinja_utils::phases::configure_compile_and_run_jinja_environment(&mut jinja_env, adapter);
+    // The same resolved configuration the nodes executed against, not the
+    // worker's startup engines: a run that overrode the target or the profile's
+    // env queried the wrong warehouse for its own relations' columns.
+    let render_env = crate::activities::render_env::prepare_render_env(
+        state,
+        overrides,
+        adapter_type,
+        "catalog generation",
+    )?;
+    let jinja_env = render_env.jinja_env;
 
     let namespace_keys: Vec<String> = jinja_env
         .env

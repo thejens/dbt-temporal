@@ -382,6 +382,14 @@ pub struct NodeExecutionResult {
     /// check detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freshness: Option<FreshnessOutcome>,
+    /// The relation the node actually wrote, fully qualified.
+    ///
+    /// Recorded because startup metadata does not describe it: a workflow that
+    /// overrides the target or the profile's env writes somewhere else
+    /// entirely, and everything downstream — the catalog, `run_results.json` —
+    /// was describing the warehouse the *worker* started against instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_name: Option<String>,
 }
 
 /// Detail of a completed freshness check, carried on the node result so
@@ -435,6 +443,13 @@ pub struct StoreArtifactsInput {
     /// CLI-style run log to store as `log.txt` (if run-log writing is enabled).
     #[serde(default)]
     pub run_log: Option<String>,
+    /// The run's `env` overrides and `target`, so catalog generation queries
+    /// the warehouse the run executed against rather than the one the worker
+    /// started against.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub target: Option<String>,
     /// When the logical run began — the *first* segment's start, not this
     /// execution's, so a run that continued as new still reports one span.
     #[serde(default)]
@@ -708,6 +723,7 @@ mod tests {
             }],
             failures: None,
             freshness: None,
+            relation_name: None,
         };
         let json = serde_json::to_string(&result)?;
         let back: NodeExecutionResult = serde_json::from_str(&json)?;

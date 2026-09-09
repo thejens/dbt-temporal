@@ -225,7 +225,7 @@ pub fn build_store_artifacts_input(
     command: &str,
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
-    clock: crate::workflow::helpers::RunClock,
+    facts: crate::workflow::helpers::RunFacts<'_>,
 ) -> StoreArtifactsInput {
     StoreArtifactsInput {
         invocation_id: plan.invocation_id.clone(),
@@ -235,8 +235,13 @@ pub fn build_store_artifacts_input(
         manifest_json: plan.manifest_json.clone(),
         manifest_ref: plan.manifest_ref.clone(),
         run_log: Some(log_lines.join("\n")),
-        started_at: clock.started_at.map(chrono::DateTime::<chrono::Utc>::from),
-        elapsed_time: clock.elapsed_secs,
+        env: facts.env.clone(),
+        target: facts.target.map(ToString::to_string),
+        started_at: facts
+            .clock
+            .started_at
+            .map(chrono::DateTime::<chrono::Utc>::from),
+        elapsed_time: facts.clock.elapsed_secs,
     }
 }
 
@@ -533,7 +538,7 @@ pub async fn store_run_artifacts(
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
     timeouts: &TimeoutConfig,
-    clock: crate::workflow::helpers::RunClock,
+    facts: crate::workflow::helpers::RunFacts<'_>,
 ) -> Result<(Option<StoreArtifactsOutput>, Option<String>), WorkflowTermination> {
     if !plan.write_artifacts {
         return Ok((None, None));
@@ -541,7 +546,7 @@ pub async fn store_run_artifacts(
     let artifacts: StoreArtifactsOutput = ctx
         .execute_activity(
             DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, command, all_results, log_lines, clock),
+            build_store_artifacts_input(plan, command, all_results, log_lines, facts),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(
                 timeouts.store_artifacts_secs,
             )),
@@ -638,6 +643,8 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
             timing: vec![],
             failures: None,
             freshness: None,
+            // `list` executes nothing.
+            relation_name: None,
         })
         .collect();
     DbtRunOutput {
@@ -657,6 +664,18 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Artifact inputs in these tests are about the manifest and the log, not
+    /// the run's clock or connection.
+    fn test_facts() -> crate::workflow::helpers::RunFacts<'static> {
+        static NO_ENV: std::sync::LazyLock<BTreeMap<String, String>> =
+            std::sync::LazyLock::new(BTreeMap::new);
+        crate::workflow::helpers::RunFacts {
+            clock: crate::workflow::helpers::RunClock::default(),
+            env: &NO_ENV,
+            target: None,
+        }
+    }
 
     use crate::types::HookConfig;
 
@@ -961,6 +980,7 @@ mod tests {
             timing: vec![],
             failures: None,
             freshness: None,
+            relation_name: None,
         }];
         let phs = build_project_hooks_input(
             ProjectHookPhase::OnRunEnd,
@@ -985,13 +1005,8 @@ mod tests {
             ..empty_plan()
         };
         let log_lines = vec!["line one".to_string(), "line two".to_string()];
-        let store_input = build_store_artifacts_input(
-            &plan,
-            "build",
-            &[],
-            &log_lines,
-            crate::workflow::helpers::RunClock::default(),
-        );
+        let store_input =
+            build_store_artifacts_input(&plan, "build", &[], &log_lines, test_facts());
         assert_eq!(store_input.invocation_id, "inv-store");
         assert_eq!(store_input.manifest_json.as_deref(), Some("{\"k\":1}"));
         assert!(store_input.manifest_ref.is_none());
@@ -1006,13 +1021,7 @@ mod tests {
             manifest_ref: Some("/path/to/manifest.json".to_string()),
             ..empty_plan()
         };
-        let store_input = build_store_artifacts_input(
-            &plan,
-            "build",
-            &[],
-            &[],
-            crate::workflow::helpers::RunClock::default(),
-        );
+        let store_input = build_store_artifacts_input(&plan, "build", &[], &[], test_facts());
         assert!(store_input.manifest_json.is_none());
         assert_eq!(store_input.manifest_ref.as_deref(), Some("/path/to/manifest.json"));
         // Empty log_lines join to empty string — still wrapped in Some.

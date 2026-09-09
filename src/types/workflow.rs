@@ -199,6 +199,10 @@ pub struct RunSegmentState {
     pub node_counter: usize,
     /// First level the successor should execute.
     pub next_level: usize,
+    /// When the logical run began, carried so the artifacts describe one run
+    /// rather than restarting the clock at each continuation.
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Output of the plan_project activity.
@@ -431,6 +435,16 @@ pub struct StoreArtifactsInput {
     /// CLI-style run log to store as `log.txt` (if run-log writing is enabled).
     #[serde(default)]
     pub run_log: Option<String>,
+    /// When the logical run began — the *first* segment's start, not this
+    /// execution's, so a run that continued as new still reports one span.
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Wall time of the logical run, measured by the workflow's deterministic
+    /// clock. Not a sum of node durations: nodes run in parallel, so summing
+    /// counts the same seconds many times and still misses the gaps between
+    /// levels, hooks and checkpoints.
+    #[serde(default)]
+    pub elapsed_time: f64,
 }
 
 /// Output of the store_artifacts activity.

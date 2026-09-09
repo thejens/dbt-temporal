@@ -98,6 +98,7 @@ fn sample_state() -> RunSegmentState {
             timing: vec![],
             failures: None,
             freshness: None,
+            compiled_code_ref: None,
             relation_name: None,
         }],
         log_lines: vec!["1 of 3 START model.p.done".to_string()],

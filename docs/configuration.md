@@ -304,9 +304,11 @@ The workflow stores live metadata in [Temporal memos](https://docs.temporal.io/w
 | Memo key | Updated | Contents |
 |----------|---------|----------|
 | `command` | Once (at start) | Workflow input metadata: command, project, select, exclude, target, full_refresh, fail_fast, vars |
-| `node_status` | After each DAG level | Map of `unique_id` → status (`pending`, `running`, `success`, `warn`, `error`, `skipped`, `cancelled`) |
-| `node_status_summary` | After each DAG level | How many nodes are in each state, plus how many `node_status` left out |
-| `log` | After each DAG level | Tail of the CLI-style run log (last 200 lines) |
+| `node_status` | On a level cadence | Map of `unique_id` → status (`pending`, `running`, `success`, `warn`, `error`, `skipped`, `cancelled`) |
+| `node_status_summary` | On a level cadence | How many nodes are in each state, plus how many `node_status` left out |
+| `log` | On a level cadence | Tail of the CLI-style run log (last 200 lines) |
+
+The memo is written on the first level, then periodically, and whenever a level had a failure — one policy, rather than a write per level. A memo upsert is a workflow history event, so a deep DAG that wrote one per level paid for a full snapshot each time to show that the next level had started. The terminal flush publishes every node's final state, and the `run_status` query is free and refreshes at every level boundary.
 
 `node_status` and `log` are each capped in **bytes** (16 KB and 12 KB) to stay within Temporal memo size limits, because neither an entry count nor a line count bounds what is written: node ids are unique-id strings, and one adapter error can outweigh a hundred progress lines.
 

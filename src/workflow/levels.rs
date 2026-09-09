@@ -23,11 +23,12 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    build_log_header, build_node_status_tree, build_retry_policy, cancelled_result,
-    classify_result_status, error_result, format_activity_label, format_progress_line,
-    format_result_tag, format_running_details, is_blocked_by_failed_upstream,
+    MEMO_CADENCE_PATCH, build_log_header, build_node_status_tree, build_retry_policy,
+    cancelled_result, classify_result_status, error_result, format_activity_label,
+    format_progress_line, format_result_tag, format_running_details, is_blocked_by_failed_upstream,
     mark_remaining_level_as_cancelled, node_label, set_node_status, short_activity_error,
-    should_flush_memo, skipped_result, upsert_memo_state, upsert_node_status,
+    should_announce_level, should_flush_memo, skipped_result, upsert_memo_state,
+    upsert_node_status,
 };
 
 /// Cap memo writes for deep DAGs — upsert on this cadence on quiet levels.
@@ -226,6 +227,12 @@ async fn execute_one_level(
     level_idx: usize,
     level: &[String],
 ) -> Result<(), WorkflowTermination> {
+    // One memo policy for the whole loop — start, periodic progress, failure,
+    // cancellation, terminal flush — instead of an unconditional write per
+    // level plus a cadence check that could only ever suppress the second one.
+    // Gated so a run recorded before this keeps its original command sequence.
+    let bounded_memo_cadence = ctx.patched(MEMO_CADENCE_PATCH);
+
     if *state.was_cancelled {
         // Workflow was cancelled — mark all remaining nodes.
         for unique_id in level {
@@ -233,7 +240,12 @@ async fn execute_one_level(
             set_node_status(state.node_status, unique_id, NodeStatus::Cancelled);
             state.all_results.push(cancelled_result(unique_id));
         }
-        upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+        // No memo write: the run is ending, and the orchestrator's terminal
+        // flush publishes every node's final state once. Writing here put a
+        // full snapshot in history for each remaining level of a deep DAG.
+        if !bounded_memo_cadence {
+            upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+        }
         return Ok(());
     }
 
@@ -260,7 +272,10 @@ async fn execute_one_level(
                 .all_results
                 .push(skipped_result(unique_id, "skipped due to upstream failure (fail_fast)"));
         }
-        upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+        // Same as the cancelled tail: the terminal flush covers it.
+        if !bounded_memo_cadence {
+            upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+        }
         return Ok(());
     }
 
@@ -319,7 +334,9 @@ async fn execute_one_level(
 
     // Memo: mark level as running (skipped nodes already set above).
     // Must happen before execute_activity calls which borrow ctx.
-    upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+    if !bounded_memo_cadence || should_announce_level(level_idx, MEMO_UPSERT_EVERY_N_LEVELS) {
+        upsert_memo_state(ctx, state.node_status, state.log_lines)?;
+    }
 
     // Update workflow details with the currently executing models (visible in Temporal UI).
     {

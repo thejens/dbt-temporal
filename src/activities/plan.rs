@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Context as _;
+use bytes::Bytes;
 use dbt_common::io_args::ClapResourceType;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
@@ -303,7 +304,7 @@ async fn store_manifest_json(
         anyhow::anyhow!("ArtifactStore not configured but write_artifacts is enabled")
     })?;
     store
-        .store(invocation_id, "manifest.json", manifest_json.as_bytes())
+        .store(invocation_id, "manifest.json", Bytes::copy_from_slice(manifest_json.as_bytes()))
         .await
         .map_err(|e| artifact_io_error(e.context("storing manifest.json")))
 }

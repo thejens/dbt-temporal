@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::path::{Component, Path, PathBuf};
 
 use super::ArtifactStore;
@@ -76,7 +77,7 @@ fn confined_join(base: &Path, parts: &[&str]) -> Result<PathBuf> {
 
 #[async_trait]
 impl ArtifactStore for LocalArtifactStore {
-    async fn store(&self, invocation_id: &str, filename: &str, content: &[u8]) -> Result<String> {
+    async fn store(&self, invocation_id: &str, filename: &str, content: Bytes) -> Result<String> {
         let path = confined_join(&self.base_dir, &[invocation_id, filename])?;
         let dir = path
             .parent()
@@ -98,7 +99,7 @@ impl ArtifactStore for LocalArtifactStore {
             .ok_or_else(|| anyhow::anyhow!("artifact path has no file name: {}", path.display()))?
             .to_string_lossy();
         let tmp = dir.join(format!(".{}.{}.tmp", leaf, uuid::Uuid::new_v4()));
-        if let Err(e) = tokio::fs::write(&tmp, content).await {
+        if let Err(e) = tokio::fs::write(&tmp, &content).await {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(anyhow::Error::new(e))
                 .with_context(|| format!("writing artifact {}", path.display()));
@@ -112,10 +113,11 @@ impl ArtifactStore for LocalArtifactStore {
         Ok(path.to_string_lossy().into_owned())
     }
 
-    async fn retrieve(&self, path: &str) -> Result<Vec<u8>> {
+    async fn retrieve(&self, path: &str) -> Result<Bytes> {
         let resolved = self.resolve_for_read(path)?;
         tokio::fs::read(&resolved)
             .await
+            .map(Bytes::from)
             .with_context(|| format!("reading artifact {}", resolved.display()))
     }
 }
@@ -131,13 +133,13 @@ mod tests {
         let store = LocalArtifactStore::new(dir.clone());
 
         let path = store
-            .store("inv-123", "run_results.json", b"{\"results\":[]}")
+            .store("inv-123", "run_results.json", Bytes::from_static(b"{\"results\":[]}"))
             .await?;
 
         assert!(Path::new(&path).exists());
 
         let content = store.retrieve(&path).await?;
-        assert_eq!(content, b"{\"results\":[]}");
+        assert_eq!(content, Bytes::from_static(b"{\"results\":[]}"));
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
@@ -148,7 +150,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dbtt-artifact-{}", uuid::Uuid::new_v4()));
         let store = LocalArtifactStore::new(dir.clone());
 
-        let path = store.store("deep/inv", "file.txt", b"hello").await?;
+        let path = store
+            .store("deep/inv", "file.txt", Bytes::from_static(b"hello"))
+            .await?;
         assert!(Path::new(&path).exists());
 
         std::fs::remove_dir_all(&dir)?;
@@ -163,9 +167,9 @@ mod tests {
         let store = LocalArtifactStore::new(dir.clone());
 
         let path = store
-            .store("inv-123", "compiled/model.proj.my_model.sql", b"select 1")
+            .store("inv-123", "compiled/model.proj.my_model.sql", Bytes::from_static(b"select 1"))
             .await?;
-        assert_eq!(store.retrieve(&path).await?, b"select 1");
+        assert_eq!(store.retrieve(&path).await?, Bytes::from_static(b"select 1"));
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
@@ -254,9 +258,11 @@ mod tests {
     async fn retrieve_accepts_a_store_relative_reference() -> Result<()> {
         let base = std::env::temp_dir().join(format!("dbtt-artifact-{}", uuid::Uuid::new_v4()));
         let store = LocalArtifactStore::new(base.clone());
-        store.store("inv-1", "manifest.json", b"{}").await?;
+        store
+            .store("inv-1", "manifest.json", Bytes::from_static(b"{}"))
+            .await?;
 
-        assert_eq!(store.retrieve("inv-1/manifest.json").await?, b"{}");
+        assert_eq!(store.retrieve("inv-1/manifest.json").await?, Bytes::from_static(b"{}"));
 
         std::fs::remove_dir_all(&base).ok();
         Ok(())
@@ -268,7 +274,7 @@ mod tests {
         let store = LocalArtifactStore::new(base.clone());
 
         let err = store
-            .store("../escape", "manifest.json", b"{}")
+            .store("../escape", "manifest.json", Bytes::from_static(b"{}"))
             .await
             .expect_err("a climbing invocation id must be refused");
         assert!(
@@ -286,7 +292,9 @@ mod tests {
     async fn store_publishes_atomically_and_leaves_no_scratch_file() -> Result<()> {
         let base = std::env::temp_dir().join(format!("dbtt-artifact-{}", uuid::Uuid::new_v4()));
         let store = LocalArtifactStore::new(base.clone());
-        store.store("inv-1", "manifest.json", b"{}").await?;
+        store
+            .store("inv-1", "manifest.json", Bytes::from_static(b"{}"))
+            .await?;
 
         let entries: Vec<String> = std::fs::read_dir(base.join("inv-1"))?
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -306,7 +314,9 @@ mod tests {
         tokio::fs::write(&file, b"not a directory").await?;
         let store = LocalArtifactStore::new(file.clone());
 
-        let result = store.store("inv", "run_results.json", b"{}").await;
+        let result = store
+            .store("inv", "run_results.json", Bytes::from_static(b"{}"))
+            .await;
         assert!(result.is_err(), "expected create_dir_all under a file to fail");
 
         std::fs::remove_file(&file)?;
@@ -323,7 +333,9 @@ mod tests {
         tokio::fs::create_dir_all(&collide).await?;
         let store = LocalArtifactStore::new(base.clone());
 
-        let result = store.store("inv", "catalog.json", b"{}").await;
+        let result = store
+            .store("inv", "catalog.json", Bytes::from_static(b"{}"))
+            .await;
         assert!(result.is_err(), "expected write to a directory path to fail");
 
         std::fs::remove_dir_all(&base)?;

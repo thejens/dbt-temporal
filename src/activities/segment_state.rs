@@ -52,7 +52,7 @@ pub async fn save_segment_state_inner(
     let json = serde_json::to_vec(&input.state).context("serializing run segment state")?;
     let size = json.len();
     let path = store
-        .store(&input.invocation_id, &filename, &json)
+        .store(&input.invocation_id, &filename, json.into())
         .await
         .map_err(|e| DbtTemporalError::ArtifactStore(e.context("storing run segment state")))?;
 

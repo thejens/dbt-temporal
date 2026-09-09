@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use object_store::ObjectStore;
 use object_store::path::Path;
 
@@ -102,24 +103,24 @@ impl ObjectStoreArtifactStore {
 
 #[async_trait]
 impl ArtifactStore for ObjectStoreArtifactStore {
-    async fn store(&self, invocation_id: &str, filename: &str, content: &[u8]) -> Result<String> {
+    async fn store(&self, invocation_id: &str, filename: &str, content: Bytes) -> Result<String> {
         let path = Path::from(self.prefix.as_str())
             .child(invocation_id)
             .child(filename);
         self.store
-            .put(&path, content.to_vec().into())
+            .put(&path, content.into())
             .await
             .with_context(|| format!("writing artifact: {path}"))?;
         Ok(path.to_string())
     }
 
-    async fn retrieve(&self, path: &str) -> Result<Vec<u8>> {
+    async fn retrieve(&self, path: &str) -> Result<Bytes> {
         let path = self.resolve_for_read(path)?;
         let result = self
             .store
             .get(&path)
             .await
             .with_context(|| format!("reading artifact: {path}"))?;
-        Ok(result.bytes().await?.to_vec())
+        Ok(result.bytes().await?)
     }
 }

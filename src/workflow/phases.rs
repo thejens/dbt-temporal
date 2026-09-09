@@ -225,6 +225,7 @@ pub fn build_store_artifacts_input(
     command: &str,
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
+    clock: crate::workflow::helpers::RunClock,
 ) -> StoreArtifactsInput {
     StoreArtifactsInput {
         invocation_id: plan.invocation_id.clone(),
@@ -234,6 +235,8 @@ pub fn build_store_artifacts_input(
         manifest_json: plan.manifest_json.clone(),
         manifest_ref: plan.manifest_ref.clone(),
         run_log: Some(log_lines.join("\n")),
+        started_at: clock.started_at.map(chrono::DateTime::<chrono::Utc>::from),
+        elapsed_time: clock.elapsed_secs,
     }
 }
 
@@ -530,6 +533,7 @@ pub async fn store_run_artifacts(
     all_results: &[NodeExecutionResult],
     log_lines: &[String],
     timeouts: &TimeoutConfig,
+    clock: crate::workflow::helpers::RunClock,
 ) -> Result<(Option<StoreArtifactsOutput>, Option<String>), WorkflowTermination> {
     if !plan.write_artifacts {
         return Ok((None, None));
@@ -537,7 +541,7 @@ pub async fn store_run_artifacts(
     let artifacts: StoreArtifactsOutput = ctx
         .execute_activity(
             DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, command, all_results, log_lines),
+            build_store_artifacts_input(plan, command, all_results, log_lines, clock),
             ActivityOptions::start_to_close_timeout(Duration::from_secs(
                 timeouts.store_artifacts_secs,
             )),
@@ -981,7 +985,13 @@ mod tests {
             ..empty_plan()
         };
         let log_lines = vec!["line one".to_string(), "line two".to_string()];
-        let store_input = build_store_artifacts_input(&plan, "build", &[], &log_lines);
+        let store_input = build_store_artifacts_input(
+            &plan,
+            "build",
+            &[],
+            &log_lines,
+            crate::workflow::helpers::RunClock::default(),
+        );
         assert_eq!(store_input.invocation_id, "inv-store");
         assert_eq!(store_input.manifest_json.as_deref(), Some("{\"k\":1}"));
         assert!(store_input.manifest_ref.is_none());
@@ -996,7 +1006,13 @@ mod tests {
             manifest_ref: Some("/path/to/manifest.json".to_string()),
             ..empty_plan()
         };
-        let store_input = build_store_artifacts_input(&plan, "build", &[], &[]);
+        let store_input = build_store_artifacts_input(
+            &plan,
+            "build",
+            &[],
+            &[],
+            crate::workflow::helpers::RunClock::default(),
+        );
         assert!(store_input.manifest_json.is_none());
         assert_eq!(store_input.manifest_ref.as_deref(), Some("/path/to/manifest.json"));
         // Empty log_lines join to empty string — still wrapped in Some.

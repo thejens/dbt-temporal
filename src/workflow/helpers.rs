@@ -361,6 +361,18 @@ pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
 /// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
 /// stable across history replay; the workflow file's own docstring forbids
 /// wall-clock time for this reason.
+/// When the logical run began, and how long it has taken so far.
+///
+/// One value rather than two loose parameters: they are only meaningful
+/// together, and a continuation restarts this execution's clock while the
+/// artifacts still describe one run — so the pair travels from the workflow
+/// into both the checkpoint and `run_results.json`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunClock {
+    pub started_at: Option<std::time::SystemTime>,
+    pub elapsed_secs: f64,
+}
+
 pub fn elapsed_secs(
     start: Option<std::time::SystemTime>,
     end: Option<std::time::SystemTime>,

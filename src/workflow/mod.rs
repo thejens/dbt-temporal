@@ -31,7 +31,7 @@ use crate::types::{
 };
 
 use self::helpers::{
-    build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
+    RunClock, build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
     format_final_details, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
@@ -110,6 +110,14 @@ impl DbtRunWorkflow {
         // node set mid-run, and the pre_run / on-run-start hooks have already
         // fired for this logical run.
         let resumed = load_resume_state(ctx, &input).await?;
+
+        // A continuation restarts this execution's clock, but the artifacts
+        // describe one logical run — so the first segment's start is the one
+        // that counts, and it travels in the checkpoint.
+        let run_started_at = resumed
+            .as_ref()
+            .and_then(|state| state.started_at)
+            .map_or(start, |t| Some(std::time::SystemTime::from(t)));
 
         ctx.state_mut(|s| s.status.phase = "planning".to_string());
         // Timeouts come from dbt_temporal.yml, but planning happens before that is
@@ -197,16 +205,16 @@ impl DbtRunWorkflow {
 
         // History is filling up: hand the remaining levels to a fresh run.
         if let Some(next_level) = levels.continue_at_level {
-            return continue_run_as_new(
-                ctx,
-                &input,
+            let state = build_segment_state(
                 &plan,
                 &levels,
                 &effective_env,
                 &hook_errors,
                 next_level,
-            )
-            .await;
+                next_segment_number(input.resume_from.as_ref()),
+                run_started_at.map(chrono::DateTime::<chrono::Utc>::from),
+            );
+            return continue_run_as_new(ctx, &input, &plan, state).await;
         }
         ctx.state_mut(|s| {
             s.status.phase = "finalizing".to_string();
@@ -232,6 +240,10 @@ impl DbtRunWorkflow {
             &levels.all_results,
             &levels.log_lines,
             &timeouts,
+            RunClock {
+                started_at: run_started_at,
+                elapsed_secs: elapsed_secs(run_started_at, ctx.workflow_time()),
+            },
         )
         .await?;
 
@@ -350,17 +362,18 @@ fn build_resume_point(
 ///
 /// Always returns `Err` — `continue_as_new` is a workflow termination, and the
 /// caller propagates it.
+///
+/// Takes the snapshot already built, so the two halves stay separate: what the
+/// successor needs is decided by `build_segment_state`, and the checkpoint
+/// itself names the segment and level this hands over at.
 async fn continue_run_as_new(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
     plan: &ExecutionPlan,
-    levels: &levels::LevelExecutionOutcome,
-    effective_env: &BTreeMap<String, String>,
-    hook_errors: &[crate::types::HookError],
-    next_level: usize,
+    state: RunSegmentState,
 ) -> WorkflowResult<DbtRunOutput> {
-    let segment = next_segment_number(input.resume_from.as_ref());
-    let state = build_segment_state(plan, levels, effective_env, hook_errors, next_level, segment);
+    let segment = state.segment;
+    let next_level = state.next_level;
 
     let state_ref = save_segment_state(ctx, &plan.invocation_id, state).await?;
 
@@ -424,8 +437,10 @@ fn build_segment_state(
     hook_errors: &[crate::types::HookError],
     next_level: usize,
     segment: u32,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> RunSegmentState {
     RunSegmentState {
+        started_at,
         // Stamped so the successor can tell this checkpoint apart from another
         // segment's, rather than trusting whatever its `state_ref` names.
         schema_version: crate::activities::segment_state::SEGMENT_STATE_SCHEMA_VERSION,
@@ -573,7 +588,7 @@ mod continuation_tests {
             error: "flaky".to_string(),
         }];
 
-        let state = build_segment_state(&plan(), &outcome(), &env, &hook_errors, 1, 1);
+        let state = build_segment_state(&plan(), &outcome(), &env, &hook_errors, 1, 1, None);
 
         assert_eq!(state.next_level, 1);
         assert_eq!(state.plan.levels.len(), 2, "plan carried, not re-planned");
@@ -600,7 +615,7 @@ mod continuation_tests {
     #[test]
     fn a_resumed_run_picks_up_where_its_predecessor_stopped() {
         let env = BTreeMap::from([("K".to_string(), "v".to_string())]);
-        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1);
+        let state = build_segment_state(&plan(), &outcome(), &env, &[], 1, 1, None);
 
         let point = build_resume_point(&plan(), Some(state), true);
 

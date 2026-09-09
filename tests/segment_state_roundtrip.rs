@@ -67,6 +67,7 @@ fn sample_state() -> RunSegmentState {
 
     RunSegmentState {
         schema_version: 1,
+        started_at: None,
         invocation_id: "inv-continued".to_string(),
         segment: 1,
         plan: ExecutionPlan {

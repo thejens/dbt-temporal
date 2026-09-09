@@ -88,13 +88,28 @@ pub fn build_agate_table(
     let result = dbt_csv::read_to_arrow_records(&csv_path, &options)
         .with_context(|| format!("reading seed CSV {}", csv_path.display()))?;
 
-    let batches = result.batches;
-    let first = batches
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("seed CSV {} produced no data", csv_path.display()))?;
-    let schema = first.schema();
-    let batch = arrow_select::concat::concat_batches(&schema, batches.iter())
-        .context("concatenating seed CSV batches")?;
+    let mut batches = result.batches;
+    if batches.is_empty() {
+        anyhow::bail!("seed CSV {} produced no data", csv_path.display());
+    }
+
+    // A seed that fits in one batch is handed straight over. Concatenating a
+    // single batch allocates a second copy of every column to arrive at the
+    // same data.
+    //
+    // A seed larger than the reader's batch size still peaks at input plus
+    // output, because `read_to_arrow_records` reads the whole file and
+    // collects every batch before returning: there is nothing to consume
+    // incrementally on this side. Lowering that peak needs a reader that
+    // yields batches lazily and an Agate table that can be built from a
+    // stream of them — both upstream of here.
+    let batch = if batches.len() == 1 {
+        batches.remove(0)
+    } else {
+        let schema = batches[0].schema();
+        arrow_select::concat::concat_batches(&schema, batches.iter())
+            .context("concatenating seed CSV batches")?
+    };
 
     Ok(Some(dbt_agate::AgateTable::from_record_batch(Arc::new(batch))))
 }

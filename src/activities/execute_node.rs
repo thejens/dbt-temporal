@@ -122,11 +122,17 @@ fn domain_failure_message(error: &DbtTemporalError) -> String {
 /// that manifest describes instead of failing.
 async fn load_defer_nodes(
     activities: &DbtActivities,
+    state: &crate::worker_state::WorkerState,
     manifest_ref: Option<&str>,
-) -> Result<Option<dbt_schemas::schemas::Nodes>, anyhow::Error> {
+) -> Result<Option<Arc<dbt_schemas::schemas::Nodes>>, anyhow::Error> {
     let Some(manifest_ref) = manifest_ref else {
         return Ok(None);
     };
+    // A manifest at a given reference is the run that produced it — immutable,
+    // and the same for every node of this run.
+    if let Some(cached) = state.defer_manifests.get(manifest_ref) {
+        return Ok(Some(cached));
+    }
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "defer_manifest_ref requires artifact storage to be configured \
@@ -146,13 +152,23 @@ async fn load_defer_nodes(
     let manifest: dbt_schemas::schemas::manifest::DbtManifest =
         dbt_schemas::schemas::serde::typed_struct_from_json_str(manifest_str, None)
             .map_err(|e| anyhow::anyhow!("parsing defer manifest JSON: {e}"))?;
+    // The project's own quoting, not a fixed guess. These relations are
+    // rendered into this run's SQL by this run's adapter, so its rules are what
+    // decide whether each part is quoted; the hard-coded values here were wrong
+    // for any project whose quoting differs from them.
+    let resolved = state.resolver_state.root_project_quoting;
     let quoting = dbt_schemas::schemas::common::DbtQuoting {
-        database: Some(false),
-        schema: Some(true),
-        identifier: Some(true),
+        database: Some(resolved.database),
+        schema: Some(resolved.schema),
+        identifier: Some(resolved.identifier),
         snowflake_ignore_case: None,
     };
-    Ok(Some(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting)))
+    let nodes =
+        Arc::new(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting));
+    state
+        .defer_manifests
+        .insert(manifest_ref, Arc::clone(&nodes));
+    Ok(Some(nodes))
 }
 
 /// Build the compile+run base context.
@@ -606,9 +622,10 @@ pub async fn execute_node_inner(
         .map(|r| r.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
 
-    let defer_nodes = load_defer_nodes(activities, input.defer_manifest_ref.as_deref()).await?;
+    let defer_nodes =
+        load_defer_nodes(activities, state, input.defer_manifest_ref.as_deref()).await?;
 
-    let base_context = build_base_context(state, defer_nodes.as_ref(), namespace_keys);
+    let base_context = build_base_context(state, defer_nodes.as_deref(), namespace_keys);
 
     // Serialize the node config for the deprecated_config parameter.
     let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt)?;

@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod defer_cache;
 pub mod engines;
 pub mod profile;
 pub mod project_checks;
@@ -590,6 +591,7 @@ async fn initialize_project_inner(
     );
 
     Ok(WorkerState {
+        defer_manifests: defer_cache::DeferManifestCache::default(),
         created_schemas: schemas::CreatedSchemas::default(),
         adapter_settings,
         event_time_columns,

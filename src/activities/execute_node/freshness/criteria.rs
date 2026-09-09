@@ -134,8 +134,7 @@ pub fn evaluate(
         && exceeded(error_secs)
     {
         return FreshnessVerdict::Stale {
-            max_loaded_at: max_loaded_at.to_rfc3339(),
-            age_secs,
+            outcome: outcome("error"),
             max_allowed_secs: error_secs,
         };
     }
@@ -215,10 +214,11 @@ mod tests {
         let verdict =
             evaluate(&criteria, "model", ts("2026-06-01T12:00:00Z"), ts("2026-06-12T12:00:00Z"));
         assert!(
-            matches!(verdict, FreshnessVerdict::Stale { ref max_loaded_at, age_secs, max_allowed_secs }
+            matches!(verdict, FreshnessVerdict::Stale { ref outcome, max_allowed_secs }
                 if max_allowed_secs == 86_400
-                    && age_secs > 86_400.0
-                    && max_loaded_at.starts_with("2026-06-01")),
+                    && outcome.max_loaded_at_time_ago_in_s > 86_400.0
+                    && outcome.max_loaded_at.starts_with("2026-06-01")
+                    && outcome.status == "error"),
             "expected stale: {verdict:?}"
         );
     }

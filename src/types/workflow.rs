@@ -15,13 +15,78 @@ pub const SOURCE_FRESHNESS_COMMAND: &str = "source-freshness";
 /// and additionally writes `freshness.json`.
 pub const FRESHNESS_COMMAND: &str = "freshness";
 
-/// Whether `command` measures freshness rather than building nodes.
+/// The dbt command a run executes.
 ///
-/// Lives beside [`DbtRunInput`] rather than in the activity that runs the
-/// check: the planner, the node executor, the artifact writer and the workflow
-/// summary all branch on it, and the string is part of the input contract.
-pub fn is_freshness_command(command: &str) -> bool {
-    matches!(command, SOURCE_FRESHNESS_COMMAND | FRESHNESS_COMMAND)
+/// The wire form stays a string — it is workflow input, spelled the way dbt
+/// spells it — but everything that branches on it goes through this. An
+/// unrecognized command used to match no arm of the planner's `match` and
+/// produce an empty plan: the run succeeded, did nothing, and said nothing.
+/// Parsing it once at the boundary turns that into an error naming the
+/// commands that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbtCommand {
+    Run,
+    Build,
+    Test,
+    Seed,
+    Snapshot,
+    Compile,
+    List,
+    SourceFreshness,
+    Freshness,
+}
+
+impl DbtCommand {
+    /// Every command, in the order the error message lists them.
+    pub const ALL: [Self; 9] = [
+        Self::Build,
+        Self::Run,
+        Self::Test,
+        Self::Seed,
+        Self::Snapshot,
+        Self::Compile,
+        Self::List,
+        Self::SourceFreshness,
+        Self::Freshness,
+    ];
+
+    /// The wire spelling. Unchanged from the strings this replaces — a run
+    /// already in flight, and every caller, spells the command this way.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Seed => "seed",
+            Self::Snapshot => "snapshot",
+            Self::Compile => "compile",
+            Self::List => "list",
+            Self::SourceFreshness => SOURCE_FRESHNESS_COMMAND,
+            Self::Freshness => FRESHNESS_COMMAND,
+        }
+    }
+
+    pub fn parse(command: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == command)
+    }
+
+    /// Measures freshness rather than building nodes.
+    pub const fn is_freshness(self) -> bool {
+        matches!(self, Self::SourceFreshness | Self::Freshness)
+    }
+
+    /// Selects the whole graph rather than one resource type. Only these
+    /// commands warn about resource types this worker does not support: the
+    /// single-resource commands legitimately ignore everything else.
+    pub const fn builds_whole_graph(self) -> bool {
+        matches!(self, Self::Build | Self::List)
+    }
+}
+
+impl std::fmt::Display for DbtCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Workflow input — what the user provides when starting the workflow.
@@ -718,13 +783,14 @@ mod tests {
 
     #[test]
     fn freshness_commands_are_recognised() {
-        assert!(is_freshness_command(SOURCE_FRESHNESS_COMMAND));
-        assert!(is_freshness_command(FRESHNESS_COMMAND));
-        assert!(!is_freshness_command("build"));
-        assert!(!is_freshness_command("run"));
+        assert!(DbtCommand::SourceFreshness.is_freshness());
+        assert!(DbtCommand::Freshness.is_freshness());
+        assert!(!DbtCommand::Build.is_freshness());
+        assert!(!DbtCommand::Run.is_freshness());
         // Near-misses must not slip through: the spellings are exact.
-        assert!(!is_freshness_command("source freshness"));
-        assert!(!is_freshness_command(""));
+        // The wire spelling is dbt's, hyphen included.
+        assert_eq!(DbtCommand::parse("source freshness"), None);
+        assert_eq!(DbtCommand::parse(""), None);
     }
 
     #[test]

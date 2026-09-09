@@ -23,9 +23,7 @@ use yml_to_value::yml_value_to_minijinja_with_jinja;
 
 use crate::error::DbtTemporalError;
 
-use crate::types::{
-    FRESHNESS_COMMAND, NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry,
-};
+use crate::types::{DbtCommand, NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -286,6 +284,89 @@ impl ActivityWorkspace {
             },
         })
     }
+}
+
+/// The result of a `dbt compile`: the rendered SQL, and nothing the warehouse
+/// did — because nothing was sent to it.
+fn compile_only_result(
+    unique_id: &str,
+    node_context: &BTreeMap<String, minijinja::Value>,
+    execution_time: f64,
+    compile_window: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+) -> NodeExecutionResult {
+    let (compile_start, compile_end) = compile_window;
+    NodeExecutionResult {
+        unique_id: unique_id.to_owned(),
+        status: NodeStatus::Success,
+        execution_time,
+        message: Some("compiled".to_string()),
+        adapter_response: BTreeMap::new(),
+        compiled_code: node_context
+            .get("sql")
+            .and_then(|v| v.as_str().map(ToString::to_string)),
+        timing: vec![TimingEntry {
+            name: "compile".to_string(),
+            started_at: compile_start.to_rfc3339(),
+            completed_at: compile_end.to_rfc3339(),
+        }],
+        failures: None,
+        freshness: None,
+        // Compile-only: nothing was written, so there is nothing to reference.
+        compiled_code_ref: None,
+        relation_name: None,
+    }
+}
+
+/// Turn a freshness verdict into the status and message a node result reports.
+///
+/// Freshness grades three ways where the rest of the run grades two, and the
+/// distinction is the whole point of the check: `warn_after` exceeded is not a
+/// failure, and reporting it as success hid it from anyone reading results
+/// rather than logs.
+fn grade_freshness(
+    unique_id: &str,
+    rt: NodeType,
+    verdict: freshness::FreshnessVerdict,
+) -> (NodeStatus, String, crate::types::FreshnessOutcome) {
+    match verdict {
+        freshness::FreshnessVerdict::Stale {
+            outcome,
+            max_allowed_secs,
+        } => {
+            let message = domain_failure_message(&DbtTemporalError::StaleSource {
+                unique_id: unique_id.to_owned(),
+                node_kind: rt.as_static_ref(),
+                max_loaded_at: outcome.max_loaded_at.clone(),
+                age_secs: outcome.max_loaded_at_time_ago_in_s,
+                max_allowed_secs,
+            });
+            warn!(node = %unique_id, message = %message, "freshness error (error_after exceeded)");
+            (NodeStatus::Error, message, outcome)
+        }
+        freshness::FreshnessVerdict::Warning(outcome) => {
+            warn!(
+                node = %unique_id,
+                age_secs = outcome.max_loaded_at_time_ago_in_s,
+                "freshness warning (warn_after exceeded)"
+            );
+            let message = freshness_summary(&outcome);
+            (NodeStatus::Warn, message, outcome)
+        }
+        freshness::FreshnessVerdict::Fresh(outcome) => {
+            let message = freshness_summary(&outcome);
+            (NodeStatus::Success, message, outcome)
+        }
+    }
+}
+
+/// The one-line summary a passing or warning freshness check reports.
+fn freshness_summary(outcome: &crate::types::FreshnessOutcome) -> String {
+    format!(
+        "freshness {} (age {:.0}s, max_loaded_at {})",
+        outcome.status.to_uppercase(),
+        outcome.max_loaded_at_time_ago_in_s,
+        outcome.max_loaded_at
+    )
 }
 
 /// Pick the materialization name to dispatch on. Seeds are forced to "seed"
@@ -694,8 +775,9 @@ fn execute_node_body(
     // unified `freshness` command additionally measures models carrying an
     // SLA. Neither compiles model SQL nor materializes anything, so both skip
     // straight from context building to the freshness query.
-    let measures_freshness =
-        rt == NodeType::Source || (rt == NodeType::Model && input.command == FRESHNESS_COMMAND);
+    let measures_freshness = rt == NodeType::Source
+        || (rt == NodeType::Model
+            && DbtCommand::parse(&input.command) == Some(DbtCommand::Freshness));
 
     let start_instant = std::time::Instant::now();
 
@@ -1009,32 +1091,15 @@ fn execute_node_body(
 
     // For `dbt compile`, stop here — render SQL but skip materialization and any
     // adapter execution. The caller gets the compiled SQL via `compiled_code`.
-    if input.command == "compile" {
-        let compiled_code = node_context
-            .get("sql")
-            .and_then(|v| v.as_str().map(ToString::to_string));
+    if DbtCommand::parse(&input.command) == Some(DbtCommand::Compile) {
         let execution_time = start_instant.elapsed().as_secs_f64();
-        let compile_iso = compile_start.to_rfc3339();
-        let compile_end_iso = compile_end.to_rfc3339();
         info!(node = %unique_id, time_secs = execution_time, "node compiled (compile-only)");
-        return Ok(NodeExecutionResult {
-            unique_id: unique_id.clone(),
-            status: NodeStatus::Success,
+        return Ok(compile_only_result(
+            unique_id,
+            &node_context,
             execution_time,
-            message: Some("compiled".to_string()),
-            adapter_response: BTreeMap::new(),
-            compiled_code,
-            timing: vec![TimingEntry {
-                name: "compile".to_string(),
-                started_at: compile_iso,
-                completed_at: compile_end_iso,
-            }],
-            failures: None,
-            freshness: None,
-            // Compile-only: nothing was written.
-            compiled_code_ref: None,
-            relation_name: None,
-        });
+            (compile_start, compile_end),
+        ));
     }
 
     // --- EXECUTE PHASE ---
@@ -1058,51 +1123,11 @@ fn execute_node_body(
         let verdict = freshness::run_freshness_check(freshness_node, jinja_env, &node_context)?;
         let execute_end = chrono::Utc::now();
         let execution_time = start_instant.elapsed().as_secs_f64();
-        let mut stale_message = None;
-        let mut warned = false;
-        let outcome = match verdict {
-            freshness::FreshnessVerdict::Stale {
-                outcome,
-                max_allowed_secs,
-            } => {
-                let message = domain_failure_message(&DbtTemporalError::StaleSource {
-                    unique_id: unique_id.clone(),
-                    node_kind: rt.as_static_ref(),
-                    max_loaded_at: outcome.max_loaded_at.clone(),
-                    age_secs: outcome.max_loaded_at_time_ago_in_s,
-                    max_allowed_secs,
-                });
-                warn!(node = %unique_id, message = %message, "freshness error (error_after exceeded)");
-                stale_message = Some(message);
-                outcome
-            }
-            freshness::FreshnessVerdict::Warning(outcome) => {
-                warn!(
-                    node = %unique_id,
-                    age_secs = outcome.max_loaded_at_time_ago_in_s,
-                    "freshness warning (warn_after exceeded)"
-                );
-                warned = true;
-                outcome
-            }
-            freshness::FreshnessVerdict::Fresh(outcome) => outcome,
-        };
-        let message = stale_message.clone().unwrap_or_else(|| {
-            format!(
-                "freshness {} (age {:.0}s, max_loaded_at {})",
-                outcome.status.to_uppercase(),
-                outcome.max_loaded_at_time_ago_in_s,
-                outcome.max_loaded_at
-            )
-        });
+        let (status, message, outcome) = grade_freshness(unique_id, rt, verdict);
         info!(node = %unique_id, message = %message, "freshness check complete");
         return Ok(NodeExecutionResult {
             unique_id: unique_id.clone(),
-            status: match (stale_message.is_some(), warned) {
-                (true, _) => NodeStatus::Error,
-                (false, true) => NodeStatus::Warn,
-                (false, false) => NodeStatus::Success,
-            },
+            status,
             execution_time,
             message: Some(message),
             adapter_response: extract_adapter_response(&result_store),

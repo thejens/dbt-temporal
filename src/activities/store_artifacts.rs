@@ -7,9 +7,7 @@ use tracing::{info, warn};
 
 use crate::artifact_store::ArtifactStore;
 use crate::error::DbtTemporalError;
-use crate::types::{
-    SOURCE_FRESHNESS_COMMAND, StoreArtifactsInput, StoreArtifactsOutput, is_freshness_command,
-};
+use crate::types::{DbtCommand, StoreArtifactsInput, StoreArtifactsOutput};
 
 use super::DbtActivities;
 use super::heartbeat;
@@ -183,10 +181,10 @@ pub async fn store_artifacts_inner(
     // Freshness runs additionally produce dbt's freshness artifacts. Only nodes
     // that completed the check carry an outcome; a stale node fails its
     // activity and appears in run_results with the error message instead.
-    if let Some(command) = input.command.as_deref()
-        && is_freshness_command(command)
+    if let Some(command) = input.command.as_deref().and_then(DbtCommand::parse)
+        && command.is_freshness()
     {
-        let sources_only = command == SOURCE_FRESHNESS_COMMAND;
+        let sources_only = command == DbtCommand::SourceFreshness;
         // `dbt source freshness` writes sources.json unconditionally, an empty
         // result set included. The unified spelling only rewrites it when the
         // run actually measured a source, so a model-only freshness run does

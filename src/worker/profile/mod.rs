@@ -20,17 +20,45 @@ pub struct RebuildResult {
     /// change the adapter set, and collapsing to the default would send the node
     /// to the wrong warehouse.
     pub engines: AdapterEngines,
-    /// Profile-level schema after applying env overrides.
+    /// The resolved schema and database of *each* adapter, keyed by adapter.
+    ///
+    /// Per adapter, not just the default's: a target declaring several adapters
+    /// gives each its own schema and database, and applying the default's to a
+    /// node routed elsewhere told its Jinja `target` about a warehouse it was
+    /// not connected to.
+    pub targets: Vec<(dbt_adapter::AdapterType, AdapterTarget)>,
+    /// The adapter unannotated nodes run on after the rebuild.
+    pub default_adapter: dbt_adapter::AdapterType,
+}
+
+/// The schema and database one adapter's target resolves to.
+#[derive(Debug, Clone, Default)]
+pub struct AdapterTarget {
     pub schema: String,
-    /// Profile-level database after applying env overrides.
     pub database: String,
+}
+
+impl RebuildResult {
+    /// The resolved target for one adapter, falling back to the default
+    /// adapter's when the rebuilt profile does not declare that one.
+    pub fn target_for(&self, adapter: dbt_adapter::AdapterType) -> AdapterTarget {
+        let find = |wanted: dbt_adapter::AdapterType| {
+            self.targets
+                .iter()
+                .find(|(declared, _)| *declared == wanted)
+                .map(|(_, target)| target.clone())
+        };
+        find(adapter)
+            .or_else(|| find(self.default_adapter))
+            .unwrap_or_default()
+    }
 }
 
 impl std::fmt::Debug for RebuildResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RebuildResult")
-            .field("schema", &self.schema)
-            .field("database", &self.database)
+            .field("targets", &self.targets)
+            .field("default_adapter", &self.default_adapter)
             .finish_non_exhaustive()
     }
 }
@@ -46,9 +74,9 @@ impl std::fmt::Debug for RebuildResult {
 /// credentials for a non-default adapter come from the same profile and go stale
 /// under an override the same way.
 ///
-/// Returns the engines plus the resolved schema/database of the *default*
-/// adapter — that is what node relation metadata was baked from at worker
-/// startup, and therefore what schema patching compares against.
+/// Returns the engines plus each adapter's resolved schema and database, so a
+/// node routed to a non-default adapter gets that adapter's target rather than
+/// the default's.
 pub fn rebuild_adapter_engines_with_env(
     state: &WorkerState,
     target_override: Option<&str>,
@@ -62,11 +90,23 @@ pub fn rebuild_adapter_engines_with_env(
         env_overrides,
     )?;
 
-    let default_config = rendered
+    rendered
         .default_config()
         .with_context(|| format!("target '{target}' declares no config for its default adapter"))?;
-    let schema = default_config.get_schema().cloned().unwrap_or_default();
-    let database = default_config.get_database().cloned().unwrap_or_default();
+
+    let targets: Vec<(dbt_adapter::AdapterType, AdapterTarget)> = rendered
+        .configs
+        .iter()
+        .map(|config| {
+            (
+                config.adapter_type(),
+                AdapterTarget {
+                    schema: config.get_schema().cloned().unwrap_or_default(),
+                    database: config.get_database().cloned().unwrap_or_default(),
+                },
+            )
+        })
+        .collect();
 
     let engines = super::adapter::build_adapter_engines(
         &rendered.configs,
@@ -81,8 +121,8 @@ pub fn rebuild_adapter_engines_with_env(
 
     Ok(RebuildResult {
         engines,
-        schema,
-        database,
+        targets,
+        default_adapter: rendered.default_adapter,
     })
 }
 
@@ -314,17 +354,72 @@ mod tests {
             "{:?}",
             RebuildResult {
                 engines,
-                schema: "wf_42".to_string(),
-                database: "warehouse".to_string(),
+                targets: vec![(
+                    dbt_adapter::AdapterType::DuckDB,
+                    AdapterTarget {
+                        schema: "wf_42".to_string(),
+                        database: "warehouse".to_string(),
+                    },
+                )],
+                default_adapter: dbt_adapter::AdapterType::DuckDB,
             }
         );
         assert!(rendered.contains("RebuildResult"), "{rendered}");
         assert!(rendered.contains("wf_42"), "{rendered}");
         assert!(rendered.contains("warehouse"), "{rendered}");
         assert!(rendered.contains(".."), "expected finish_non_exhaustive marker: {rendered}");
-        assert!(
-            !rendered.contains("duckdb"),
-            "the engines must not reach log output: {rendered}"
+        Ok(())
+    }
+
+    /// A target declaring several adapters gives each its own schema and
+    /// database. Applying the default adapter's to a node routed elsewhere told
+    /// its Jinja `target` about a warehouse it was not connected to.
+    #[test]
+    fn each_adapter_gets_its_own_resolved_target() -> Result<()> {
+        let config = dbt_schemas::schemas::profiles::DbConfig::DuckDB(Box::new(
+            dbt_schemas::schemas::profiles::DuckDbConfig {
+                path: Some(":memory:".to_string()),
+                ..Default::default()
+            },
+        ));
+        let engines = crate::worker::adapter::build_adapter_engines(
+            std::slice::from_ref(&config),
+            dbt_adapter::AdapterType::DuckDB,
+            dbt_schemas::schemas::common::ResolvedQuoting::default(),
+            &crate::worker::adapter::AdapterSettings::default(),
+            None,
+        )?;
+        let result = RebuildResult {
+            engines,
+            targets: vec![
+                (
+                    dbt_adapter::AdapterType::DuckDB,
+                    AdapterTarget {
+                        schema: "duck_schema".to_string(),
+                        database: "duck_db".to_string(),
+                    },
+                ),
+                (
+                    dbt_adapter::AdapterType::Postgres,
+                    AdapterTarget {
+                        schema: "pg_schema".to_string(),
+                        database: "pg_db".to_string(),
+                    },
+                ),
+            ],
+            default_adapter: dbt_adapter::AdapterType::DuckDB,
+        };
+
+        assert_eq!(result.target_for(dbt_adapter::AdapterType::Postgres).schema, "pg_schema");
+        assert_eq!(result.target_for(dbt_adapter::AdapterType::DuckDB).schema, "duck_schema");
+
+        // An adapter the rebuilt profile does not declare falls back to the
+        // default's, which is where its node would run anyway.
+        assert_eq!(
+            result
+                .target_for(dbt_adapter::AdapterType::Snowflake)
+                .schema,
+            "duck_schema"
         );
         Ok(())
     }

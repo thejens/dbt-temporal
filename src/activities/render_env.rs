@@ -89,7 +89,7 @@ pub fn prepare_render_env(
     // not the profile reads env vars), and `env` overrides on a profile that
     // reads env vars at all.
     let target_changed = overrides.target.is_some_and(|t| t != state.default_target);
-    let env_changed = !overrides.env.is_empty() && state.profile_uses_env_vars;
+    let env_changed = state.profile_env_vars.affected_by(overrides.env.keys());
     let mut rebuild_guard = None;
     let (engine, env_schema, env_database) = if target_changed || env_changed {
         let result =

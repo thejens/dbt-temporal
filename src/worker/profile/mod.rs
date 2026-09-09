@@ -86,30 +86,75 @@ pub fn rebuild_adapter_engines_with_env(
     })
 }
 
-/// Heuristic: does this profiles.yml call `env_var` anywhere in the raw file?
-/// A textual match deliberately, not a YAML walk:
+/// Which environment variables a `profiles.yml` reads.
 ///
-/// - The cost of a false positive is one extra adapter rebuild per workflow.
-/// - The cost of a false negative is silently stale credentials at runtime.
-///
-/// So we lean toward the harmless direction in every uncertain case. Strings
-/// that merely *mention* the call (comments, doc keys) trigger the rebuild,
-/// whitespace before the paren still counts because Jinja accepts
-/// `env_var ('KEY')`, and a profile that cannot be read is assumed to use them:
-/// an unreadable file here says nothing about what it contains, and guessing
-/// "no dependencies" would pin every later run to startup credentials.
-pub fn profile_uses_env_vars(profiles_path: &Path) -> bool {
-    std::fs::read_to_string(profiles_path).map_or(true, |content| mentions_env_var(&content))
+/// Deliberately textual rather than a YAML walk. The cost of naming one key too
+/// many is an extra adapter rebuild; the cost of missing one is silently stale
+/// credentials at runtime, so every uncertain case leans the harmless way.
+#[derive(Debug, Clone)]
+pub enum ProfileEnvVars {
+    /// The profile reads exactly these keys, all of them written as literals.
+    Keys(std::collections::BTreeSet<String>),
+    /// The profile reads env vars, but not all of them can be named — a
+    /// computed key (`env_var(some_var)`), or a file that could not be read.
+    /// Any override has to be assumed relevant.
+    Unknown,
 }
 
-/// True when `content` contains an `env_var` call — the identifier followed by
-/// its opening paren, with any Jinja-legal whitespace between them.
-fn mentions_env_var(content: &str) -> bool {
+impl ProfileEnvVars {
+    /// Whether an override of these keys can change what the profile resolves
+    /// to, and so requires rebuilding the adapter engines.
+    ///
+    /// This is the whole reason the type exists. `build_effective_env` injects
+    /// the serialized workflow input as `_` on *every* run, so "the workflow
+    /// supplied env overrides" was true always — and a profile that read any
+    /// env var at all therefore re-read, re-rendered and rebuilt every engine
+    /// once per node activity, handling credentials each time. `_` is transport
+    /// metadata for `env_var('_')` in model SQL; a profile that does not read it
+    /// is not affected by it.
+    pub fn affected_by<'a>(&self, overridden: impl Iterator<Item = &'a String>) -> bool {
+        match self {
+            Self::Keys(keys) => overridden.into_iter().any(|key| keys.contains(key)),
+            Self::Unknown => overridden.into_iter().next().is_some(),
+        }
+    }
+}
+
+/// Read the env vars a `profiles.yml` refers to.
+///
+/// A file that cannot be read says nothing about what it contains, so it counts
+/// as [`ProfileEnvVars::Unknown`] rather than as "no dependencies" — the one
+/// guess that would pin every later run to startup credentials.
+pub fn profile_env_vars(profiles_path: &Path) -> ProfileEnvVars {
+    std::fs::read_to_string(profiles_path)
+        .map_or(ProfileEnvVars::Unknown, |content| parse_env_var_keys(&content))
+}
+
+/// Pull the literal keys out of every `env_var(...)` call in the text.
+///
+/// Whitespace before the paren counts, because Jinja accepts `env_var ('KEY')`.
+/// A call whose key is not a quoted literal makes the whole answer `Unknown`:
+/// its key is only known at render time, so nothing here can rule an override
+/// out.
+fn parse_env_var_keys(content: &str) -> ProfileEnvVars {
     #[allow(clippy::expect_used)]
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"\benv_var\s*\(").expect("env_var call regex")
+    static CALL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\benv_var\s*\(\s*(?:'([^']*)'|"([^"]*)")?"#)
+            .expect("env_var call regex")
     });
-    RE.is_match(content)
+
+    let mut keys = std::collections::BTreeSet::new();
+    for call in CALL.captures_iter(content) {
+        match call.get(1).or_else(|| call.get(2)) {
+            Some(key) => {
+                keys.insert(key.as_str().to_string());
+            }
+            // A call with no quoted literal after the paren — the key is an
+            // expression, and only rendering can say what it is.
+            None => return ProfileEnvVars::Unknown,
+        }
+    }
+    ProfileEnvVars::Keys(keys)
 }
 
 /// Write a throwaway `profiles.yml` into its own temp directory, for the tests
@@ -128,8 +173,15 @@ fn write_temp_profiles(content: &str) -> Result<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    fn keys_of(path: &Path) -> std::collections::BTreeSet<String> {
+        match profile_env_vars(path) {
+            ProfileEnvVars::Keys(keys) => keys,
+            ProfileEnvVars::Unknown => panic!("expected named keys"),
+        }
+    }
+
     #[test]
-    fn test_profile_uses_env_vars_detects_usage() -> Result<()> {
+    fn profile_env_vars_names_the_keys_it_reads() -> Result<()> {
         let path = write_temp_profiles(
             r#"my_profile:
   target: dev
@@ -137,16 +189,23 @@ mod tests {
     dev:
       type: postgres
       host: "{{ env_var('DB_HOST', 'localhost') }}"
+      user: "{{ env_var ('DB_USER') }}"
       port: 5432
 "#,
         )?;
-        assert!(profile_uses_env_vars(&path));
+        assert_eq!(
+            keys_of(&path),
+            ["DB_HOST".to_string(), "DB_USER".to_string()]
+                .into_iter()
+                .collect(),
+            "both spellings count, whitespace before the paren included"
+        );
         std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
         Ok(())
     }
 
     #[test]
-    fn test_profile_uses_env_vars_no_env_var() -> Result<()> {
+    fn profile_env_vars_is_empty_for_a_static_profile() -> Result<()> {
         let path = write_temp_profiles(
             r"my_profile:
   target: dev
@@ -157,31 +216,14 @@ mod tests {
       port: 5432
 ",
         )?;
-        assert!(!profile_uses_env_vars(&path));
+        assert!(keys_of(&path).is_empty());
         std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
         Ok(())
     }
 
+    /// A name that merely ends in `env_var` is not a call.
     #[test]
-    fn test_profile_uses_env_vars_detects_whitespace_before_paren() -> Result<()> {
-        let path = write_temp_profiles(
-            r#"my_profile:
-  target: dev
-  outputs:
-    dev:
-      type: postgres
-      host: "{{ env_var ('DB_HOST', 'localhost') }}"
-"#,
-        )?;
-        assert!(profile_uses_env_vars(&path));
-        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
-        Ok(())
-    }
-
-    /// A name that merely ends in `env_var` is not a call, and must not cost
-    /// every workflow an adapter rebuild.
-    #[test]
-    fn test_profile_uses_env_vars_ignores_longer_identifier() -> Result<()> {
+    fn profile_env_vars_ignores_a_longer_identifier() -> Result<()> {
         let path = write_temp_profiles(
             r"my_profile:
   target: dev
@@ -191,7 +233,25 @@ mod tests {
       host: my_env_variable
 ",
         )?;
-        assert!(!profile_uses_env_vars(&path));
+        assert!(keys_of(&path).is_empty());
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    /// A key only rendering can resolve makes every override potentially
+    /// relevant — the conservative answer, not a guess at nothing.
+    #[test]
+    fn profile_env_vars_is_unknown_for_a_computed_key() -> Result<()> {
+        let path = write_temp_profiles(
+            r#"my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var(host_var) }}"
+"#,
+        )?;
+        assert!(matches!(profile_env_vars(&path), ProfileEnvVars::Unknown));
         std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
         Ok(())
     }
@@ -199,9 +259,37 @@ mod tests {
     /// Unreadable says nothing about the contents: assume env vars are in play
     /// rather than pinning the run to startup credentials.
     #[test]
-    fn test_profile_uses_env_vars_missing_file_assumes_usage() {
+    fn profile_env_vars_is_unknown_when_the_file_cannot_be_read() {
         let path = std::path::PathBuf::from("/tmp/nonexistent-dbtt-test/profiles.yml");
-        assert!(profile_uses_env_vars(&path));
+        assert!(matches!(profile_env_vars(&path), ProfileEnvVars::Unknown));
+    }
+
+    /// The point of naming keys: `build_effective_env` puts the serialized
+    /// workflow input in `_` on every run, so a profile that does not read `_`
+    /// must not rebuild its engines once per node because of it.
+    #[test]
+    fn the_underscore_override_alone_does_not_affect_a_profile_that_ignores_it() {
+        let reads_db_host = ProfileEnvVars::Keys(std::iter::once("DB_HOST".to_string()).collect());
+
+        let only_underscore = ["_".to_string()];
+        assert!(!reads_db_host.affected_by(only_underscore.iter()));
+
+        let with_db_host = ["_".to_string(), "DB_HOST".to_string()];
+        assert!(reads_db_host.affected_by(with_db_host.iter()));
+
+        let unrelated = ["_".to_string(), "SOME_MODEL_VAR".to_string()];
+        assert!(
+            !reads_db_host.affected_by(unrelated.iter()),
+            "an override the profile never reads changes nothing about the connection"
+        );
+    }
+
+    /// When the keys cannot be named, any override is assumed relevant.
+    #[test]
+    fn unknown_keys_treat_every_override_as_relevant() {
+        let unknown = ProfileEnvVars::Unknown;
+        assert!(unknown.affected_by(std::iter::once(&"_".to_string())));
+        assert!(!unknown.affected_by(std::iter::empty()));
     }
 
     /// The contract of the `Debug` impl: a rebuild is logged by the target it

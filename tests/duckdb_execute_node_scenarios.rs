@@ -58,22 +58,51 @@ async fn unresolvable_materialization_name_is_a_compilation_error() {
     );
 }
 
+/// An override of a variable the profile never reads changes nothing about the
+/// connection, so it must not cost a profile re-render and a fresh engine — the
+/// cost every run used to pay, because `build_effective_env` puts the
+/// serialized workflow input in `_` on every one of them.
+#[tokio::test]
+async fn an_override_the_profile_does_not_read_reuses_the_startup_engine() {
+    let profile_yml = "spike:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      \
+                        path: \"{DB_PATH}\"\n      schema: \"{{ env_var('DBTT_EXEC_SCHEMA') }}\"\n      \
+                        threads: 1\n";
+    let guard = EnvVarGuard::set("DBTT_EXEC_SCHEMA", "main");
+    let harness =
+        Harness::build_files_with_profile(&[("models/m.sql", "select 1 as id")], profile_yml).await;
+    // Removed, so any rebuild would fail on the missing required variable.
+    guard.remove();
+
+    let mut env = BTreeMap::new();
+    env.insert("UNRELATED".to_string(), "value".to_string());
+    env.insert("_".to_string(), "{\"command\":\"run\"}".to_string());
+
+    harness
+        .run_uid_with_env("model.spike.m", &env)
+        .await
+        .expect("an unread override must not trigger a rebuild");
+}
+
 #[tokio::test]
 async fn env_override_rebuild_failure_inside_execute_node_is_a_configuration_error() {
     // Mirrors duckdb_profile_scenarios.rs's direct rebuild_adapter_engine_with_env
     // test, but through the real execute_node_inner integration: a missing
     // required env_var during the per-workflow rebuild is wrapped as
     // Configuration (not Compilation/Adapter) at the execute_node call site.
+    //
+    // The override names `DBTT_EXEC_THREADS`, which this profile reads — that is
+    // what asks for a rebuild. An override of some variable the profile never
+    // mentions would not, and must not.
     let profile_yml = "spike:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      \
                         path: \"{DB_PATH}\"\n      schema: \"{{ env_var('DBTT_EXEC_SCHEMA') }}\"\n      \
-                        threads: 1\n";
+                        threads: \"{{ env_var('DBTT_EXEC_THREADS', '1') }}\"\n";
     let guard = EnvVarGuard::set("DBTT_EXEC_SCHEMA", "startup-value");
     let harness =
         Harness::build_files_with_profile(&[("models/m.sql", "select 1 as id")], profile_yml).await;
     guard.remove();
 
     let mut env = BTreeMap::new();
-    env.insert("UNRELATED".to_string(), "value".to_string());
+    env.insert("DBTT_EXEC_THREADS".to_string(), "2".to_string());
     let err = harness.run_err_uid_with_env("model.spike.m", &env).await;
     assert!(
         matches!(err, DbtTemporalError::Configuration(_)),

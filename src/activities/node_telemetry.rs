@@ -110,7 +110,12 @@ pub fn record_outcome(spans: &NodeExecutionSpans, status: NodeStatus) {
     record_span_status_from_attrs(&spans.node, |attrs| {
         if let Some(ev) = attrs.downcast_mut::<NodeEvaluated>() {
             match status {
-                NodeStatus::Success => ev.set_node_outcome(NodeOutcome::Success),
+                // Upstream's telemetry has no warning outcome: a warned node
+                // completed, and the warning is carried as a node-type-specific
+                // detail on a successful outcome.
+                NodeStatus::Success | NodeStatus::Warn => {
+                    ev.set_node_outcome(NodeOutcome::Success);
+                }
                 NodeStatus::Error => {
                     ev.set_node_outcome(NodeOutcome::Error);
                     ev.set_node_error_type(NodeErrorType::User);

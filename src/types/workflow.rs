@@ -549,6 +549,11 @@ pub struct RunStatusSnapshot {
     /// Index of the most recently completed level (1-based; 0 = none yet).
     pub completed_levels: usize,
     pub succeeded: usize,
+    /// Nodes that reported a warning — a test over `warn_if`, a source past
+    /// `warn_after`. Counted apart from `succeeded` so a run that found
+    /// something is not reported as one that found nothing.
+    #[serde(default)]
+    pub warned: usize,
     pub failed: usize,
     pub skipped: usize,
     pub running: usize,
@@ -567,6 +572,7 @@ impl RunStatusSnapshot {
         for status in statuses.nodes.values() {
             match status {
                 NodeStatus::Success => self.succeeded += 1,
+                NodeStatus::Warn => self.warned += 1,
                 NodeStatus::Error => self.failed += 1,
                 NodeStatus::Skipped | NodeStatus::Cancelled => self.skipped += 1,
                 NodeStatus::Running => self.running += 1,
@@ -582,6 +588,12 @@ pub enum NodeStatus {
     Pending,
     Running,
     Success,
+    /// The node did what it was asked and reported something the operator
+    /// should see — a data test over its `warn_if` threshold but under
+    /// `error_if`, or a source past `warn_after` but not `error_after`. dbt
+    /// reports these as `warn`; folding them into `success` made a run that
+    /// found something indistinguishable from one that found nothing.
+    Warn,
     Error,
     Skipped,
     Cancelled,
@@ -593,6 +605,7 @@ impl NodeStatus {
             Self::Pending => "pending",
             Self::Running => "running",
             Self::Success => "success",
+            Self::Warn => "warn",
             Self::Error => "error",
             Self::Skipped => "skipped",
             Self::Cancelled => "cancelled",

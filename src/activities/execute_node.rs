@@ -951,6 +951,7 @@ pub async fn execute_node_inner(
         let execute_end = chrono::Utc::now();
         let execution_time = start_instant.elapsed().as_secs_f64();
         let mut stale_message = None;
+        let mut warned = false;
         let outcome = match verdict {
             freshness::FreshnessVerdict::Stale {
                 outcome,
@@ -973,6 +974,7 @@ pub async fn execute_node_inner(
                     age_secs = outcome.max_loaded_at_time_ago_in_s,
                     "freshness warning (warn_after exceeded)"
                 );
+                warned = true;
                 outcome
             }
             freshness::FreshnessVerdict::Fresh(outcome) => outcome,
@@ -988,10 +990,10 @@ pub async fn execute_node_inner(
         info!(node = %unique_id, message = %message, "freshness check complete");
         return Ok(NodeExecutionResult {
             unique_id: unique_id.clone(),
-            status: if stale_message.is_some() {
-                NodeStatus::Error
-            } else {
-                NodeStatus::Success
+            status: match (stale_message.is_some(), warned) {
+                (true, _) => NodeStatus::Error,
+                (false, true) => NodeStatus::Warn,
+                (false, false) => NodeStatus::Success,
             },
             execution_time,
             message: Some(message),
@@ -1067,6 +1069,11 @@ pub async fn execute_node_inner(
     // data-test verdicts below; when present it becomes the node's message and
     // its status is `Error`.
     let mut domain_failure: Option<String> = None;
+    // A node that completed and found something the operator should see — a
+    // test over `warn_if` but under `error_if`. Reported apart from success:
+    // folding the two together made a run that found something look like one
+    // that found nothing.
+    let mut warned = false;
 
     // Unit tests: compare the actual vs expected partitions of the executed
     // union query. A difference is the test's answer, not a fault to retry —
@@ -1126,6 +1133,7 @@ pub async fn execute_node_inner(
                 severity = ?severity,
                 "test warning"
             );
+            warned = true;
         }
     }
 
@@ -1139,10 +1147,10 @@ pub async fn execute_node_inner(
         )
     });
 
-    let status = if domain_failure.is_some() {
-        NodeStatus::Error
-    } else {
-        NodeStatus::Success
+    let status = match (domain_failure.is_some(), warned) {
+        (true, _) => NodeStatus::Error,
+        (false, true) => NodeStatus::Warn,
+        (false, false) => NodeStatus::Success,
     };
 
     if let Some(reason) = domain_failure.as_deref() {

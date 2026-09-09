@@ -293,6 +293,7 @@ fn dbt_status(result: &crate::types::NodeExecutionResult) -> String {
     match (is_test, result.status) {
         (true, NodeStatus::Success) => "pass".to_string(),
         (true, NodeStatus::Error) => "fail".to_string(),
+        // `warn` is already dbt's word for it, for a test and a model alike.
         (_, status) => status.as_str().to_string(),
     }
 }

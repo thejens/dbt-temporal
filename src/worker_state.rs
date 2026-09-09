@@ -47,8 +47,12 @@ pub struct WorkerState {
     pub profile_name_in_project: String,
     /// Resolved default target name (e.g. "dev").
     pub default_target: String,
-    /// Whether profiles.yml contains `env_var()` calls — gates per-workflow rebuilding.
-    pub profile_uses_env_vars: bool,
+    /// Which env vars profiles.yml reads — gates per-workflow rebuilding.
+    ///
+    /// Names, not a yes/no: every run carries an `_` override (the serialized
+    /// workflow input, for `env_var('_')` in model SQL), so "did the workflow
+    /// supply overrides" is always true and cannot decide anything.
+    pub profile_env_vars: crate::worker::profile::ProfileEnvVars,
     /// Compiled SQL per node, captured after resolve step.
     /// Keyed by common_attr.path (e.g. "models/stg_customers.sql").
     pub compiled_sql_cache: BTreeMap<String, String>,

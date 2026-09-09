@@ -64,11 +64,13 @@ Both workflows run on the same worker, share the parsed project state (DAG, macr
 The per-workflow adapter engine rebuild happens when the workflow can resolve to a different profile than the worker started on — either of:
 
 - The workflow's `target` names a target other than the profile's default. A different `outputs:` block means different credentials, schema and database, whether or not the profile reads env vars.
-- `profiles.yml` calls `env_var` (detected once at worker startup) **and** the workflow's `env` field is non-empty.
+- The workflow's `env` overrides a variable **that `profiles.yml` actually reads**.
 
 If neither holds, the shared engines from worker startup are used with zero overhead.
 
-The startup scan is deliberately generous: it matches `env_var` followed by its opening paren with any whitespace between, it counts mentions in comments, and it assumes usage if the file cannot be read. A false positive costs one rebuild per workflow; a false negative would silently pin every run to startup credentials.
+The second condition is by key, not by "did the workflow supply any overrides". Every run carries an `_` override — the serialized workflow input, so models can read `env_var('_')` — so the coarser test was always true, and any profile reading any env var re-read, re-rendered and rebuilt all of its engines once per node activity.
+
+The startup scan is deliberately generous in every uncertain case. It matches `env_var` followed by its opening paren with any whitespace between and counts mentions in comments; and if a key cannot be named — a computed `env_var(some_var)`, or a file that cannot be read — every override is assumed relevant. Naming one key too many costs a rebuild; missing one would silently pin the run to startup credentials.
 
 ## Known limitations
 

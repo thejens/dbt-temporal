@@ -69,8 +69,11 @@ async fn target_override_applies_to_a_profile_without_env_vars() {
         &[("models/reads_target.sql", "select '{{ target.name }}|{{ target.schema }}' as t")];
     let harness = Harness::build_files_with_profile(model, TWO_STATIC_TARGETS_PROFILE).await;
     assert!(
-        !harness.state().profile_uses_env_vars,
-        "fixture must have no env_var() for this to test the target path"
+        matches!(
+            &harness.state().profile_env_vars,
+            dbt_temporal::worker::profile::ProfileEnvVars::Keys(keys) if keys.is_empty()
+        ),
+        "fixture must read no env vars for this to test the target path"
     );
 
     let compiled = harness

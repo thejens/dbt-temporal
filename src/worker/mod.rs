@@ -523,17 +523,24 @@ async fn initialize_project_inner(
     let non_retryable_error_patterns =
         crate::error::compile_error_patterns(&default_retry.non_retryable_errors);
 
-    // Detect whether profiles.yml uses env_var() — gates per-workflow adapter rebuilding.
-    let uses_env_vars = profile::profile_uses_env_vars(&profiles_path);
+    // Which env vars profiles.yml reads — gates per-workflow adapter rebuilding.
+    let profile_env_vars = profile::profile_env_vars(&profiles_path);
 
     let profile_name_in_project = dbt_state.dbt_profile.profile.clone();
     let default_target = dbt_state.dbt_profile.target.clone();
 
-    if uses_env_vars {
-        info!(
+    match &profile_env_vars {
+        profile::ProfileEnvVars::Keys(keys) if !keys.is_empty() => info!(
             project = %project_name,
-            "profiles.yml uses env_var() — per-workflow adapter rebuilding enabled"
-        );
+            keys = ?keys,
+            "profiles.yml reads env vars — a workflow overriding one of these rebuilds its adapters"
+        ),
+        profile::ProfileEnvVars::Unknown => info!(
+            project = %project_name,
+            "profiles.yml reads env vars this worker cannot name — every workflow \
+             supplying overrides rebuilds its adapters"
+        ),
+        profile::ProfileEnvVars::Keys(_) => {}
     }
 
     let materialization_resolver =
@@ -599,7 +606,7 @@ async fn initialize_project_inner(
         profiles_path,
         profile_name_in_project,
         default_target,
-        profile_uses_env_vars: uses_env_vars,
+        profile_env_vars,
         compiled_sql_cache,
         snapshot_sql_cache,
         test_sql_cache,

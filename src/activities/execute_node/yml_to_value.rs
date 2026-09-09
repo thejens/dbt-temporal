@@ -50,15 +50,21 @@ pub fn yml_value_to_minijinja(v: &dbt_yaml::Value) -> minijinja::Value {
 /// Generic test kwargs can include expression strings like
 /// `"{{ get_where_subquery(ref('my_model')) }}"`. Strip the wrapping `{{ ... }}`
 /// and evaluate so `**_dbt_generic_test_kwargs` behaves like dbt-fusion's
-/// executor path. Falls back to the literal value on any error.
+/// executor path.
+///
+/// A value that is not wrapped in `{{ }}` is a literal and comes back as one.
+/// A value that *is* wrapped asked to be evaluated, so a failure is an error:
+/// falling back to the literal handed the test macro the template source as
+/// its argument, which compiles into SQL that is wrong in a way nothing
+/// reports — a `where` clause of the characters `{{ get_where_subquery(…) }}`.
 pub fn yml_value_to_minijinja_with_jinja(
     v: &dbt_yaml::Value,
     jinja_env: &JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
-) -> minijinja::Value {
+) -> Result<minijinja::Value, anyhow::Error> {
     let base = yml_value_to_minijinja(v);
     let Some(raw) = base.as_str() else {
-        return base;
+        return Ok(base);
     };
 
     let Some(expr) = raw
@@ -68,14 +74,14 @@ pub fn yml_value_to_minijinja_with_jinja(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
-        return base;
+        return Ok(base);
     };
 
     jinja_env
         .env
         .compile_expression(expr)
         .and_then(|compiled| compiled.eval(node_context, &[]))
-        .unwrap_or(base)
+        .map_err(|e| anyhow::anyhow!("evaluating test kwarg expression `{expr}`: {e}"))
 }
 
 #[cfg(test)]
@@ -176,7 +182,7 @@ mod tests {
     fn with_jinja_passes_through_non_string() {
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
-        let v = yml_value_to_minijinja_with_jinja(&parse("42"), &env, &ctx);
+        let v = yml_value_to_minijinja_with_jinja(&parse("42"), &env, &ctx).unwrap();
         assert_eq!(v.to_string(), "42");
     }
 
@@ -184,7 +190,7 @@ mod tests {
     fn with_jinja_passes_through_plain_string() {
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
-        let v = yml_value_to_minijinja_with_jinja(&parse("\"plain\""), &env, &ctx);
+        let v = yml_value_to_minijinja_with_jinja(&parse("\"plain\""), &env, &ctx).unwrap();
         assert_eq!(v.as_str(), Some("plain"));
     }
 
@@ -193,21 +199,28 @@ mod tests {
         let env = empty_jinja_env();
         let mut ctx = BTreeMap::new();
         ctx.insert("x".to_string(), minijinja::Value::from(7));
-        let v = yml_value_to_minijinja_with_jinja(&parse("\"{{ x + 1 }}\""), &env, &ctx);
+        let v = yml_value_to_minijinja_with_jinja(&parse("\"{{ x + 1 }}\""), &env, &ctx).unwrap();
         assert_eq!(v.to_string(), "8");
     }
 
+    /// A value wrapped in `{{ }}` asked to be evaluated. Handing the template
+    /// source back as a literal put it into the test's SQL verbatim — a `where`
+    /// clause reading `{{ get_where_subquery(…) }}`, wrong in a way nothing
+    /// reports.
     #[test]
-    fn with_jinja_falls_back_on_compile_error() {
+    fn with_jinja_reports_an_expression_it_cannot_evaluate() {
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
-        // Unknown reference fails at eval; we should get the raw string back.
-        let v = yml_value_to_minijinja_with_jinja(
+        let err = yml_value_to_minijinja_with_jinja(
             &parse("\"{{ missing_var.missing_attr }}\""),
             &env,
             &ctx,
+        )
+        .expect_err("an unevaluable expression must not become a literal");
+        assert!(
+            err.to_string().contains("missing_var.missing_attr"),
+            "should name the expression: {err}"
         );
-        assert_eq!(v.as_str(), Some("{{ missing_var.missing_attr }}"));
     }
 
     #[test]
@@ -215,7 +228,7 @@ mod tests {
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
         // "{{ }}" trims to empty — treated as a plain string.
-        let v = yml_value_to_minijinja_with_jinja(&parse("\"{{ }}\""), &env, &ctx);
+        let v = yml_value_to_minijinja_with_jinja(&parse("\"{{ }}\""), &env, &ctx).unwrap();
         assert_eq!(v.as_str(), Some("{{ }}"));
     }
 }

@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -440,23 +441,28 @@ pub fn extract_adapter_response(result_store: &ResultStore) -> BTreeMap<String, 
 /// all Jinja macros that access `target.schema` / `target.database` must see the new values.
 /// This includes `generate_schema_name`, `generate_database_name`, materialization templates,
 /// and any custom macros.
+///
+/// Every failure here is an error rather than a silent return. This runs only
+/// when a workflow resolved a different profile than the worker started on, so
+/// giving up leaves `target` describing the *startup* warehouse while the
+/// adapter is connected to another one — every `target.schema` in the project
+/// then names a schema the run is not writing to.
 pub(super) fn patch_target_global(
     jinja_env: &mut dbt_jinja_utils::jinja_environment::JinjaEnv,
     schema: &str,
     database: &str,
     target_name: Option<&str>,
-) {
+) -> Result<(), anyhow::Error> {
     // Extract current target as JSON, modify fields, re-inject as a native BTreeMap Value.
     let target_json = jinja_env
         .render_str("{{ target | tojson }}", BTreeMap::<String, minijinja::Value>::new(), &[])
-        .unwrap_or_default();
+        .map_err(|e| anyhow::anyhow!("reading the current Jinja target: {e}"))?;
 
-    let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&target_json) else {
-        return;
-    };
-    let Some(obj) = json_val.as_object() else {
-        return;
-    };
+    let json_val: serde_json::Value = serde_json::from_str(&target_json)
+        .with_context(|| format!("parsing the current Jinja target: {target_json}"))?;
+    let obj = json_val
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("the Jinja target is not an object: {json_val}"))?;
 
     let mut new_target: BTreeMap<String, minijinja::Value> = obj
         .iter()
@@ -474,6 +480,7 @@ pub(super) fn patch_target_global(
     jinja_env.env.add_global("target", val.clone());
     // In dbt, `env` is an alias for `target`.
     jinja_env.env.add_global("env", val);
+    Ok(())
 }
 
 /// Convert a `serde_json::Value` to a native `minijinja::Value`.
@@ -925,7 +932,8 @@ mod tests {
             "database": "old_db",
             "name": "dev",
         }));
-        patch_target_global(&mut env, "new_schema", "new_db", None);
+        patch_target_global(&mut env, "new_schema", "new_db", None)
+            .expect("patching the target succeeds");
 
         let rendered = env
             .render_str(
@@ -944,7 +952,8 @@ mod tests {
             "database": "d",
             "name": "old",
         }));
-        patch_target_global(&mut env, "s", "d", Some("prod"));
+        patch_target_global(&mut env, "s", "d", Some("prod"))
+            .expect("patching the target succeeds");
 
         let rendered = env
             .render_str(
@@ -962,7 +971,7 @@ mod tests {
             "schema": "s",
             "database": "d",
         }));
-        patch_target_global(&mut env, "s2", "d2", None);
+        patch_target_global(&mut env, "s2", "d2", None).expect("patching the target succeeds");
 
         let rendered = env
             .render_str(
@@ -974,15 +983,19 @@ mod tests {
         assert_eq!(rendered, "s2|d2");
     }
 
+    /// A `target` that is not an object cannot be patched. Returning quietly
+    /// left it describing the startup warehouse while the adapter was connected
+    /// to another one, so every `target.schema` in the project named a schema
+    /// the run was not writing to.
     #[test]
-    fn patch_target_global_returns_silently_when_target_not_object() {
-        // `target` rendered as plain string → tojson produces a JSON string (not object);
-        // the patch should be a no-op rather than panic.
+    fn patch_target_global_reports_a_target_it_cannot_patch() {
         let mut env = minijinja::Environment::new();
         env.add_global("target", minijinja::Value::from("not_an_object"));
         let mut jenv = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
-        patch_target_global(&mut jenv, "s", "d", None);
-        // No assertion needed beyond "didn't panic".
+
+        let err = patch_target_global(&mut jenv, "s", "d", None)
+            .expect_err("a non-object target must be reported");
+        assert!(err.to_string().contains("not an object"), "should say what was wrong: {err}");
     }
 
     // --- find_materialization_template ---

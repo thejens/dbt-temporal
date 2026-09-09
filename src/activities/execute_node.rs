@@ -435,10 +435,14 @@ fn build_test_kwargs_map(
     meta_kwargs: &BTreeMap<String, dbt_yaml::Value>,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
-) -> BTreeMap<String, minijinja::Value> {
+) -> Result<BTreeMap<String, minijinja::Value>, anyhow::Error> {
     meta_kwargs
         .iter()
-        .map(|(k, v)| (k.clone(), yml_value_to_minijinja_with_jinja(v, jinja_env, node_context)))
+        .map(|(k, v)| {
+            let value = yml_value_to_minijinja_with_jinja(v, jinja_env, node_context)
+                .with_context(|| format!("test kwarg {k}"))?;
+            Ok((k.clone(), value))
+        })
         .collect()
 }
 
@@ -531,7 +535,7 @@ pub async fn execute_node_inner(
     let base_context = build_base_context(state, defer_nodes.as_ref(), namespace_keys);
 
     // Serialize the node config for the deprecated_config parameter.
-    let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt);
+    let mut deprecated_config = get_node_config_yml(&state.resolver_state.nodes, unique_id, rt)?;
 
     // The `unit` materialization reads the expected fixture from
     // config.get('expected_rows') / config.get('expected_sql').
@@ -657,7 +661,8 @@ pub async fn execute_node_inner(
             &schema_map,
             env_database.as_deref(),
             &mut node_context,
-        );
+        )
+        .map_err(|e| DbtTemporalError::Compilation(format!("{e:#}")))?;
         Some(schema_map)
     } else {
         if let Some(patch) = compute_patched_relation(
@@ -691,7 +696,8 @@ pub async fn execute_node_inner(
         && let Some(test) = state.resolver_state.nodes.tests.get(unique_id)
         && let Some(ref meta) = test.__test_attr__.test_metadata
     {
-        let kwargs_map = build_test_kwargs_map(&meta.kwargs, jinja_env, &node_context);
+        let kwargs_map = build_test_kwargs_map(&meta.kwargs, jinja_env, &node_context)
+            .map_err(|e| DbtTemporalError::Compilation(format!("{e:#}")))?;
         node_context
             .insert("_dbt_generic_test_kwargs".to_owned(), minijinja::Value::from(kwargs_map));
     }
@@ -1597,7 +1603,7 @@ mod tests {
 
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
-        let result = build_test_kwargs_map(&kwargs, &env, &ctx);
+        let result = build_test_kwargs_map(&kwargs, &env, &ctx).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result.get("threshold").unwrap().to_string(), "42");
@@ -1614,7 +1620,7 @@ mod tests {
         let env = empty_jinja_env();
         let mut ctx = BTreeMap::new();
         ctx.insert("x".to_string(), minijinja::Value::from(7));
-        let result = build_test_kwargs_map(&kwargs, &env, &ctx);
+        let result = build_test_kwargs_map(&kwargs, &env, &ctx).unwrap();
 
         assert_eq!(result.get("value").unwrap().to_string(), "8");
     }
@@ -1623,7 +1629,7 @@ mod tests {
     fn build_test_kwargs_map_returns_empty_for_empty_input() {
         let env = empty_jinja_env();
         let ctx = BTreeMap::new();
-        let result = build_test_kwargs_map(&BTreeMap::new(), &env, &ctx);
+        let result = build_test_kwargs_map(&BTreeMap::new(), &env, &ctx).unwrap();
         assert!(result.is_empty());
     }
 }

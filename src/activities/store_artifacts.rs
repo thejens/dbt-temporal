@@ -304,6 +304,18 @@ const DBT_VERSION: &str = "2.0.5";
 /// Schema the artifact claims to follow. dbt-fusion writes v6.
 const RUN_RESULTS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/run-results/v6.json";
 
+/// Schemas of the two freshness artifacts. They differ because the shapes do:
+/// `freshness.json` adds `resource_type` and covers models, so it cannot claim
+/// the `sources` schema `sources.json` has always followed.
+const SOURCES_SCHEMA: &str = "https://schemas.getdbt.com/dbt/sources/v3.json";
+const FRESHNESS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/freshness/v0.json";
+
+/// The `env` block every artifact carries: the orchestrator's own version,
+/// kept where it does not pretend to be dbt's.
+fn artifact_env() -> BTreeMap<String, String> {
+    BTreeMap::from([("DBT_TEMPORAL_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string())])
+}
+
 /// Build the `run_results.json` content from the store artifacts input.
 ///
 /// Serialized through upstream's own `RunResultsArtifact` rather than a
@@ -324,12 +336,7 @@ fn build_run_results_json(
             generated_at: chrono::Utc::now(),
             invocation_id: input.invocation_id.clone(),
             invocation_started_at: input.started_at,
-            // The orchestrator's own version, kept where it does not pretend to
-            // be dbt's.
-            env: BTreeMap::from([(
-                "DBT_TEMPORAL_VERSION".to_string(),
-                env!("CARGO_PKG_VERSION").to_string(),
-            )]),
+            env: artifact_env(),
         },
         results: input
             .node_results
@@ -476,12 +483,21 @@ fn build_freshness_json(
         .iter()
         .map(|r| std::time::Duration::from_secs_f64(r.execution_time.max(0.0)))
         .sum();
+    let metadata = dbt_schemas::schemas::FreshnessResultsMetadata {
+        dbt_schema_version: if sources_only {
+            SOURCES_SCHEMA
+        } else {
+            FRESHNESS_SCHEMA
+        }
+        .to_string(),
+        dbt_version: DBT_VERSION.to_string(),
+        generated_at: chrono::Utc::now(),
+        invocation_id: input.invocation_id.clone(),
+        invocation_started_at: input.started_at,
+        env: artifact_env(),
+    };
     let artifact = serde_json::json!({
-        "metadata": {
-            "invocation_id": input.invocation_id,
-            "dbt_version": env!("CARGO_PKG_VERSION"),
-            "generated_at": chrono::Utc::now().to_rfc3339(),
-        },
+        "metadata": metadata,
         "results": results,
         "elapsed_time": total.as_secs_f64(),
     });
@@ -557,6 +573,8 @@ mod tests {
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&build_freshness_json(&input, true)?)?;
+        assert_eq!(parsed["metadata"]["dbt_schema_version"], SOURCES_SCHEMA);
+        assert_eq!(parsed["metadata"]["dbt_version"], DBT_VERSION);
         let results = parsed["results"].as_array().expect("results array");
         assert_eq!(results.len(), 1, "models and plain results must be excluded");
         assert_eq!(results[0]["unique_id"], "source.p.s.orders");
@@ -669,6 +687,7 @@ mod tests {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&build_freshness_json(&input, false)?)?;
+        assert_eq!(parsed["metadata"]["dbt_schema_version"], FRESHNESS_SCHEMA);
         let results = parsed["results"].as_array().expect("results array");
         assert_eq!(results.len(), 2, "both measured nodes belong in freshness.json");
         assert_eq!(results[0]["resource_type"], "source");

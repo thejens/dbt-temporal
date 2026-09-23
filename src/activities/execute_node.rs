@@ -673,6 +673,36 @@ pub async fn execute_node_cancellable(
     Ok(result)
 }
 
+/// Drop a model body's trailing `;` before a materialization splices it in.
+///
+/// Materializations wrap the body in a larger query — `create table as ( ... )`,
+/// contract enforcement's `select * from ( ... ) as __dbt_sbq` — so a terminal
+/// `;` lands inside the parentheses and makes the statement invalid. dbt strips
+/// it at the same point (dbt-core#15779). The splitter only strips a body that
+/// holds exactly one statement: a genuine multi-statement body keeps its
+/// terminators and the warehouse still rejects it, rather than having the
+/// user's SQL rewritten. Python bodies are not SQL and pass through untouched.
+fn strip_body_terminator(
+    node_context: &mut BTreeMap<String, minijinja::Value>,
+    language: Option<&str>,
+    splitter: &dyn dbt_adapter::stmt_splitter::StmtSplitter,
+    adapter_type: dbt_adapter::AdapterType,
+) {
+    if language == Some("python") {
+        return;
+    }
+    let Some(sql) = node_context.get("sql").and_then(minijinja::Value::as_str) else {
+        return;
+    };
+    let body = splitter.strip_trailing_statement_terminator(sql, adapter_type);
+    if body.len() == sql.len() {
+        return;
+    }
+    let body = minijinja::Value::from(body.to_owned());
+    node_context.insert("sql".to_owned(), body.clone());
+    node_context.insert("compiled_code".to_owned(), body);
+}
+
 /// Move the node's compiled SQL to the artifact store, leaving a reference.
 ///
 /// The workflow accumulates every result, copies them into the checkpoint at
@@ -1154,6 +1184,17 @@ fn execute_node_body(
     let compiled_sql = node_context
         .get("sql")
         .and_then(|v| v.as_str().map(ToString::to_string));
+
+    // Taken after the SQL is recorded: the result keeps the body as written,
+    // and only the materialization sees it without its terminator.
+    if rt == NodeType::Model {
+        strip_body_terminator(
+            &mut node_context,
+            common.language.as_deref(),
+            render_env.adapter.engine().splitter(),
+            base.adapter,
+        );
+    }
 
     // Resolve against the adapter the node actually runs on: `base.adapter` is the
     // node's `+adapter` selection when it made one, and the run's default adapter

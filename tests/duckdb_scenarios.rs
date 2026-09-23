@@ -164,6 +164,26 @@ async fn a_materialized_node_records_the_relation_it_wrote() {
     );
 }
 
+/// A table materialization splices the body into `create table as ( ... )`, so
+/// a terminal `;` would land inside the parentheses. The materialization gets
+/// the body without it; the result keeps the SQL as the user wrote it.
+#[tokio::test]
+async fn a_model_body_ending_in_a_semicolon_still_materializes() {
+    let harness =
+        Harness::build(&[("m", "{{ config(materialized='table') }}\nselect 1 as id;\n")]).await;
+    let result = harness.run_ok("m").await;
+
+    assert_eq!(harness.query_scalar("select count(*) from m").await, "1");
+    assert!(
+        result
+            .compiled_code
+            .as_deref()
+            .is_some_and(|sql| sql.trim_end().ends_with(';')),
+        "the recorded SQL is the body as written: {:?}",
+        result.compiled_code
+    );
+}
+
 #[tokio::test]
 async fn passing_data_test_succeeds() {
     let harness = Harness::build_files(&[

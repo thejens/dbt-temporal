@@ -42,7 +42,8 @@ temporalio-macros = "1.0.0"
 # generate (their expansion names `::temporalio_workflow::*`).
 temporalio-workflow = "1.0.0"
 
-# dbt-fusion, developed in dbt-labs/dbt as dbt Core v2. Pinned to the commit the
+# dbt v2, the Rust rewrite of dbt (stable since v2.0.0), from dbt-labs/dbt. dbt
+# does not publish these crates, so they come from git. Pinned to the commit the
 # v2.0.5 release tag names: release tags are cut on release branches, so the
 # rev is not on `main`, and a tag is the one pin that names a shipped dbt.
 dbt-loader = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
@@ -65,7 +66,7 @@ dbt-telemetry = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02
 # the retry classifier reads that field directly for those paths.
 dbt-error = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
-# layer inserts a default so dbt-fusion's adapter code doesn't panic.
+# layer inserts a default so dbt's adapter code doesn't panic.
 dbt-tracing = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 dbt-auth = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 dbt-adbc = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
@@ -138,6 +139,8 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
+# Still pre-1.0: the core crate shipped as 0.9.0 alongside the SDK's 1.0.0. Dev-only,
+# for the ephemeral Temporal server the integration tests start.
 temporalio-sdk-core = { version = "0.9.0", features = ["ephemeral-server"] }
 # Replay fixtures are stored gzipped: the continue-as-new history is 2.4MB raw,
 # which both bloats the repo and trips the 500KB pre-commit size check.
@@ -173,11 +176,11 @@ todo = "deny"
 unimplemented = "deny"
 needless_pass_by_value = "deny"
 
-# Patches required to match dbt-fusion's dependency versions.
-# dbt-fusion uses forked arrow-rs and arrow-adbc.
+# Patches required to match dbt v2's dependency versions.
+# dbt v2 uses forked arrow-rs and arrow-adbc.
 # Without these patches, version conflicts prevent compilation.
 [patch.crates-io]
-# Forked arrow-rs (v56) used by dbt-fusion
+# Forked arrow-rs (v56) used by dbt v2
 arrow = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 arrow-arith = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 arrow-array = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
@@ -193,10 +196,10 @@ arrow-schema = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d
 arrow-select = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 arrow-string = { git = "https://github.com/sdf-labs/arrow-rs", rev = "e4924d7d6d07bb12ba6628e595f9f58c2c02c9a1" }
 
-# ring build.rs workaround (same as dbt-fusion)
+# ring build.rs workaround (same as dbt v2)
 ring = { git = "https://github.com/sdf-labs/ring.git", rev = "3c35ce0b7e1bd9fe83180b19eda21d302e0b5006" }
 
-# Forked datafusion (sdf/50) and sqlparser (sdf/0.58.0), re-introduced by dbt-fusion
+# Forked datafusion (sdf/50) and sqlparser (sdf/0.58.0), re-introduced by dbt v2
 # at the bb24b246 rev (previously on plain crates-io releases as of 37ba42bd).
 # Only datafusion-common/datafusion-expr/sqlparser are actually pulled into our
 # dependency graph — upstream's own patch table also lists the umbrella

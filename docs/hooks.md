@@ -7,7 +7,7 @@ dbt-temporal supports two distinct kinds of hooks:
 | **dbt project hooks** | `dbt_project.yml` | Jinja templates that render to SQL (or have side effects via `run_query`/`log`) | `on-run-start`, `on-run-end`, plus per-model `pre-hook` / `post-hook` |
 | **dbt-temporal lifecycle hooks** | `dbt_temporal.yml` (or workflow input) | Arbitrary Temporal child workflows (any language) | `pre_run`, `on_success`, `on_failure` |
 
-The two are complementary. dbt project hooks are evaluated by dbt-fusion's Jinja engine in the same context as your models — they share `target`, `env`, `execute`, macros, and the warehouse adapter. dbt-temporal lifecycle hooks fan out to child workflows and are how you wire dbt runs into the rest of your platform (notifications, catalog updates, conditional skipping, credential resolution).
+The two are complementary. dbt project hooks are evaluated by dbt v2's Jinja engine in the same context as your models — they share `target`, `env`, `execute`, macros, and the warehouse adapter. dbt-temporal lifecycle hooks fan out to child workflows and are how you wire dbt runs into the rest of your platform (notifications, catalog updates, conditional skipping, credential resolution).
 
 ---
 
@@ -22,7 +22,7 @@ Hooks defined in `dbt_project.yml`. These are standard dbt hooks and behave like
 | `pre-hook` | model `config(pre_hook=…)` or `dbt_project.yml` `+pre-hook` | Inside each model's materialization, before the main SQL | full model context |
 | `post-hook` | model `config(post_hook=…)` or `dbt_project.yml` `+post-hook` | Inside each model's materialization, after the main SQL | full model context |
 
-**`pre-hook` / `post-hook`** are handled transparently by dbt-fusion's materialization templates — they're called from inside the materialization macro via `{{ run_hooks(pre_hooks) }}` / `{{ run_hooks(post_hooks) }}`. No dbt-temporal-specific configuration is required.
+**`pre-hook` / `post-hook`** are handled transparently by dbt v2's materialization templates — they're called from inside the materialization macro via `{{ run_hooks(pre_hooks) }}` / `{{ run_hooks(post_hooks) }}`. No dbt-temporal-specific configuration is required.
 
 **`on-run-start` / `on-run-end`** are executed as a dedicated Temporal activity (`run_project_hooks`) once per phase, after planning and after artifact storage respectively. The activity:
 
@@ -62,7 +62,7 @@ on-run-end:
 {% endmacro %}
 ```
 
-Hooks from any loaded package are merged into the same lists by dbt-fusion's resolver — no extra configuration is needed for package-level hooks.
+Hooks from any loaded package are merged into the same lists by dbt v2's resolver — no extra configuration is needed for package-level hooks.
 
 ---
 

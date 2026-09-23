@@ -3,12 +3,17 @@
 dbt-temporal depends on two major libraries. Their licenses are summarized below
 as of this writing — always check the linked sources for the current terms.
 
-## dbt Core v2 (Fusion engine)
+## dbt v2
 
-The [dbt Fusion engine](https://github.com/dbt-labs/dbt-core), developed in the
-dbt-core repository as dbt Core v2, is **Apache 2.0**. The workspace license
-applies to every crate dbt-temporal consumes, including the bundled `minijinja`
-fork.
+[dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite of dbt developed in
+the `dbt-labs/dbt` repository (formerly `dbt-labs/dbt-core`), is **Apache 2.0**
+as of the pinned `v2.0.5` release. The workspace license applies to every crate
+dbt-temporal consumes, including the bundled `minijinja` fork.
+
+dbt Labs also ships its own distribution of dbt v2 with product-specific
+additions under a separate product license (the
+[dbt Fusion engine license agreement](https://www.getdbt.com/dbt-fusion-engine-license-agreement)).
+dbt-temporal does not use that distribution — only the Apache 2.0 source.
 
 Earlier Fusion preview releases in the separate
 [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) repository used a split
@@ -17,7 +22,7 @@ software as a hosted service. dbt-temporal no longer depends on that repository,
 and none of the crates it links against are under the Elastic License — the
 restriction does not apply to dbt-temporal binaries.
 
-- License file: [dbt-core LICENSE](https://github.com/dbt-labs/dbt-core/blob/main/LICENSE)
+- License file: [dbt LICENSE](https://github.com/dbt-labs/dbt/blob/main/LICENSE)
 
 ## Temporal Rust SDK
 
@@ -32,7 +37,7 @@ The remaining dependencies (Arrow, tokio, serde, etc.) are standard open-source
 Rust crates under permissive licenses (MIT and/or Apache 2.0). The project also
 pins forks of arrow-rs and ring maintained by
 [sdf-labs](https://github.com/sdf-labs) and a fork of arrow-adbc maintained by
-[dbt-labs](https://github.com/dbt-labs) for Fusion-engine compatibility — the
+[dbt-labs](https://github.com/dbt-labs) for dbt v2 compatibility — the
 forks retain the same licenses as their upstream projects.
 
 See [Cargo.toml](Cargo.toml) for the full dependency list and source URLs.

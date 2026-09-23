@@ -342,7 +342,7 @@ Each dbt node uses the `summary` field on the Temporal activity to display a des
 
 ### OpenTelemetry Export (dbt traces & logs)
 
-`DBT_EXPORT_TO_OTLP=1` replaces the default console-logging stack with dbt-fusion's own telemetry pipeline: structured dbt events (adapter `QueryExecuted`, connection-pool waits, …) export as OTEL traces and logs over OTLP/HTTP, alongside console output.
+`DBT_EXPORT_TO_OTLP=1` replaces the default console-logging stack with dbt v2's own telemetry pipeline: structured dbt events (adapter `QueryExecuted`, connection-pool waits, …) export as OTEL traces and logs over OTLP/HTTP, alongside console output.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

@@ -1,6 +1,6 @@
-# dbt-fusion Workarounds
+# dbt v2 Workarounds
 
-dbt-temporal uses the dbt Core v2 Rust crates (formerly dbt-fusion, now developed in [dbt-labs/dbt-core](https://github.com/dbt-labs/dbt-core)) as its rendering and execution engine. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
+dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.5` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
 ## 1. `ResultStore` not injectable into context builders — **resolved upstream**
 
@@ -104,7 +104,7 @@ both produced the same SIGSEGV, so re-run the script if you see it again):
 
 ## 4. Relation cache goes stale in a long-lived worker
 
-dbt-fusion's `RelationCache` is built for the CLI's one-shot lifetime. The
+dbt v2's `RelationCache` is built for the CLI's one-shot lifetime. The
 first existence check lists the whole schema and marks that schema
 **complete**; nothing adds to it when a materialization subsequently creates a
 relation. As of v2.0.5 `adapter.drop_relation` and `adapter.rename_relation`
@@ -221,7 +221,7 @@ data solely in the multi-project case.
 | Workaround | Description |
 |---|---|
 | **dbt's data layer on every tracing stack** | dbt code reads span start info and `TelemetryAttributes` out of span extensions and panics when either is missing; the types are private to `dbt-tracing`, so only its own `TelemetryDataLayer` can put them there. [`tracing_setup`](../src/tracing_setup.rs) wires that layer with no middlewares and no consumers into the non-OTLP stack, where it records the state and exports nothing. Any process that renders dbt Jinja — the worker, every integration test — needs it in its subscriber. |
-| **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
+| **Forked arrow-rs and ring** | dbt v2 uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
 ## Candidate upstream issues
@@ -361,7 +361,7 @@ pin before filing (upstream cleanup may have already addressed some of these).
 - **`get_fixture_sql(rows, column_name_to_data_types)` emits broken SQL**
   (`as ` with an empty column name) when `column_name_to_data_types` is passed
   rather than `none`.
-- **`DbtManifest` does not round-trip through `serde_json`** — dbt-fusion's
+- **`DbtManifest` does not round-trip through `serde_json`** — dbt v2's
   own emitted `manifest.json` fails against the derived `Deserialize` impl
   (demands a literal `__warehouse_specific_config__` field the serializer
   doesn't always produce). Requires the `typed_struct_from_json_str`

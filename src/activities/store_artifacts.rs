@@ -299,7 +299,7 @@ async fn load_compiled_sql(
 /// pinned crates exports its version as a constant (each stamps its own
 /// `CARGO_PKG_VERSION` where it needs one), so it is written here and moves
 /// with the pin; `dbt_version_matches_the_pinned_crates` fails if it drifts.
-const DBT_VERSION: &str = "2.0.0-rc.1";
+const DBT_VERSION: &str = "2.0.5";
 
 /// Schema the artifact claims to follow. dbt-fusion writes v6.
 const RUN_RESULTS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/run-results/v6.json";

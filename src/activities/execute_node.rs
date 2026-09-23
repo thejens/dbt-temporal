@@ -893,6 +893,7 @@ fn execute_node_body(
         let mb_source = dbt_jinja_utils::phases::SourceFunction::new_with_microbatch_context(
             Arc::clone(&state.resolver_state.node_resolver),
             common.package_name.clone(),
+            Arc::clone(&state.resolver_state.runtime_config),
             microbatch_ctx,
         );
         node_context.insert("ref".to_string(), minijinja::Value::from_object(mb_ref));

@@ -42,33 +42,35 @@ temporalio-macros = "1.0.0"
 # generate (their expansion names `::temporalio_workflow::*`).
 temporalio-workflow = "1.0.0"
 
-# dbt-fusion, now developed in the dbt-core repo as dbt Core v2 (pinned to main, 2026-09-06)
-dbt-loader = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+# dbt-fusion, developed in dbt-labs/dbt as dbt Core v2. Pinned to the commit the
+# v2.0.5 release tag names: release tags are cut on release branches, so the
+# rev is not on `main`, and a tag is the one pin that names a shipped dbt.
+dbt-loader = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # Private-package resolution, required by `dbt_loader::load`. The crate's lib
 # name is `fs_deps`, so imports read `fs_deps::private_package::*`.
-dbt-deps = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-parser = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+dbt-deps = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-parser = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # The profiles.yml resolver dbt-loader itself uses. Needed directly so that
 # per-workflow env-override rebuilds read a target the same way the startup
 # load did, including the multi-adapter connection-list shape.
-dbt-profile = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-schemas = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-adapter = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-common = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-telemetry = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+dbt-profile = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-schemas = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-jinja-utils = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-adapter = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-common = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-telemetry = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # FsError/ErrorCode: dbt's own transient/permanent error taxonomy. Some Jinja
 # adapter functions (e.g. run_query) wrap the underlying AdapterError in an
 # FsError, discarding it as a downcastable source but keeping its ErrorCode —
 # the retry classifier reads that field directly for those paths.
-dbt-error = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+dbt-error = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # Telemetry span-attribute types (TelemetryAttributes) live here; the compat
 # layer inserts a default so dbt-fusion's adapter code doesn't panic.
-dbt-tracing = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-auth = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-adbc = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-agate = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+dbt-tracing = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-auth = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-adbc = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-agate = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-csv = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # Project checks query the project's own metadata, never the warehouse, so the
 # worker has to reproduce the two artifacts dbt puts between a resolved project
 # and its check gate. `dbt-metadata` serialises the resolved state into parse
@@ -77,9 +79,9 @@ dbt-csv = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb
 # are a shared contract: `info_schema()` — already in the tree via
 # dbt-jinja-utils — renders check SQL against exactly those names, so a
 # hand-rolled equivalent would diverge silently rather than fail to compile.
-dbt-metadata = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-dbt-index-core = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
-minijinja = { git = "https://github.com/dbt-labs/dbt-core", rev = "6f725fbec78cffb1e8086f111592589c60b543d5" }
+dbt-metadata = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+dbt-index-core = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+minijinja = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 dbt-yaml = "0.9.6"
 
 # Standard
@@ -104,7 +106,7 @@ filetime = "0.2"
 # Selector value matching. dbt runs every selector value through this crate's
 # `Pattern`, so what a selector matches is defined by it — using anything else,
 # including a faithful reimplementation, is a divergence waiting to happen.
-# Pinned to the same version dbt-core's workspace uses.
+# Pinned to the same version dbt's workspace uses.
 glob = "0.3.2"
 arrow-select = "56"
 # Unit test result comparison (patched to the sdf-labs fork like all arrow crates).

@@ -64,6 +64,12 @@ models:
       +adapter: bigquery
 ```
 
+dbt treats the `+adapter` node config as experimental and rejects it at parse
+time unless the worker's environment sets
+`DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER=true`. A project using it fails to load
+without that variable, and the error names it. Declaring several adapters in a
+target needs no opt-in; only selecting one per node does.
+
 Nodes that select no adapter run on the target's default, so single-adapter
 projects are unaffected. A node naming an adapter the target does not declare
 fails as a configuration error rather than falling back to the default — the

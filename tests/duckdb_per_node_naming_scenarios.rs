@@ -60,8 +60,23 @@ async fn the_naming_macro_is_evaluated_against_each_node() {
     }
 
     // The tag decided where each one went…
-    assert_eq!(harness.query_scalar("select id from workflow42.plain"), "1");
-    assert_eq!(harness.query_scalar("select id from mart_workflow42.marty"), "2");
+    assert_eq!(
+        harness
+            .query_scalar("select id from workflow42.plain")
+            .await,
+        "1"
+    );
+    assert_eq!(
+        harness
+            .query_scalar("select id from mart_workflow42.marty")
+            .await,
+        "2"
+    );
     // …and the downstream's compiled `ref()`s followed both.
-    assert_eq!(harness.query_scalar("select id from workflow42.joined"), "3");
+    assert_eq!(
+        harness
+            .query_scalar("select id from workflow42.joined")
+            .await,
+        "3"
+    );
 }

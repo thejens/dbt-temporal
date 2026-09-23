@@ -82,7 +82,7 @@ async fn a_node_without_an_adapter_selection_runs_on_the_target_default() {
     let result = harness.run("plain").await.expect("plain model should run");
     assert_eq!(result.status, NodeStatus::Success, "{result:?}");
     // Proof it reached the DuckDB warehouse rather than merely reporting success.
-    assert_eq!(harness.query_scalar("select answer from main.plain"), "42");
+    assert_eq!(harness.query_scalar("select answer from main.plain").await, "42");
 }
 
 /// A node that selects the non-default adapter is routed to *that* engine. The
@@ -116,7 +116,8 @@ async fn a_node_selecting_the_non_default_adapter_is_routed_to_its_engine() {
     // And nothing was written to the DuckDB warehouse under that name.
     assert_eq!(
         harness
-            .query_scalar("select count(*) from duckdb_tables() where table_name = 'on_postgres'"),
+            .query_scalar("select count(*) from duckdb_tables() where table_name = 'on_postgres'")
+            .await,
         "0",
         "a node routed to postgres must leave no relation on the default adapter"
     );

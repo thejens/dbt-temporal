@@ -78,7 +78,7 @@ pub async fn execute_node_outer(
             }
             // Never resolves — keeps the UI's last-heartbeat fresh and lets the
             // server's heartbeat_timeout reschedule on a fresh worker if this
-            // one dies. The node's own work runs on a blocking thread, so this
+            // one dies. The node's own work runs on the dbt pool, so this
             // task is free to keep heartbeating while a long query runs.
             never = heartbeat::heartbeat_loop(&ctx) => match never {},
         }
@@ -657,24 +657,17 @@ pub async fn execute_node_cancellable(
 
     // The one thing here that needs the async runtime: the deferred manifest
     // comes from the artifact store. Everything after it is synchronous, and
-    // runs on a blocking thread so this task stays free to heartbeat and to
+    // runs on the dbt pool so this task stays free to heartbeat and to
     // notice cancellation.
     let defer_nodes =
         load_defer_nodes(activities, &state, input.defer_manifest_ref.as_deref()).await?;
 
     let token = cancellation.clone();
-    // dbt's telemetry data layer asserts that every span it sees descends from
-    // an `Invocation` root, and a blocking thread starts with no current span
-    // — so the node span has to be re-entered on the far side of the handoff,
-    // or the first dbt macro to open a span panics the thread.
-    let span = tracing::Span::current();
     let invocation_id = input.invocation_id.clone();
-    let mut result = tokio::task::spawn_blocking(move || {
-        let _entered = span.enter();
+    let mut result = crate::dbt_pool::run(move || {
         execute_node_body(&state, &input, defer_nodes.as_deref(), &token)
     })
-    .await
-    .map_err(|e| anyhow::anyhow!("node execution task failed: {e}"))??;
+    .await??;
 
     spill_compiled_sql(activities, &invocation_id, &mut result).await?;
     Ok(result)

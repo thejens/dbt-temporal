@@ -63,7 +63,12 @@ async fn custom_generate_schema_name_macro_is_re_executed_per_workflow() {
     // Asserting the relation, not just success: a run that quietly fell back
     // to dbt's built-in macro also succeeds — it just writes somewhere else.
     assert_eq!(result.relation_name.as_deref(), Some("spike.custom_workflow42.plain"));
-    assert_eq!(harness.query_scalar("select id from custom_workflow42.plain"), "1");
+    assert_eq!(
+        harness
+            .query_scalar("select id from custom_workflow42.plain")
+            .await,
+        "1"
+    );
 }
 
 #[tokio::test]

@@ -28,6 +28,7 @@ use crate::activities::DbtActivities;
 use crate::activities::node_telemetry::invocation_span;
 use crate::types::{CheckResult, CheckStatus, ProjectChecksInput, ProjectChecksOutput};
 use crate::worker::project_checks::ProjectChecks;
+use crate::worker_state::WorkerState;
 
 use self::evaluate::{evaluate_batch, selection_filter_for, zero_rows_is_vacuous};
 use self::index::IndexReader;
@@ -43,18 +44,24 @@ const MAX_PREVIEW_ROWS: usize = 5;
 /// "could not be evaluated" included, is reported in the output rather than
 /// raised: the workflow gates on `failed`, so an unevaluable check has to reach
 /// it as data instead of as an activity failure that retries.
-pub fn run_project_checks_inner(
+pub async fn run_project_checks_inner(
     activities: &DbtActivities,
-    input: &ProjectChecksInput,
+    input: ProjectChecksInput,
 ) -> Result<ProjectChecksOutput, anyhow::Error> {
+    let state = Arc::clone(activities.registry.get(Some(input.project.as_str()))?);
+    // Checks query through a DuckDB adapter connection, which dbt only opens on
+    // its own pool.
+    crate::dbt_pool::run(move || run_project_checks_body(&state, &input)).await
+}
+
+fn run_project_checks_body(state: &WorkerState, input: &ProjectChecksInput) -> ProjectChecksOutput {
     // Reading the index runs dbt code, and dbt's data layer asserts that every
     // dbt span sits under an `Invocation` root. `dbt check` is what dbt calls
     // this command, so that is what the span reports.
     let _invocation = invocation_span(&input.invocation_id, "dbt check").entered();
 
-    let state = activities.registry.get(Some(input.project.as_str()))?;
     let Some(checks) = state.project_checks.as_ref() else {
-        return Ok(ProjectChecksOutput::default());
+        return ProjectChecksOutput::default();
     };
     let scope: Option<BTreeSet<String>> = input
         .scope
@@ -69,7 +76,7 @@ pub fn run_project_checks_inner(
         failed = output.failed,
         "project checks evaluated"
     );
-    Ok(output)
+    output
 }
 
 /// Evaluate every check against the index, or report all of them unevaluable

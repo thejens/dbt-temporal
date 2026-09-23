@@ -2935,6 +2935,7 @@ dependencies = [
  "dbt-metadata",
  "dbt-parser",
  "dbt-profile",
+ "dbt-runtime",
  "dbt-schemas",
  "dbt-telemetry",
  "dbt-tracing",

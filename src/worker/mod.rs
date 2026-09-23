@@ -280,6 +280,11 @@ fn resolve_health_path(
 // future_not_send: Temporal SDK Worker is !Send by design.
 // large_futures: build_worker returns a large future from SDK initialization.
 pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
+    // Sized before the worker polls, so the first activity already sees the cap.
+    crate::dbt_pool::set_capacity(
+        std::num::NonZeroUsize::new(config.worker_tuning.max_activity_slots())
+            .unwrap_or(std::num::NonZeroUsize::MIN),
+    );
     let mut worker = build_worker(&config).await?;
 
     // Start health file tracker if configured.

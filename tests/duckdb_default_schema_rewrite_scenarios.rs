@@ -62,7 +62,12 @@ async fn default_macro_rewrites_a_custom_suffixed_upstream_schema() {
         .await
         .unwrap();
     assert_eq!(downstream.status, dbt_temporal::types::NodeStatus::Success);
-    assert_eq!(harness.query_scalar("select id from workflow42.downstream"), "7");
+    assert_eq!(
+        harness
+            .query_scalar("select id from workflow42.downstream")
+            .await,
+        "7"
+    );
 }
 
 /// A source names a table dbt did not create. Rewriting its schema alongside

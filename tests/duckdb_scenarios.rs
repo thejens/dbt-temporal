@@ -17,12 +17,12 @@ use dbt_temporal::error::DbtTemporalError;
 
 /// Isolates "does the ADBC driver load" from the dbt path — the minimal
 /// feasibility check for the embedded engine.
-#[test]
-fn duckdb_driver_loads_and_runs_queries() {
+#[tokio::test]
+async fn duckdb_driver_loads_and_runs_queries() {
     let engine = raw_engine();
-    assert!(raw_query_ok(&engine, "select 1 as id"), "select 1 should run");
+    assert!(raw_query_ok(&engine, "select 1 as id").await, "select 1 should run");
     assert!(
-        !raw_query_ok(&engine, "select * from a_table_that_does_not_exist"),
+        !raw_query_ok(&engine, "select * from a_table_that_does_not_exist").await,
         "missing table should fail"
     );
 }
@@ -710,7 +710,7 @@ async fn function_bodies_reach_the_warehouse_through_model_compiled_code() {
     // 41 + 1. A missing body could not produce this.
     harness.run_ok("uses_fn").await;
     assert_eq!(
-        harness.query_scalar("select answer from uses_fn"),
+        harness.query_scalar("select answer from uses_fn").await,
         "42",
         "the function body must have been compiled into the macro"
     );

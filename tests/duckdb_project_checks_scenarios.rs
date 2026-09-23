@@ -36,7 +36,7 @@ async fn a_project_without_checks_has_no_index_and_no_verdicts() {
         harness.state().project_checks.is_none(),
         "a project with no checks must not pay for an index"
     );
-    let output = harness.project_checks(None);
+    let output = harness.project_checks(None).await;
     assert!(output.results.is_empty());
     assert_eq!(output.failed, 0);
 }
@@ -56,7 +56,7 @@ async fn a_satisfied_check_passes_against_a_real_index() {
         ),
     ])
     .await;
-    let output = harness.project_checks(None);
+    let output = harness.project_checks(None).await;
     assert_eq!(output.failed, 0, "{:?}", output.results);
     let result = verdict(&output, "no_seeds");
     assert_eq!(result.status, CheckStatus::Pass);
@@ -77,7 +77,7 @@ async fn a_violated_check_fails_the_gate_and_names_the_offending_nodes() {
         ),
     ])
     .await;
-    let output = harness.project_checks(None);
+    let output = harness.project_checks(None).await;
     assert_eq!(output.failed, 1, "{:?}", output.results);
     let result = verdict(&output, "every_model_is_documented");
     assert_eq!(result.status, CheckStatus::Fail);
@@ -102,7 +102,7 @@ async fn a_warn_severity_check_reports_violations_without_gating() {
         ),
     ])
     .await;
-    let output = harness.project_checks(None);
+    let output = harness.project_checks(None).await;
     assert_eq!(output.failed, 0, "warn must not stop the run: {:?}", output.results);
     let result = verdict(&output, "advisory");
     assert_eq!(result.status, CheckStatus::Warn);
@@ -123,7 +123,7 @@ async fn a_check_that_cannot_execute_is_an_error_that_stops_the_run() {
         ),
     ])
     .await;
-    let output = harness.project_checks(None);
+    let output = harness.project_checks(None).await;
     assert_eq!(output.failed, 1, "{:?}", output.results);
     let result = verdict(&output, "broken");
     assert_eq!(result.status, CheckStatus::Error);
@@ -141,7 +141,7 @@ async fn the_raw_index_tables_are_not_reachable_from_a_check() {
         ("checks/reaches_past_the_views.sql", "select * from dbt.nodes"),
     ])
     .await;
-    let result = &harness.project_checks(None).results[0];
+    let result = &harness.project_checks(None).await.results[0];
     assert_eq!(result.status, CheckStatus::Error, "`dbt.nodes` must not resolve: {result:?}");
 }
 
@@ -161,11 +161,13 @@ async fn a_selector_scopes_violations_to_the_selected_nodes() {
     ])
     .await;
 
-    let unscoped = harness.project_checks(None);
+    let unscoped = harness.project_checks(None).await;
     assert_eq!(unscoped.failed, 1);
     assert_eq!(verdict(&unscoped, "every_model_is_documented").violations, Some(2));
 
-    let scoped = harness.project_checks(Some(&[&format!("model.{PROJECT}.kept")]));
+    let scoped = harness
+        .project_checks(Some(&[&format!("model.{PROJECT}.kept")]))
+        .await;
     assert_eq!(verdict(&scoped, "every_model_is_documented").violations, Some(1));
 }
 
@@ -185,7 +187,9 @@ async fn a_scope_the_check_cannot_report_on_is_skipped_not_passed() {
         ),
     ])
     .await;
-    let output = harness.project_checks(Some(&[&format!("seed.{PROJECT}.s")]));
+    let output = harness
+        .project_checks(Some(&[&format!("seed.{PROJECT}.s")]))
+        .await;
     let result = verdict(&output, "every_model_is_documented");
     assert_eq!(result.status, CheckStatus::Skipped);
     assert_eq!(
@@ -209,7 +213,9 @@ async fn a_check_opting_out_of_scoping_still_sees_the_whole_project() {
         ),
     ])
     .await;
-    let output = harness.project_checks(Some(&[&format!("model.{PROJECT}.a")]));
+    let output = harness
+        .project_checks(Some(&[&format!("model.{PROJECT}.a")]))
+        .await;
     let result = verdict(&output, "not_too_many_models");
     assert_eq!(
         result.status,
@@ -235,5 +241,5 @@ async fn a_disabled_check_produces_no_verdict() {
         harness.state().project_checks.is_none(),
         "a project whose only check is disabled declares no gate"
     );
-    assert!(harness.project_checks(None).results.is_empty());
+    assert!(harness.project_checks(None).await.results.is_empty());
 }

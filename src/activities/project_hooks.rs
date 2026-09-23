@@ -26,6 +26,7 @@ use super::heartbeat;
 use super::node_helpers::json_to_minijinja;
 use super::render_env;
 use super::retry::{self, RetryDecision};
+use crate::worker_state::WorkerState;
 
 /// Whether a failed hook should be handed back to Temporal as retryable.
 ///
@@ -49,8 +50,8 @@ fn hook_retry_decision(
 ///
 /// Hook errors are non-retryable unless the project opted this phase in via
 /// `retry.project_hooks` — re-running a hook repeats its side effects, and only
-/// the author knows whether that is safe. Cancellation is honoured so a
-/// workflow termination does not leave hook SQL running on a doomed worker.
+/// the author knows whether that is safe. A cancelled activity reports
+/// cancellation promptly, but the hook SQL already sent is not interrupted.
 pub async fn run_project_hooks_outer(
     activities: &DbtActivities,
     ctx: ActivityContext,
@@ -98,14 +99,26 @@ pub async fn run_project_hooks_outer(
 /// `run_project_hooks_outer` wraps this with cancellation and heartbeat. Also
 /// the entry point for integration tests that drive hooks against an embedded
 /// engine (e.g. the DuckDB scenario harness).
-#[allow(clippy::too_many_lines, clippy::unused_async)]
-// async required by the activity signature; rendering itself is sync.
 pub async fn run_project_hooks_inner(
     activities: &DbtActivities,
     input: ProjectHooksInput,
 ) -> Result<(), anyhow::Error> {
-    let state = activities.registry.get(Some(&input.project))?;
+    let state = Arc::clone(activities.registry.get(Some(&input.project))?);
+    // Hook SQL runs on the dbt pool, so this task stays free to heartbeat and
+    // to notice cancellation. A cancelled activity does not stop the hook: the
+    // SQL already sent runs to completion on its pool thread, and only the
+    // result is dropped.
+    crate::dbt_pool::run(move || run_project_hooks_body(&state, &input)).await?
+}
 
+/// The synchronous half of [`run_project_hooks_inner`]: render and run each
+/// hook in order.
+#[allow(clippy::too_many_lines)]
+// Sequential render-then-execute over the phase's hooks.
+fn run_project_hooks_body(
+    state: &WorkerState,
+    input: &ProjectHooksInput,
+) -> Result<(), anyhow::Error> {
     // Hooks render Jinja and run SQL, so they need an `Invocation` root span for
     // the same reason node execution does. Sharing the run's invocation id puts
     // them in the same trace as the nodes they bracket.

@@ -1,5 +1,6 @@
 use anyhow::Context;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
@@ -223,30 +224,38 @@ async fn generate_and_store_catalog(
     input: &StoreArtifactsInput,
     store: &dyn ArtifactStore,
 ) -> Result<String, anyhow::Error> {
-    let state = activities
-        .registry
-        .get(input.project.as_deref())
-        .context("resolving project for catalog generation")?;
-    // Catalog generation queries the warehouse through the adapter, which emits
-    // dbt telemetry spans; those need an `Invocation` root above them. Scoped to
-    // the synchronous build so no span guard is held across the store `await`.
-    let catalog_json =
-        super::node_telemetry::invocation_span(&input.invocation_id, "dbt docs generate")
-            .in_scope(|| {
-                super::catalog::build_catalog_json(
-                    state,
-                    &input.node_results,
-                    &input.invocation_id,
-                    &crate::activities::render_env::RenderOverrides {
-                        cancellation: &state.cancellation_source.token(),
-                        env: &input.env,
-                        target: input.target.as_deref(),
-                        // Neither reaches a `get_columns_in_relation` call.
-                        vars: &BTreeMap::new(),
-                        full_refresh: false,
-                    },
-                )
-            })?;
+    let state = Arc::clone(
+        activities
+            .registry
+            .get(input.project.as_deref())
+            .context("resolving project for catalog generation")?,
+    );
+    // The catalog queries the warehouse, so it is built on the dbt pool, which
+    // needs owned inputs. Copying the results costs one allocation per run.
+    let node_results = input.node_results.clone();
+    let invocation_id = input.invocation_id.clone();
+    let env = input.env.clone();
+    let target = input.target.clone();
+    let catalog_json = crate::dbt_pool::run(move || {
+        // Catalog generation queries the warehouse through the adapter, which
+        // emits dbt telemetry spans; those need an `Invocation` root above them.
+        super::node_telemetry::invocation_span(&invocation_id, "dbt docs generate").in_scope(|| {
+            super::catalog::build_catalog_json(
+                &state,
+                &node_results,
+                &invocation_id,
+                &crate::activities::render_env::RenderOverrides {
+                    cancellation: &state.cancellation_source.token(),
+                    env: &env,
+                    target: target.as_deref(),
+                    // Neither reaches a `get_columns_in_relation` call.
+                    vars: &BTreeMap::new(),
+                    full_refresh: false,
+                },
+            )
+        })
+    })
+    .await??;
     store
         .store(&input.invocation_id, "catalog.json", catalog_json.into_bytes().into())
         .await

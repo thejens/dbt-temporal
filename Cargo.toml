@@ -71,6 +71,9 @@ dbt-auth = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8bab
 dbt-adbc = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 dbt-agate = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 dbt-csv = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
+# dbt's blocking pool. Warehouse connections live in thread-locals of its
+# workers and may only be opened there; see src/dbt_pool.rs.
+dbt-runtime = { git = "https://github.com/dbt-labs/dbt", rev = "a3bdd96bf62f02c8babb060a79f32de6998c235a" }
 # Project checks query the project's own metadata, never the warehouse, so the
 # worker has to reproduce the two artifacts dbt puts between a resolved project
 # and its check gate. `dbt-metadata` serialises the resolved state into parse

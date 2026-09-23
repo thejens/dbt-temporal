@@ -1,10 +1,9 @@
 //! The project-check gate, end to end against a real project.
 //!
-//! Everything a check depends on is built for real here — the parse epochs, the
-//! index ingested from them, and the DuckDB views over that index — because the
-//! failure mode this feature has to avoid is a check that reads nothing and
-//! reports a confident pass. A mocked index would reproduce that bug rather
-//! than catch it.
+//! Everything a check depends on is built for real here — the parse epochs and
+//! the DuckDB views dbt defines over them — because the failure mode this
+//! feature has to avoid is a check that reads nothing and reports a confident
+//! pass. Mocked metadata would reproduce that bug rather than catch it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::large_futures)]
 
@@ -30,11 +29,11 @@ fn verdict<'a>(
 }
 
 #[tokio::test]
-async fn a_project_without_checks_has_no_index_and_no_verdicts() {
+async fn a_project_without_checks_writes_no_metadata_and_has_no_verdicts() {
     let harness = Harness::build(&[("m", "select 1 as id")]).await;
     assert!(
         harness.state().project_checks.is_none(),
-        "a project with no checks must not pay for an index"
+        "a project with no checks must not pay for the metadata"
     );
     let output = harness.project_checks(None).await;
     assert!(output.results.is_empty());
@@ -42,11 +41,11 @@ async fn a_project_without_checks_has_no_index_and_no_verdicts() {
 }
 
 /// The load-bearing case: a check that finds nothing wrong must have actually
-/// read the index. `dbt.models` is a parse-safe view over the index parquet, so
-/// a passing verdict here proves the whole pipeline — epochs, ingest, views —
+/// read the metadata. `dbt.models` is a parse-safe view over the parse epochs,
+/// so a passing verdict here proves the whole pipeline — epochs, views —
 /// produced something queryable.
 #[tokio::test]
-async fn a_satisfied_check_passes_against_a_real_index() {
+async fn a_satisfied_check_passes_against_real_metadata() {
     let harness = Harness::build_files(&[
         ("dbt_project.yml", PROJECT_YML),
         ("models/m.sql", "select 1 as id"),
@@ -63,7 +62,7 @@ async fn a_satisfied_check_passes_against_a_real_index() {
     assert_eq!(result.violations, Some(0));
 }
 
-/// The index has to hold the project's actual nodes, not an empty shell — a
+/// The metadata has to hold the project's actual nodes, not an empty shell — a
 /// check whose rows come back names the models this project declared.
 #[tokio::test]
 async fn a_violated_check_fails_the_gate_and_names_the_offending_nodes() {
@@ -130,11 +129,11 @@ async fn a_check_that_cannot_execute_is_an_error_that_stops_the_run() {
     assert_eq!(result.violations, None, "nothing was counted, so nothing is reported");
 }
 
-/// `dbt_internal` holds the index's raw tables, whose columns stay empty until
-/// compile. Reaching one has to fail to bind rather than return zero rows,
-/// which a check would report as a pass.
+/// Only dbt's parse-safe views are published. A `dbt` table outside them has
+/// columns that stay empty until compile, so reaching one has to fail to bind
+/// rather than return zero rows, which a check would report as a pass.
 #[tokio::test]
-async fn the_raw_index_tables_are_not_reachable_from_a_check() {
+async fn a_table_outside_the_parse_safe_views_is_not_reachable_from_a_check() {
     let harness = Harness::build_files(&[
         ("dbt_project.yml", PROJECT_YML),
         ("models/m.sql", "select 1 as id"),

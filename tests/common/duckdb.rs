@@ -463,7 +463,7 @@ impl Harness {
         result
     }
 
-    /// Evaluate the project's checks against the index built at startup.
+    /// Evaluate the project's checks against the metadata written at startup.
     ///
     /// `scope` is the run's selected node set, or `None` when no selector
     /// narrowed the run — which is what decides whether zero rows is a pass or

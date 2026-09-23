@@ -280,6 +280,11 @@ fn resolve_health_path(
 // future_not_send: Temporal SDK Worker is !Send by design.
 // large_futures: build_worker returns a large future from SDK initialization.
 pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
+    // Sized before the worker polls, so the first activity already sees the cap.
+    crate::dbt_pool::set_capacity(
+        std::num::NonZeroUsize::new(config.worker_tuning.max_activity_slots())
+            .unwrap_or(std::num::NonZeroUsize::MIN),
+    );
     let mut worker = build_worker(&config).await?;
 
     // Start health file tracker if configured.
@@ -463,16 +468,16 @@ async fn initialize_project_inner(
         "SQL caches populated"
     );
 
-    // Build the project-check index before the resolve output goes: the epochs
+    // Write the project-check metadata before the resolve output goes: the epochs
     // are written from the in-memory resolved state into a directory this
     // worker owns, so the two are independent, but keeping them adjacent means
     // one place decides what survives the parse.
     //
     // A failure here is fatal rather than degraded. The alternative is a worker
-    // that starts with no index and reports every check as unevaluable on every
+    // that starts with no metadata and reports every check as unevaluable on every
     // run — a gate that never passes is worse than one that never starts.
     let project_checks = project_checks::build(&io, &dbt_state, &resolver_state)
-        .context("building the project-check index")?;
+        .context("writing the project-check metadata")?;
 
     // Clean up the resolve output — everything is in memory now.
     if let Err(e) = std::fs::remove_dir_all(&out_dir) {

@@ -187,12 +187,12 @@ The project directory (`DBT_PROJECT_DIRS`) is **never written to** — not even 
 
 ### Writable paths
 
-**Always required** (cannot be disabled — dbt-fusion engine needs filesystem paths):
+**Always required** (cannot be disabled — dbt v2 needs filesystem paths):
 
 | Path | Lifetime | Size | What |
 |------|----------|------|------|
-| `/tmp/dbtt-target-*` | Startup only — deleted after caches are populated | ~1 MB typical | dbt-fusion resolve output. Read into memory, then removed. |
-| `/tmp/...` (per-activity) | Seconds — auto-deleted when each activity completes | < 100 KB per activity | Ephemeral dir for dbt-fusion's WriteConfig output. |
+| `/tmp/dbtt-target-*` | Startup only — deleted after caches are populated | ~1 MB typical | dbt v2 resolve output. Read into memory, then removed. |
+| `/tmp/...` (per-activity) | Seconds — auto-deleted when each activity completes | < 100 KB per activity | Ephemeral dir for dbt v2's WriteConfig output. |
 
 **Optional** (only when the corresponding feature is enabled):
 
@@ -214,7 +214,7 @@ All writable paths are under `/tmp`. Nothing accumulates in normal operation —
 
 ### Summary
 
-A writable `/tmp` is the only requirement in all modes. The project directory is always read-only. A fully read-only filesystem (including `/tmp`) is not possible — the dbt-fusion engine requires filesystem paths for its resolve step and per-activity WriteConfig output. However, nothing persists in `/tmp` between restarts, and nothing accumulates during normal operation. A small `emptyDir` (or tmpfs) is sufficient.
+A writable `/tmp` is the only requirement in all modes. The project directory is always read-only. A fully read-only filesystem (including `/tmp`) is not possible — dbt v2 requires filesystem paths for its resolve step and per-activity WriteConfig output. However, nothing persists in `/tmp` between restarts, and nothing accumulates during normal operation. A small `emptyDir` (or tmpfs) is sufficient.
 
 ### Kubernetes with read-only root filesystem
 

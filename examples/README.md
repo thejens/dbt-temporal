@@ -858,15 +858,17 @@ temporal workflow show --workflow-id <ID> --output json \
 
 ## Known Limitations & Unsupported Features
 
-dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as its rendering and execution engine rather than dbt-core (Python). This means some dbt features behave differently or are not yet available.
+dbt-temporal uses [dbt v2](https://github.com/dbt-labs/dbt) (Rust) as its rendering and execution engine rather than dbt v1 (the Python `dbt-core`). This means some dbt features behave differently or are not yet available.
+
+The statuses below were recorded against the early 2026 Fusion previews, before dbt v2 reached its stable v2.0.0 release, and most have not been re-verified at the pinned `v2.0.5`. Treat "Broken" as "last seen broken".
 
 ### Not yet supported
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Seeds** | Broken (BigQuery) | `dbt seed` / `dbt build` with seeds fails on BigQuery with `bigquery__create_table_as macro didn't get supported language, it got None`. This is a dbt-fusion adapter bug. **Workaround:** use `source()` references to existing tables or inline CTEs instead of seed CSVs. All examples in this repo use pre-seeded Postgres databases or public BigQuery datasets as sources. |
-| **Snapshots** | Broken (BigQuery) | Snapshot materialization generates invalid SQL on BigQuery. **Workaround:** avoid snapshots until dbt-fusion fixes the materialization. |
-| **`store_failures` (tests)** | Broken | Test `store_failures: true` config requires a `dbt_test__audit` dataset that dbt-fusion does not auto-create. Tests work normally without `store_failures`. |
+| **Seeds** | Broken (BigQuery) | `dbt seed` / `dbt build` with seeds fails on BigQuery with `bigquery__create_table_as macro didn't get supported language, it got None`. This is a dbt v2 adapter bug. **Workaround:** use `source()` references to existing tables or inline CTEs instead of seed CSVs. All examples in this repo use pre-seeded Postgres databases or public BigQuery datasets as sources. |
+| **Snapshots** | Broken (BigQuery) | Snapshot materialization generates invalid SQL on BigQuery. **Workaround:** avoid snapshots until dbt v2 fixes the materialization. |
+| **`store_failures` (tests)** | Broken | Test `store_failures: true` config requires a `dbt_test__audit` dataset that dbt v2 does not auto-create. Tests work normally without `store_failures`. |
 
 ### Not yet wired
 
@@ -875,8 +877,8 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 | **`query-comment` config** | Parsed but ignored | `dbt_project.yml` `query-comment` is read during project load but not passed to the adapter. The adapter uses its default comment behavior. The macro is still useful for testing Jinja rendering. |
 | **`run_query()` in models** | Limited | Works inside `on-run-end` hooks and materializations. In model SQL, requires the full adapter execution context which may not be available during compilation. |
 | **`graph` variable iteration** | Partial | `graph` is available but `.nodes.values()`, `.items()`, and Jinja filters like `selectattr()` may not work identically to dbt-core. Direct property access on `graph.nodes` works. |
-| **Custom materializations** | Not tested | The `{% materialization %}` block syntax is parsed by dbt-fusion but custom materializations (e.g. `lazy_table`, `table_function`, `ml_model`) have not been validated with dbt-temporal. Built-in materializations (`view`, `table`, `incremental`, `ephemeral`) work. |
-| **Python models** | Not supported | dbt-fusion does not execute Python models. |
+| **Custom materializations** | Not tested | The `{% materialization %}` block syntax is parsed by dbt v2 but custom materializations (e.g. `lazy_table`, `table_function`, `ml_model`) have not been validated with dbt-temporal. Built-in materializations (`view`, `table`, `incremental`, `ephemeral`) work. |
+| **Python models** | Untested | dbt v2 submits Python models through the adapter (e.g. Databricks); they have not been validated with dbt-temporal. |
 | **Metrics / Semantic Layer** | Not supported | MetricFlow metrics and semantic models are not available. |
 
 ### Adapter support
@@ -885,13 +887,13 @@ dbt-temporal uses [dbt-fusion](https://github.com/dbt-labs/dbt-fusion) (Rust) as
 |---------|--------|-------|
 | **Postgres** | Supported | Used by all non-BigQuery examples. Uses the ADBC PostgreSQL driver built from source (see `docs/workarounds.md#3-adbc-postgresql-driver-built-from-source-macos-arm64` for macOS build notes). |
 | **BigQuery** | Supported | OAuth (application default credentials). The `bigquery/` example uses BigQuery. |
-| **Snowflake** | Untested | dbt-fusion has Snowflake adapter code but it has not been validated with dbt-temporal. |
+| **Snowflake** | Untested | dbt v2 has Snowflake adapter code but it has not been validated with dbt-temporal. |
 | **Redshift** | Untested | Not validated. |
-| **Spark / Databricks** | Not supported | No adapter available in dbt-fusion. |
+| **Spark / Databricks** | Untested | dbt v2 ships both adapters, but they have not been validated with dbt-temporal. |
 
 ### Test argument format
 
-dbt-fusion's parser emits deprecation warnings for the standard dbt test argument format:
+dbt v2's parser emits deprecation warnings for the standard dbt test argument format:
 
 ```yaml
 # This works but logs a deprecation warning:

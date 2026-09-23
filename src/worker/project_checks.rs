@@ -1,48 +1,37 @@
-//! The metadata index a project check reads, built once per project at startup.
+//! The metadata a project check reads, written once per project at startup.
 //!
 //! A project check is a SQL file under `check-paths` (`checks/` by default)
 //! that queries the project's own metadata: `dbt.models`, `dbt.checks`,
 //! `dbt.node_columns`, … Those relations are not in the warehouse — they are
-//! parquet the parse writes and an ingest pass turns into an index. So before
-//! any check can run, this module reproduces the two steps dbt takes between
-//! resolving a project and gating on its checks:
+//! views over the parse epochs, the parquet `save_parse_state` writes under
+//! `<root>/private/metadata/parse/`. This module reproduces that one step dbt
+//! takes between resolving a project and gating on its checks.
 //!
-//! 1. `save_parse_state` writes the parse epochs (nodes, columns, alive set)
-//!    under `<root>/private/metadata/parse/`.
-//! 2. `ingest_from_metadata_direct` converts those epochs into the index's
-//!    `dbt.*.parquet` under `<root>/private/index/`.
-//!
-//! Both run at worker startup, inside `initialize_project`, because their input
-//! is the resolved project — which this worker parses exactly once and then
-//! holds for its lifetime. Nothing a workflow does can invalidate the index, so
-//! the per-run gate is a pure read of what is built here.
+//! It runs at worker startup, inside `initialize_project`, because its input is
+//! the resolved project — which this worker parses exactly once and then holds
+//! for its lifetime. Nothing a workflow does can invalidate the epochs, so the
+//! per-run gate is a pure read of what is written here.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use dbt_common::constants::{default_index_dir, default_metadata_dir};
+use dbt_common::constants::default_metadata_dir;
 use dbt_common::io_args::IoArgs;
-use dbt_index_core::WriteSource;
-use dbt_index_core::ingest::{IngestState, ingest_from_metadata_direct};
 use dbt_schemas::schemas::DbtCheck;
 use dbt_schemas::state::{DbtState, ResolverState};
 use tempfile::TempDir;
-use tracing::{info, warn};
+use tracing::info;
 
-/// A project's checks and the index they read.
+/// A project's checks and the metadata they read.
 pub struct ProjectChecks {
-    /// Owns the index on disk. Dropped with the project's `WorkerState`, which
+    /// Owns the metadata on disk. Dropped with the project's `WorkerState`, which
     /// lives for the worker process — so the directory outlives every run that
     /// queries it.
     _root: TempDir,
-    /// Where the parse epochs were written. The gate consults it to confirm the
-    /// index still reflects them before querying: a check is a pure reader and
-    /// must refuse a stale index rather than report its zero rows as a pass.
+    /// Where the parse epochs were written; the gate's views read them here.
     pub metadata_dir: PathBuf,
-    /// Directory holding the index's `dbt.*.parquet`.
-    pub index_dir: PathBuf,
     /// Enabled checks, in `unique_id` order.
     ///
     /// Disabled ones are dropped rather than recorded: dbt keeps them only so
@@ -55,19 +44,17 @@ pub struct ProjectChecks {
 impl std::fmt::Debug for ProjectChecks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectChecks")
-            .field("index_dir", &self.index_dir)
+            .field("metadata_dir", &self.metadata_dir)
             .field("checks", &self.checks.len())
             .finish_non_exhaustive()
     }
 }
 
-/// Build the index for a resolved project, or `None` when it declares no
+/// Write the metadata for a resolved project, or `None` when it declares no
 /// enabled checks.
 ///
-/// Returning `None` is the common case and the reason the whole pipeline is
-/// gated on it: a project without checks pays neither the parquet write nor the
-/// ingest, exactly as dbt skips its early index publish when `nodes.checks` is
-/// empty.
+/// Returning `None` is the common case: a project without checks pays nothing
+/// for the gate.
 ///
 /// `io` supplies the invocation identity and project directory; only its output
 /// directory is replaced, so the epochs land in a directory this worker owns
@@ -85,28 +72,25 @@ pub fn build(
     }
 
     let root =
-        TempDir::with_prefix("dbtt-checks-").context("creating the check index directory")?;
+        TempDir::with_prefix("dbtt-checks-").context("creating the check metadata directory")?;
     let metadata_dir = default_metadata_dir(root.path());
-    let index_dir = default_index_dir(root.path());
 
     write_parse_epochs(io, root.path(), dbt_state, resolver_state)?;
-    ingest_index(&metadata_dir, &index_dir, root.path())?;
 
     info!(
         checks = checks.len(),
-        index_dir = %index_dir.display(),
-        "built the project-check index"
+        metadata_dir = %metadata_dir.display(),
+        "wrote the project-check metadata"
     );
 
     Ok(Some(ProjectChecks {
         _root: root,
         metadata_dir,
-        index_dir,
         checks,
     }))
 }
 
-/// Write the parse epochs the ingest reads.
+/// Write the parse epochs the checks read.
 ///
 /// `changed_nodes: None` means a cold write — every node — which is the only
 /// correct choice here: the worker resolves each project from scratch and keeps
@@ -121,7 +105,7 @@ fn write_parse_epochs(
         out_dir: root.to_path_buf(),
         ..io.clone()
     };
-    // The `env_var()` reads the parse collected, which the index publishes as
+    // The `env_var()` reads the parse collected, which the views publish as
     // `dbt.project_env_vars`. dbt reads the same global at its own call site;
     // a lock poisoned by an unrelated panic costs that one view, not the gate.
     let env_vars: HashMap<String, String> = dbt_jinja_utils::utils::ENV_VARS
@@ -143,38 +127,18 @@ fn write_parse_epochs(
     Ok(())
 }
 
-/// Convert the parse epochs into the index the checks query.
-fn ingest_index(metadata_dir: &Path, index_dir: &Path, root: &Path) -> Result<()> {
-    let mut state = IngestState::default();
-    ingest_from_metadata_direct(metadata_dir, index_dir, &mut state)
-        .map_err(|e| anyhow::anyhow!("ingesting the project-check index: {e}"))?;
-
-    // Provenance bookkeeping that marks the directory a published index rather
-    // than a directory of parquet nothing vouched for. A failure leaves the
-    // index itself queryable, so it warns rather than aborting startup.
-    if let Err(e) =
-        dbt_index_core::save_artifact_meta(index_dir, root, WriteSource::DirectWrite, None)
-    {
-        warn!(error = %e, "could not record index provenance metadata");
-    }
-    Ok(())
-}
-
-/// A `ProjectChecks` whose directories hold no index at all.
+/// A `ProjectChecks` whose directory holds no metadata at all.
 ///
-/// Lets the gate's refuse-to-read-a-missing-index path be exercised without
-/// standing up a parse: what matters there is only that `index_is_current`
-/// says no.
+/// Lets the gate's refuse-to-read-missing-metadata path be exercised without
+/// standing up a parse.
 #[cfg(test)]
 #[allow(clippy::expect_used)]
-pub(crate) fn without_an_index(checks: Vec<Arc<DbtCheck>>) -> ProjectChecks {
+pub(crate) fn without_metadata(checks: Vec<Arc<DbtCheck>>) -> ProjectChecks {
     let root = TempDir::new().expect("creating a temp dir");
     let metadata_dir = default_metadata_dir(root.path());
-    let index_dir = default_index_dir(root.path());
     ProjectChecks {
         _root: root,
         metadata_dir,
-        index_dir,
         checks,
     }
 }
@@ -184,14 +148,14 @@ pub(crate) fn without_an_index(checks: Vec<Arc<DbtCheck>>) -> ProjectChecks {
 mod tests {
     use super::*;
 
-    /// The index directory is the actionable half of a gate failure, and the
-    /// checks themselves have no useful `Debug`, so the count stands in.
+    /// The metadata directory is the actionable half of a gate failure, and
+    /// the checks themselves have no useful `Debug`, so the count stands in.
     #[test]
-    fn debug_reports_the_index_directory_and_how_many_checks_it_serves() {
-        let checks = without_an_index(vec![Arc::new(DbtCheck::default())]);
+    fn debug_reports_the_metadata_directory_and_how_many_checks_it_serves() {
+        let checks = without_metadata(vec![Arc::new(DbtCheck::default())]);
         let rendered = format!("{checks:?}");
         assert!(rendered.contains("ProjectChecks"), "{rendered}");
-        assert!(rendered.contains("index"), "{rendered}");
+        assert!(rendered.contains("metadata"), "{rendered}");
         assert!(rendered.contains('1'), "the check count belongs in it: {rendered}");
     }
 }

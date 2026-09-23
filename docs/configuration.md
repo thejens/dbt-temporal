@@ -64,6 +64,12 @@ models:
       +adapter: bigquery
 ```
 
+dbt treats the `+adapter` node config as experimental and rejects it at parse
+time unless the worker's environment sets
+`DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER=true`. A project using it fails to load
+without that variable, and the error names it. Declaring several adapters in a
+target needs no opt-in; only selecting one per node does.
+
 Nodes that select no adapter run on the target's default, so single-adapter
 projects are unaffected. A node naming an adapter the target does not declare
 fails as a configuration error rather than falling back to the default — the
@@ -336,7 +342,7 @@ Each dbt node uses the `summary` field on the Temporal activity to display a des
 
 ### OpenTelemetry Export (dbt traces & logs)
 
-`DBT_EXPORT_TO_OTLP=1` replaces the default console-logging stack with dbt-fusion's own telemetry pipeline: structured dbt events (adapter `QueryExecuted`, connection-pool waits, …) export as OTEL traces and logs over OTLP/HTTP, alongside console output.
+`DBT_EXPORT_TO_OTLP=1` replaces the default console-logging stack with dbt v2's own telemetry pipeline: structured dbt events (adapter `QueryExecuted`, connection-pool waits, …) export as OTEL traces and logs over OTLP/HTTP, alongside console output.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

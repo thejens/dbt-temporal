@@ -4,17 +4,18 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 
 ![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
 
-> **Status**: Not production-ready. dbt-temporal depends on the dbt Fusion engine,
-> now developed in [dbt-core](https://github.com/dbt-labs/dbt-core) as dbt Core v2,
-> pinned to a 2026-09-06 `main` revision (`2.0.0-rc.1`), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.0.0`). Several
-> [workarounds](docs/workarounds.md) are needed to make the Fusion engine work in
-> a long-lived worker context. Consider this a proof of concept — largely
-> developed by [Claude Code](https://claude.ai/claude-code) with no guarantees of
-> code quality.
+> **Status**: Not production-ready. dbt-temporal builds on two stable, generally
+> available releases: [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite
+> of dbt (pinned to the `v2.0.5` release), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.0.0`). dbt v2's
+> crates are an internal API rather than a published library, though, and several
+> [workarounds](docs/workarounds.md) are needed to run them in a long-lived
+> worker. Consider dbt-temporal itself a proof of concept — largely developed by
+> [Claude Code](https://claude.ai/claude-code) with no guarantees of code
+> quality.
 
 > **License**: dbt-temporal itself is [MIT-licensed](LICENSE). Its two main
-> dependencies are permissively licensed as well — dbt Core v2 is **Apache 2.0**
+> dependencies are permissively licensed as well — dbt v2 is **Apache 2.0**
 > and the Temporal Rust SDK is **MIT**. See
 > [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for details.
 
@@ -39,7 +40,7 @@ flowchart TD
 
 - **Parallel DAG execution** — nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors
 - **Multi-project** — load multiple dbt projects into one worker; select which to run per workflow invocation
-- **Multi-adapter targets** — a profile target may declare several adapters; the worker builds one engine per declared adapter and routes each node by its `+adapter` selection, falling back to the target's default. A node naming an undeclared adapter fails permanently rather than running against the wrong warehouse
+- **Multi-adapter targets** — a profile target may declare several adapters; the worker builds one engine per declared adapter and routes each node by its `+adapter` selection, falling back to the target's default. A node naming an undeclared adapter fails permanently rather than running against the wrong warehouse. Per-node selection is experimental in dbt and needs `DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER=true` on the worker
 - **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
 - **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
 - **store_failures & catalog.json** — test `store_failures` persists failing rows to the audit schema (created on demand); `WRITE_CATALOG=1` adds a partial `catalog.json` (warehouse column metadata) to each run's artifacts
@@ -72,8 +73,8 @@ sudo apt install ./dbt-temporal_<version>_amd64.deb        # Debian/Ubuntu
 sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm     # RHEL/Alma/Rocky 8+
 ```
 
-> **Not on crates.io.** dbt-temporal depends on the unpublished dbt-core (Fusion)
-> crates via git and a `[patch.crates-io]` block for forked `arrow-rs`/`ring`.
+> **Not on crates.io.** dbt-temporal depends on dbt v2's crates, which dbt does
+> not publish, via git and a `[patch.crates-io]` block for forked `arrow-rs`/`ring`.
 > `cargo publish` rejects both, so the crate is distributed via `cargo install
 > --git`, GHCR, and release binaries rather than `cargo install dbt-temporal`.
 
@@ -108,7 +109,7 @@ temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
 
 All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness`, and `freshness` are also supported. `project` is auto-resolved when only one project is loaded. `resource_types` / `exclude_resource_types` narrow any plan to (or away from) named resource types, the `--resource-type` / `--exclude-resource-type` equivalents.
 
-dbt Core v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres, Snowflake, BigQuery and Databricks accept. Adapters without it (DuckDB, for one) need a project-level `<adapter>__scalar_function_sql` override, the same dispatch hook dbt uses everywhere else.
+dbt v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres, Snowflake, BigQuery and Databricks accept. Adapters without it (DuckDB, for one) need a project-level `<adapter>__scalar_function_sql` override, the same dispatch hook dbt uses everywhere else.
 
 The two freshness commands differ in what they measure. `source-freshness` covers sources only. `freshness` covers sources **plus** models that declare an SLA — a `freshness:` config block with `warn_after` and/or `error_after`. A model's `build_after` is deliberately not an SLA: it is a scheduling rule for state-aware builds, so a `build_after`-only model is never measured. Neither command builds anything; both need a `loaded_at_field` or `loaded_at_query` on every node they measure (dbt's relation-metadata fallback needs an adapter metadata interface the worker does not drive, so nodes that declare a rule without either are skipped and named in a warning). A rule naming `count` without `period`, or the reverse, aborts the plan rather than reading as "no rule".
 
@@ -135,7 +136,7 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 | [Error Handling](docs/error-handling.md) | Error classification, retry configuration, and non-retryable error patterns |
 | [Architecture](docs/architecture.md) | Workflow execution flow, project structure, and dependency overview |
 | [Deployment](docs/deployment.md) | Docker, Kubernetes, Cloud Run, ECS, and other deployment options |
-| [dbt-fusion Workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
+| [dbt v2 Workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
 | [Examples](examples/README.md) | Walkthrough of included example projects |
 
 ## Development

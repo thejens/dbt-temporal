@@ -38,7 +38,7 @@ flowchart TD
 
 3. **`resolve_config` activity**: Loads `dbt_temporal.yml` from the project directory (if present) and returns the resolved hook and retry configuration for this run.
 
-4. **`run_project_checks` activity**: If the project declares checks under `check-paths` (`checks/` by default), evaluate every one of them against the metadata index built at startup and stop the run if any is fatal. Scheduled only when the project has checks, and placed before the hooks so a project that fails its gate performs no side effects on the way to finding out. See [Project checks](#project-checks).
+4. **`run_project_checks` activity**: If the project declares checks under `check-paths` (`checks/` by default), evaluate every one of them against the metadata written at startup and stop the run if any is fatal. Scheduled only when the project has checks, and placed before the hooks so a project that fails its gate performs no side effects on the way to finding out. See [Project checks](#project-checks).
 
 5. **`run_project_hooks` activity (`on-run-start`)**: If `dbt_project.yml` declares `on-run-start`, render those Jinja templates against the full compile+run context (with `execute=true` and per-workflow env overrides applied). Failure aborts the run before any node executes.
 
@@ -58,12 +58,13 @@ queries the project's own metadata rather than the warehouse: `dbt.models`,
 project declaring checks must pin that vocabulary with `info_schema.version` in
 `dbt_project.yml`.
 
-Those relations are parquet, not warehouse tables. The worker builds them once
-per project at startup, inside `initialize_project`: the parse epochs are
-written under `<root>/private/metadata/parse/`, then ingested into the index
-under `<root>/private/index/`. Their only input is the resolved project, which
-this worker parses once and holds for its lifetime — so nothing a workflow does
-can invalidate the index, and the per-run gate is a pure read.
+Those relations are views over parquet, not warehouse tables. The worker writes
+the parse epochs once per project at startup, inside `initialize_project`, under
+`<root>/private/metadata/parse/`; each check runs in a throwaway DuckDB where
+dbt's own parse-safe view definitions read them directly. Their only input is
+the resolved project, which this worker parses once and holds for its lifetime
+— so nothing a workflow does can invalidate them, and the per-run gate is a
+pure read.
 
 **Verdicts.** A check reports `pass`, `fail`, `warn`, `error` or `skipped`.
 `fail` and `error` stop the run; `warn` reports its rows and lets the build
@@ -133,5 +134,5 @@ nothing.
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `1.0.0` | Workflow orchestration |
-| [dbt Core v2 (Fusion engine)](https://github.com/dbt-labs/dbt-core) | Git rev pinned in [Cargo.toml](../Cargo.toml) (2026-09-06 `main`, `2.0.0-rc.1`) | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `1.0.0`, stable (GA) | Workflow orchestration |
+| [dbt v2](https://github.com/dbt-labs/dbt) | `v2.0.5` release, stable (GA), pinned by git rev in [Cargo.toml](../Cargo.toml) — the crates are not published | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

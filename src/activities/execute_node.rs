@@ -78,7 +78,7 @@ pub async fn execute_node_outer(
             }
             // Never resolves — keeps the UI's last-heartbeat fresh and lets the
             // server's heartbeat_timeout reschedule on a fresh worker if this
-            // one dies. The node's own work runs on a blocking thread, so this
+            // one dies. The node's own work runs on the dbt pool, so this
             // task is free to keep heartbeating while a long query runs.
             never = heartbeat::heartbeat_loop(&ctx) => match never {},
         }
@@ -657,27 +657,50 @@ pub async fn execute_node_cancellable(
 
     // The one thing here that needs the async runtime: the deferred manifest
     // comes from the artifact store. Everything after it is synchronous, and
-    // runs on a blocking thread so this task stays free to heartbeat and to
+    // runs on the dbt pool so this task stays free to heartbeat and to
     // notice cancellation.
     let defer_nodes =
         load_defer_nodes(activities, &state, input.defer_manifest_ref.as_deref()).await?;
 
     let token = cancellation.clone();
-    // dbt's telemetry data layer asserts that every span it sees descends from
-    // an `Invocation` root, and a blocking thread starts with no current span
-    // — so the node span has to be re-entered on the far side of the handoff,
-    // or the first dbt macro to open a span panics the thread.
-    let span = tracing::Span::current();
     let invocation_id = input.invocation_id.clone();
-    let mut result = tokio::task::spawn_blocking(move || {
-        let _entered = span.enter();
+    let mut result = crate::dbt_pool::run(move || {
         execute_node_body(&state, &input, defer_nodes.as_deref(), &token)
     })
-    .await
-    .map_err(|e| anyhow::anyhow!("node execution task failed: {e}"))??;
+    .await??;
 
     spill_compiled_sql(activities, &invocation_id, &mut result).await?;
     Ok(result)
+}
+
+/// Drop a model body's trailing `;` before a materialization splices it in.
+///
+/// Materializations wrap the body in a larger query — `create table as ( ... )`,
+/// contract enforcement's `select * from ( ... ) as __dbt_sbq` — so a terminal
+/// `;` lands inside the parentheses and makes the statement invalid. dbt strips
+/// it at the same point (dbt-core#15779). The splitter only strips a body that
+/// holds exactly one statement: a genuine multi-statement body keeps its
+/// terminators and the warehouse still rejects it, rather than having the
+/// user's SQL rewritten. Python bodies are not SQL and pass through untouched.
+fn strip_body_terminator(
+    node_context: &mut BTreeMap<String, minijinja::Value>,
+    language: Option<&str>,
+    splitter: &dyn dbt_adapter::stmt_splitter::StmtSplitter,
+    adapter_type: dbt_adapter::AdapterType,
+) {
+    if language == Some("python") {
+        return;
+    }
+    let Some(sql) = node_context.get("sql").and_then(minijinja::Value::as_str) else {
+        return;
+    };
+    let body = splitter.strip_trailing_statement_terminator(sql, adapter_type);
+    if body.len() == sql.len() {
+        return;
+    }
+    let body = minijinja::Value::from(body.to_owned());
+    node_context.insert("sql".to_owned(), body.clone());
+    node_context.insert("compiled_code".to_owned(), body);
 }
 
 /// Move the node's compiled SQL to the artifact store, leaving a reference.
@@ -893,6 +916,7 @@ fn execute_node_body(
         let mb_source = dbt_jinja_utils::phases::SourceFunction::new_with_microbatch_context(
             Arc::clone(&state.resolver_state.node_resolver),
             common.package_name.clone(),
+            Arc::clone(&state.resolver_state.runtime_config),
             microbatch_ctx,
         );
         node_context.insert("ref".to_string(), minijinja::Value::from_object(mb_ref));
@@ -1160,6 +1184,17 @@ fn execute_node_body(
     let compiled_sql = node_context
         .get("sql")
         .and_then(|v| v.as_str().map(ToString::to_string));
+
+    // Taken after the SQL is recorded: the result keeps the body as written,
+    // and only the materialization sees it without its terminator.
+    if rt == NodeType::Model {
+        strip_body_terminator(
+            &mut node_context,
+            common.language.as_deref(),
+            render_env.adapter.engine().splitter(),
+            base.adapter,
+        );
+    }
 
     // Resolve against the adapter the node actually runs on: `base.adapter` is the
     // node's `+adapter` selection when it made one, and the run's default adapter

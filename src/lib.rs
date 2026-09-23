@@ -1,6 +1,7 @@
 pub mod activities;
 pub mod artifact_store;
 pub mod config;
+pub mod dbt_pool;
 pub mod error;
 pub mod health;
 pub mod hooks;

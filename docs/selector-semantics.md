@@ -3,7 +3,7 @@
 **Question:** when a `path:` selector covers a directory whose models depend on
 each other via an *ephemeral* helper, and that ephemeral helper transitively
 `ref()`s a model **outside** the selected path, does dbt-temporal (via
-dbt-fusion) behave the same as vanilla Python dbt?
+dbt v2) behave the same as vanilla Python dbt?
 
 **Answer: yes, identical behavior.** The `path:` selector does not traverse
 ephemeral chains to pull in upstream deps; the consumer's compiled SQL ends up
@@ -82,7 +82,7 @@ along ephemeral edges. Ephemeral models are inlined into their consumers'
 compiled SQL — which means the consumer's executed SQL references whatever
 the ephemeral's `ref()` resolves to, *as a table name*. If that table doesn't
 exist (because it wasn't selected for the run), the target database raises
-the error. Both Python dbt and dbt-fusion honor this; there's no "smarter"
+the error. Both Python dbt and dbt v2 honor this; there's no "smarter"
 engine here.
 
 **Takeaway for project authors:** if a `path:`-selected subdirectory's models

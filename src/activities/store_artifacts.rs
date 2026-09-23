@@ -1,5 +1,6 @@
 use anyhow::Context;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
@@ -223,30 +224,38 @@ async fn generate_and_store_catalog(
     input: &StoreArtifactsInput,
     store: &dyn ArtifactStore,
 ) -> Result<String, anyhow::Error> {
-    let state = activities
-        .registry
-        .get(input.project.as_deref())
-        .context("resolving project for catalog generation")?;
-    // Catalog generation queries the warehouse through the adapter, which emits
-    // dbt telemetry spans; those need an `Invocation` root above them. Scoped to
-    // the synchronous build so no span guard is held across the store `await`.
-    let catalog_json =
-        super::node_telemetry::invocation_span(&input.invocation_id, "dbt docs generate")
-            .in_scope(|| {
-                super::catalog::build_catalog_json(
-                    state,
-                    &input.node_results,
-                    &input.invocation_id,
-                    &crate::activities::render_env::RenderOverrides {
-                        cancellation: &state.cancellation_source.token(),
-                        env: &input.env,
-                        target: input.target.as_deref(),
-                        // Neither reaches a `get_columns_in_relation` call.
-                        vars: &BTreeMap::new(),
-                        full_refresh: false,
-                    },
-                )
-            })?;
+    let state = Arc::clone(
+        activities
+            .registry
+            .get(input.project.as_deref())
+            .context("resolving project for catalog generation")?,
+    );
+    // The catalog queries the warehouse, so it is built on the dbt pool, which
+    // needs owned inputs. Copying the results costs one allocation per run.
+    let node_results = input.node_results.clone();
+    let invocation_id = input.invocation_id.clone();
+    let env = input.env.clone();
+    let target = input.target.clone();
+    let catalog_json = crate::dbt_pool::run(move || {
+        // Catalog generation queries the warehouse through the adapter, which
+        // emits dbt telemetry spans; those need an `Invocation` root above them.
+        super::node_telemetry::invocation_span(&invocation_id, "dbt docs generate").in_scope(|| {
+            super::catalog::build_catalog_json(
+                &state,
+                &node_results,
+                &invocation_id,
+                &crate::activities::render_env::RenderOverrides {
+                    cancellation: &state.cancellation_source.token(),
+                    env: &env,
+                    target: target.as_deref(),
+                    // Neither reaches a `get_columns_in_relation` call.
+                    vars: &BTreeMap::new(),
+                    full_refresh: false,
+                },
+            )
+        })
+    })
+    .await??;
     store
         .store(&input.invocation_id, "catalog.json", catalog_json.into_bytes().into())
         .await
@@ -299,10 +308,22 @@ async fn load_compiled_sql(
 /// pinned crates exports its version as a constant (each stamps its own
 /// `CARGO_PKG_VERSION` where it needs one), so it is written here and moves
 /// with the pin; `dbt_version_matches_the_pinned_crates` fails if it drifts.
-const DBT_VERSION: &str = "2.0.0-rc.1";
+const DBT_VERSION: &str = "2.0.5";
 
 /// Schema the artifact claims to follow. dbt-fusion writes v6.
 const RUN_RESULTS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/run-results/v6.json";
+
+/// Schemas of the two freshness artifacts. They differ because the shapes do:
+/// `freshness.json` adds `resource_type` and covers models, so it cannot claim
+/// the `sources` schema `sources.json` has always followed.
+const SOURCES_SCHEMA: &str = "https://schemas.getdbt.com/dbt/sources/v3.json";
+const FRESHNESS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/freshness/v0.json";
+
+/// The `env` block every artifact carries: the orchestrator's own version,
+/// kept where it does not pretend to be dbt's.
+fn artifact_env() -> BTreeMap<String, String> {
+    BTreeMap::from([("DBT_TEMPORAL_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string())])
+}
 
 /// Build the `run_results.json` content from the store artifacts input.
 ///
@@ -324,12 +345,7 @@ fn build_run_results_json(
             generated_at: chrono::Utc::now(),
             invocation_id: input.invocation_id.clone(),
             invocation_started_at: input.started_at,
-            // The orchestrator's own version, kept where it does not pretend to
-            // be dbt's.
-            env: BTreeMap::from([(
-                "DBT_TEMPORAL_VERSION".to_string(),
-                env!("CARGO_PKG_VERSION").to_string(),
-            )]),
+            env: artifact_env(),
         },
         results: input
             .node_results
@@ -476,12 +492,21 @@ fn build_freshness_json(
         .iter()
         .map(|r| std::time::Duration::from_secs_f64(r.execution_time.max(0.0)))
         .sum();
+    let metadata = dbt_schemas::schemas::FreshnessResultsMetadata {
+        dbt_schema_version: if sources_only {
+            SOURCES_SCHEMA
+        } else {
+            FRESHNESS_SCHEMA
+        }
+        .to_string(),
+        dbt_version: DBT_VERSION.to_string(),
+        generated_at: chrono::Utc::now(),
+        invocation_id: input.invocation_id.clone(),
+        invocation_started_at: input.started_at,
+        env: artifact_env(),
+    };
     let artifact = serde_json::json!({
-        "metadata": {
-            "invocation_id": input.invocation_id,
-            "dbt_version": env!("CARGO_PKG_VERSION"),
-            "generated_at": chrono::Utc::now().to_rfc3339(),
-        },
+        "metadata": metadata,
         "results": results,
         "elapsed_time": total.as_secs_f64(),
     });
@@ -557,6 +582,8 @@ mod tests {
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&build_freshness_json(&input, true)?)?;
+        assert_eq!(parsed["metadata"]["dbt_schema_version"], SOURCES_SCHEMA);
+        assert_eq!(parsed["metadata"]["dbt_version"], DBT_VERSION);
         let results = parsed["results"].as_array().expect("results array");
         assert_eq!(results.len(), 1, "models and plain results must be excluded");
         assert_eq!(results[0]["unique_id"], "source.p.s.orders");
@@ -669,6 +696,7 @@ mod tests {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&build_freshness_json(&input, false)?)?;
+        assert_eq!(parsed["metadata"]["dbt_schema_version"], FRESHNESS_SCHEMA);
         let results = parsed["results"].as_array().expect("results array");
         assert_eq!(results.len(), 2, "both measured nodes belong in freshness.json");
         assert_eq!(results[0]["resource_type"], "source");

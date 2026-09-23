@@ -12,8 +12,8 @@ name: Release
 # Each distro package is built inside that distro's own container so the binary
 # links against a matching glibc, and the container image reuses the Debian
 # binary rather than compiling a second time. A crates.io publish is
-# intentionally absent: the crate depends on unpublished dbt-core (Fusion) git
-# crates and a `[patch.crates-io]` block for forked arrow-rs/ring, both of which
+# intentionally absent: the crate depends on dbt v2's unpublished crates via git
+# and on a `[patch.crates-io]` block for forked arrow-rs/ring, both of which
 # `cargo publish` rejects. Build from source with
 # `cargo install --git https://github.com/thejens/dbt-temporal` instead.
 on:

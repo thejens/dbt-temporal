@@ -25,6 +25,22 @@ const TWO_ADAPTER_PROFILE: &str = "spike:\n  target: dev\n  outputs:\n    dev:\n
      user: nobody\n        password: nobody\n        dbname: nothing\n        \
      schema: public\n        threads: 1\n";
 
+/// Opt this test process in to dbt's `+adapter` node config, which dbt refuses
+/// at parse time unless `DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER` is set. dbt
+/// reads it from the environment on every parse, so there is nothing to pass.
+fn opt_in_to_multi_adapter() {
+    static OPT_IN: std::sync::Once = std::sync::Once::new();
+    OPT_IN.call_once(|| {
+        // SAFETY: tests run single-threaded (`--test-threads=1`, which the
+        // loader requires anyway), and this runs before the test builds its
+        // harness, so no other thread in the process is reading the environment.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(dbt_common::io_args::MULTI_ADAPTER_ENV, "true");
+        }
+    });
+}
+
 /// The adapter the parser resolved onto a model — the node's own `+adapter`
 /// selection when it made one, the target's default otherwise.
 fn node_adapter(harness: &Harness, model: &str) -> AdapterType {
@@ -40,6 +56,7 @@ fn node_adapter(harness: &Harness, model: &str) -> AdapterType {
 
 #[tokio::test]
 async fn a_target_declaring_two_adapters_builds_an_engine_for_each() {
+    opt_in_to_multi_adapter();
     let harness = Harness::build_files_with_profile(
         &[("models/plain.sql", "select 1 as id")],
         TWO_ADAPTER_PROFILE,
@@ -67,6 +84,7 @@ async fn a_target_declaring_two_adapters_builds_an_engine_for_each() {
 /// that keeps every existing single-adapter project working unchanged.
 #[tokio::test]
 async fn a_node_without_an_adapter_selection_runs_on_the_target_default() {
+    opt_in_to_multi_adapter();
     let harness = Harness::build_files_with_profile(
         &[("models/plain.sql", "select 42 as answer")],
         TWO_ADAPTER_PROFILE,
@@ -82,7 +100,7 @@ async fn a_node_without_an_adapter_selection_runs_on_the_target_default() {
     let result = harness.run("plain").await.expect("plain model should run");
     assert_eq!(result.status, NodeStatus::Success, "{result:?}");
     // Proof it reached the DuckDB warehouse rather than merely reporting success.
-    assert_eq!(harness.query_scalar("select answer from main.plain"), "42");
+    assert_eq!(harness.query_scalar("select answer from main.plain").await, "42");
 }
 
 /// A node that selects the non-default adapter is routed to *that* engine. The
@@ -91,6 +109,7 @@ async fn a_node_without_an_adapter_selection_runs_on_the_target_default() {
 /// on DuckDB like its unannotated neighbour.
 #[tokio::test]
 async fn a_node_selecting_the_non_default_adapter_is_routed_to_its_engine() {
+    opt_in_to_multi_adapter();
     let harness = Harness::build_files_with_profile(
         &[("models/on_postgres.sql", "{{ config(adapter='postgres') }}\nselect 1 as id")],
         TWO_ADAPTER_PROFILE,
@@ -116,7 +135,8 @@ async fn a_node_selecting_the_non_default_adapter_is_routed_to_its_engine() {
     // And nothing was written to the DuckDB warehouse under that name.
     assert_eq!(
         harness
-            .query_scalar("select count(*) from duckdb_tables() where table_name = 'on_postgres'"),
+            .query_scalar("select count(*) from duckdb_tables() where table_name = 'on_postgres'")
+            .await,
         "0",
         "a node routed to postgres must leave no relation on the default adapter"
     );
@@ -127,6 +147,7 @@ async fn a_node_selecting_the_non_default_adapter_is_routed_to_its_engine() {
 /// and writing to the wrong warehouse.
 #[tokio::test]
 async fn a_node_selecting_an_undeclared_adapter_fails_without_falling_back() {
+    opt_in_to_multi_adapter();
     let harness = Harness::build_files_with_profile(
         &[("models/on_snowflake.sql", "{{ config(adapter='snowflake') }}\nselect 1 as id")],
         TWO_ADAPTER_PROFILE,

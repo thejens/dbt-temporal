@@ -20,8 +20,18 @@ async fn a_seed_that_fits_one_batch_loads() {
 
     let result = harness.run_uid("seed.spike.small").await.unwrap();
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
-    assert_eq!(harness.query_scalar("select count(*) from main.small"), "3");
-    assert_eq!(harness.query_scalar("select name from main.small where id = 2"), "b");
+    assert_eq!(
+        harness
+            .query_scalar("select count(*) from main.small")
+            .await,
+        "3"
+    );
+    assert_eq!(
+        harness
+            .query_scalar("select name from main.small where id = 2")
+            .await,
+        "b"
+    );
 }
 
 /// The concatenating path: every row has to survive it, and in order.
@@ -37,16 +47,23 @@ async fn a_seed_spanning_several_batches_loads_every_row() {
     let result = harness.run_uid("seed.spike.wide").await.unwrap();
     assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
     assert_eq!(
-        harness.query_scalar("select count(*) from main.wide"),
+        harness.query_scalar("select count(*) from main.wide").await,
         ROWS_PAST_ONE_BATCH.to_string()
     );
     // The last row is in the final batch, the boundary row in the second.
     assert_eq!(
-        harness.query_scalar(&format!(
-            "select name from main.wide where id = {}",
-            ROWS_PAST_ONE_BATCH - 1
-        )),
+        harness
+            .query_scalar(&format!(
+                "select name from main.wide where id = {}",
+                ROWS_PAST_ONE_BATCH - 1
+            ))
+            .await,
         format!("name_{}", ROWS_PAST_ONE_BATCH - 1)
     );
-    assert_eq!(harness.query_scalar("select name from main.wide where id = 1024"), "name_1024");
+    assert_eq!(
+        harness
+            .query_scalar("select name from main.wide where id = 1024")
+            .await,
+        "name_1024"
+    );
 }

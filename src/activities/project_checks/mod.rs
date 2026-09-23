@@ -1,8 +1,8 @@
-//! The project-check gate: run every check against the index, before anything
-//! downstream is built.
+//! The project-check gate: run every check against the project's metadata,
+//! before anything downstream is built.
 //!
 //! Placement is the whole design. The worker has already parsed the project and
-//! built the index the checks query, and the workflow has planned the DAG but
+//! written the metadata the checks query, and the workflow has planned the DAG but
 //! scheduled none of it — so a failing check needs no graph edges to stop
 //! anything, the workflow simply does not proceed. That is where dbt puts the
 //! same gate, and for the same reason: gating individual nodes would let a node
@@ -14,12 +14,11 @@
 //! that examined nothing.
 
 pub mod evaluate;
-pub mod index;
+pub mod metadata;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use dbt_index_core::ingest::metadata_to_parquet::index_is_current;
 use dbt_schemas::schemas::DbtCheck;
 use dbt_schemas::schemas::common::Severity;
 use tracing::{info, warn};
@@ -28,9 +27,10 @@ use crate::activities::DbtActivities;
 use crate::activities::node_telemetry::invocation_span;
 use crate::types::{CheckResult, CheckStatus, ProjectChecksInput, ProjectChecksOutput};
 use crate::worker::project_checks::ProjectChecks;
+use crate::worker_state::WorkerState;
 
 use self::evaluate::{evaluate_batch, selection_filter_for, zero_rows_is_vacuous};
-use self::index::IndexReader;
+use self::metadata::MetadataReader;
 
 /// Violation rows carried on a failing check's message. Matches dbt's own
 /// preview budget — enough to recognise the problem, short enough that a
@@ -43,18 +43,24 @@ const MAX_PREVIEW_ROWS: usize = 5;
 /// "could not be evaluated" included, is reported in the output rather than
 /// raised: the workflow gates on `failed`, so an unevaluable check has to reach
 /// it as data instead of as an activity failure that retries.
-pub fn run_project_checks_inner(
+pub async fn run_project_checks_inner(
     activities: &DbtActivities,
-    input: &ProjectChecksInput,
+    input: ProjectChecksInput,
 ) -> Result<ProjectChecksOutput, anyhow::Error> {
-    // Reading the index runs dbt code, and dbt's data layer asserts that every
+    let state = Arc::clone(activities.registry.get(Some(input.project.as_str()))?);
+    // Checks query through a DuckDB adapter connection, which dbt only opens on
+    // its own pool.
+    crate::dbt_pool::run(move || run_project_checks_body(&state, &input)).await
+}
+
+fn run_project_checks_body(state: &WorkerState, input: &ProjectChecksInput) -> ProjectChecksOutput {
+    // Reading the metadata runs dbt code, and dbt's data layer asserts that every
     // dbt span sits under an `Invocation` root. `dbt check` is what dbt calls
     // this command, so that is what the span reports.
     let _invocation = invocation_span(&input.invocation_id, "dbt check").entered();
 
-    let state = activities.registry.get(Some(input.project.as_str()))?;
     let Some(checks) = state.project_checks.as_ref() else {
-        return Ok(ProjectChecksOutput::default());
+        return ProjectChecksOutput::default();
     };
     let scope: Option<BTreeSet<String>> = input
         .scope
@@ -69,23 +75,23 @@ pub fn run_project_checks_inner(
         failed = output.failed,
         "project checks evaluated"
     );
-    Ok(output)
+    output
 }
 
-/// Evaluate every check against the index, or report all of them unevaluable
-/// when the index cannot be read.
+/// Evaluate every check against the metadata, or report all of them
+/// unevaluable when it cannot be read.
 fn evaluate_all(checks: &ProjectChecks, scope: Option<&BTreeSet<String>>) -> ProjectChecksOutput {
-    // Checks read the index and never build it. If it does not reflect the
-    // parse it was built from there is nothing trustworthy to query — and every
-    // check must say so rather than return zero rows, which reads as a pass.
-    let results = match open_reader(checks) {
+    // With nothing trustworthy to query, every check must say so rather than
+    // return zero rows, which reads as a pass.
+    let results = match MetadataReader::open(&checks.metadata_dir) {
         Ok(mut reader) => checks
             .checks
             .iter()
             .map(|check| evaluate_one(&mut reader, check, scope))
             .collect(),
-        Err(reason) => {
-            warn!(reason, "project-check index is unreadable; no check could be evaluated");
+        Err(e) => {
+            let reason = format!("{e:#}");
+            warn!(reason, "project metadata is unreadable; no check could be evaluated");
             checks
                 .checks
                 .iter()
@@ -96,20 +102,9 @@ fn evaluate_all(checks: &ProjectChecks, scope: Option<&BTreeSet<String>>) -> Pro
     ProjectChecksOutput::new(results)
 }
 
-/// Open the index, or say in user-facing terms why it cannot be queried.
-fn open_reader(checks: &ProjectChecks) -> Result<IndexReader, String> {
-    if !index_is_current(&checks.metadata_dir, &checks.index_dir) {
-        return Err(format!(
-            "the metadata index at {} does not reflect the parse it was built from",
-            checks.index_dir.display()
-        ));
-    }
-    IndexReader::open(&checks.index_dir).map_err(|e| format!("{e:#}"))
-}
-
 /// Run one check and turn the rows it reported into a verdict.
 fn evaluate_one(
-    reader: &mut IndexReader,
+    reader: &mut MetadataReader,
     check: &Arc<DbtCheck>,
     scope: Option<&BTreeSet<String>>,
 ) -> CheckResult {
@@ -180,7 +175,7 @@ fn unevaluable(check: &Arc<DbtCheck>, message: String) -> CheckResult {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::worker::project_checks::without_an_index;
+    use crate::worker::project_checks::without_metadata;
 
     fn check(name: &str) -> Arc<DbtCheck> {
         let mut check = DbtCheck::default();
@@ -189,12 +184,12 @@ mod tests {
         Arc::new(check)
     }
 
-    /// The load-bearing property of the whole gate: an index that cannot be
+    /// The load-bearing property of the whole gate: metadata that cannot be
     /// queried must make every check say so. Reporting zero rows instead would
     /// read as "nothing wrong", which is the one wrong answer here.
     #[test]
-    fn an_unreadable_index_makes_every_check_unevaluable_rather_than_passing() {
-        let checks = without_an_index(vec![check("no_orphan_models"), check("every_model_owned")]);
+    fn unreadable_metadata_makes_every_check_unevaluable_rather_than_passing() {
+        let checks = without_metadata(vec![check("no_orphan_models"), check("every_model_owned")]);
 
         let output = evaluate_all(&checks, None);
 
@@ -211,7 +206,7 @@ mod tests {
                     .message
                     .as_deref()
                     .unwrap_or_default()
-                    .contains("index"),
+                    .contains("metadata"),
                 "the message must say what could not be read: {result:?}"
             );
             assert!(
@@ -221,11 +216,11 @@ mod tests {
         }
     }
 
-    /// A project with checks but no readable index still reports one verdict
+    /// A project with checks but no readable metadata still reports one verdict
     /// per check, so the summary cannot be mistaken for "no checks declared".
     #[test]
     fn every_declared_check_gets_a_verdict_even_when_none_could_run() {
-        let checks = without_an_index(vec![check("a"), check("b"), check("c")]);
+        let checks = without_metadata(vec![check("a"), check("b"), check("c")]);
         let output = evaluate_all(&checks, None);
         let names: Vec<&str> = output.results.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);

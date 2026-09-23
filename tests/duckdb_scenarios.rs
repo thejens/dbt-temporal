@@ -17,12 +17,12 @@ use dbt_temporal::error::DbtTemporalError;
 
 /// Isolates "does the ADBC driver load" from the dbt path — the minimal
 /// feasibility check for the embedded engine.
-#[test]
-fn duckdb_driver_loads_and_runs_queries() {
+#[tokio::test]
+async fn duckdb_driver_loads_and_runs_queries() {
     let engine = raw_engine();
-    assert!(raw_query_ok(&engine, "select 1 as id"), "select 1 should run");
+    assert!(raw_query_ok(&engine, "select 1 as id").await, "select 1 should run");
     assert!(
-        !raw_query_ok(&engine, "select * from a_table_that_does_not_exist"),
+        !raw_query_ok(&engine, "select * from a_table_that_does_not_exist").await,
         "missing table should fail"
     );
 }
@@ -161,6 +161,26 @@ async fn a_materialized_node_records_the_relation_it_wrote() {
         relation.rsplit('.').next(),
         Some("m"),
         "identifier is the node's alias: {relation}"
+    );
+}
+
+/// A table materialization splices the body into `create table as ( ... )`, so
+/// a terminal `;` would land inside the parentheses. The materialization gets
+/// the body without it; the result keeps the SQL as the user wrote it.
+#[tokio::test]
+async fn a_model_body_ending_in_a_semicolon_still_materializes() {
+    let harness =
+        Harness::build(&[("m", "{{ config(materialized='table') }}\nselect 1 as id;\n")]).await;
+    let result = harness.run_ok("m").await;
+
+    assert_eq!(harness.query_scalar("select count(*) from m").await, "1");
+    assert!(
+        result
+            .compiled_code
+            .as_deref()
+            .is_some_and(|sql| sql.trim_end().ends_with(';')),
+        "the recorded SQL is the body as written: {:?}",
+        result.compiled_code
     );
 }
 
@@ -710,7 +730,7 @@ async fn function_bodies_reach_the_warehouse_through_model_compiled_code() {
     // 41 + 1. A missing body could not produce this.
     harness.run_ok("uses_fn").await;
     assert_eq!(
-        harness.query_scalar("select answer from uses_fn"),
+        harness.query_scalar("select answer from uses_fn").await,
         "42",
         "the function body must have been compiled into the macro"
     );

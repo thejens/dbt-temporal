@@ -59,15 +59,28 @@ pub fn raw_engine() -> Arc<dyn dbt_adapter::AdapterEngine> {
 
 /// Run a single SQL statement against a fresh DuckDB connection, returning
 /// whether it succeeded. Used only by the driver smoke test.
-pub fn raw_query_ok(engine: &Arc<dyn dbt_adapter::AdapterEngine>, sql: &str) -> bool {
-    let cts = CancellationTokenSource::new();
-    let mut conn = engine
-        .new_connection(None, None)
-        .expect("open duckdb connection (driver dlopen)");
-    let ctx = QueryCtx::new("smoke");
-    engine
-        .execute(None, conn.as_mut(), &ctx, sql, cts.token())
-        .is_ok()
+pub async fn raw_query_ok(engine: &Arc<dyn dbt_adapter::AdapterEngine>, sql: &str) -> bool {
+    let engine = Arc::clone(engine);
+    let sql = sql.to_owned();
+    on_dbt_pool(move || {
+        let cts = CancellationTokenSource::new();
+        let mut conn = engine
+            .new_connection(None, None)
+            .expect("open duckdb connection (driver dlopen)");
+        let ctx = QueryCtx::new("smoke");
+        engine
+            .execute(None, conn.as_mut(), &ctx, &sql, cts.token())
+            .is_ok()
+    })
+    .await
+}
+
+/// Run a harness query where dbt allows connections: on its pool. A test
+/// thread is not a pool worker, so opening one here directly panics.
+async fn on_dbt_pool<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> R {
+    dbt_temporal::dbt_pool::run(work)
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"))
 }
 
 /// How `Harness::build_inner` should produce `profiles.yml`.
@@ -230,15 +243,19 @@ impl Harness {
 
     /// Run a statement for its effect — DDL, or seeding a table the project
     /// treats as a pre-existing source.
-    pub fn exec(&self, sql: &str) {
+    pub async fn exec(&self, sql: &str) {
         let engine = self.state().adapter_engines.default_engine();
-        let cts = CancellationTokenSource::new();
-        let mut conn = engine
-            .new_connection(None, None)
-            .expect("open duckdb connection");
-        engine
-            .execute(None, conn.as_mut(), &QueryCtx::new("setup"), sql, cts.token())
-            .unwrap_or_else(|e| panic!("statement failed: {sql}: {e:?}"));
+        let sql = sql.to_owned();
+        on_dbt_pool(move || {
+            let cts = CancellationTokenSource::new();
+            let mut conn = engine
+                .new_connection(None, None)
+                .expect("open duckdb connection");
+            engine
+                .execute(None, conn.as_mut(), &QueryCtx::new("setup"), &sql, cts.token())
+                .unwrap_or_else(|e| panic!("statement failed: {sql}: {e:?}"));
+        })
+        .await;
     }
 
     /// Read one value back out of the warehouse, rendered as a string.
@@ -246,35 +263,43 @@ impl Harness {
     /// For assertions that a node produced the *right data*, not merely that it
     /// reported success — a materialization can succeed on SQL that quietly
     /// computed the wrong thing.
-    pub fn query_scalar(&self, sql: &str) -> String {
-        Self::query_scalar_on(self.state().adapter_engines.default_engine().as_ref(), sql)
+    pub async fn query_scalar(&self, sql: &str) -> String {
+        Self::query_scalar_on(self.state().adapter_engines.default_engine(), sql).await
     }
 
     /// Like [`query_scalar`](Self::query_scalar) but against a named adapter's
     /// engine — for asserting that a node routed to a non-default adapter wrote
     /// to *that* warehouse.
-    pub fn query_scalar_on_adapter(&self, adapter: dbt_adapter::AdapterType, sql: &str) -> String {
+    pub async fn query_scalar_on_adapter(
+        &self,
+        adapter: dbt_adapter::AdapterType,
+        sql: &str,
+    ) -> String {
         let engine = self
             .state()
             .adapter_engines
             .get(adapter, "test assertion")
             .unwrap_or_else(|e| panic!("no engine for {adapter}: {e}"));
-        Self::query_scalar_on(engine.as_ref(), sql)
+        Self::query_scalar_on(engine, sql).await
     }
 
     /// Shared by the default-engine and named-adapter entry points; the
     /// engine is the only thing that differs between them.
-    fn query_scalar_on(engine: &dyn dbt_adapter::AdapterEngine, sql: &str) -> String {
-        let cts = CancellationTokenSource::new();
-        let mut conn = engine
-            .new_connection(None, None)
-            .expect("open duckdb connection");
-        let batch = engine
-            .execute(None, conn.as_mut(), &QueryCtx::new("assert"), sql, cts.token())
-            .unwrap_or_else(|e| panic!("query failed: {sql}: {e:?}"));
-        assert!(batch.num_rows() > 0, "query returned no rows: {sql}");
-        arrow_cast::display::array_value_to_string(batch.column(0), 0)
-            .expect("rendering the first column")
+    async fn query_scalar_on(engine: Arc<dyn dbt_adapter::AdapterEngine>, sql: &str) -> String {
+        let sql = sql.to_owned();
+        on_dbt_pool(move || {
+            let cts = CancellationTokenSource::new();
+            let mut conn = engine
+                .new_connection(None, None)
+                .expect("open duckdb connection");
+            let batch = engine
+                .execute(None, conn.as_mut(), &QueryCtx::new("assert"), &sql, cts.token())
+                .unwrap_or_else(|e| panic!("query failed: {sql}: {e:?}"));
+            assert!(batch.num_rows() > 0, "query returned no rows: {sql}");
+            arrow_cast::display::array_value_to_string(batch.column(0), 0)
+                .expect("rendering the first column")
+        })
+        .await
     }
 
     /// Execute one model by name, returning the node result or a classified error.
@@ -438,19 +463,21 @@ impl Harness {
         result
     }
 
-    /// Evaluate the project's checks against the index built at startup.
+    /// Evaluate the project's checks against the metadata written at startup.
     ///
     /// `scope` is the run's selected node set, or `None` when no selector
     /// narrowed the run — which is what decides whether zero rows is a pass or
     /// a vacuous skip.
-    pub fn project_checks(&self, scope: Option<&[&str]>) -> ProjectChecksOutput {
+    pub async fn project_checks(&self, scope: Option<&[&str]>) -> ProjectChecksOutput {
         let input = serde_json::from_value(serde_json::json!({
             "project": PROJECT,
             "invocation_id": uuid::Uuid::new_v4().to_string(),
             "scope": scope.map(|ids| ids.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()),
         }))
         .unwrap();
-        run_project_checks_inner(&self.activities, &input).expect("project checks should evaluate")
+        run_project_checks_inner(&self.activities, input)
+            .await
+            .expect("project checks should evaluate")
     }
 
     /// Run the `on-run-start` (or `on-run-end`, with empty `node_results`)

@@ -154,16 +154,13 @@ impl DbtActivities {
     /// output, so an error here means the project could not be resolved at all
     /// — which retrying will not fix.
     #[activity(name = "run_project_checks")]
-    // Must be async for #[activity] macro; nothing here awaits. Both lint names
-    // are listed because they were introduced in different clippy releases, and
-    // `unknown_lints` keeps the older toolchain from rejecting the newer name.
-    #[allow(unknown_lints, clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn run_project_checks(
         self: Arc<Self>,
         _ctx: ActivityContext,
         input: ProjectChecksInput,
     ) -> Result<ProjectChecksOutput, ActivityError> {
-        project_checks::run_project_checks_inner(&self, &input)
+        project_checks::run_project_checks_inner(&self, input)
+            .await
             .map_err(|e| retry::classify(e, &[], retry::Unclassified::Permanent))
     }
 

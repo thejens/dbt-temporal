@@ -1,6 +1,6 @@
-# dbt-fusion Workarounds
+# dbt v2 Workarounds
 
-dbt-temporal uses the dbt Core v2 Rust crates (formerly dbt-fusion, now developed in [dbt-labs/dbt-core](https://github.com/dbt-labs/dbt-core)) as its rendering and execution engine. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
+dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.5` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
 ## 1. `ResultStore` not injectable into context builders — **resolved upstream**
 
@@ -10,18 +10,34 @@ dbt-temporal uses the dbt Core v2 Rust crates (formerly dbt-fusion, now develope
 so the run path reads adapter responses from the store it is handed. The
 re-injection workaround (create a store upfront, inject its closures into
 `base_context`, re-inject after the builder overwrote them) is gone, and with it
-the two discarded stores per node.
+the two discarded stores per node. The issue itself was closed on 2026-09-17,
+when the base-context builders also started accepting a caller's store; that
+landed on `main` after v2.0.5 and changes nothing here.
 
 ## 2. `ref()` resolves schemas at parse time, not execution time
 
 `ref()` calls are resolved during project parsing and baked into `Relation` objects with the startup default schema. When a per-workflow env override changes `DB_SCHEMA`, downstream models still reference the old schema in their compiled SQL (e.g. `"waffle_hut"."default_schema"."stg_customers"` instead of `"waffle_hut"."override_schema"."stg_customers"`).
 
-**Workaround:** Two strategies, chosen by whether the project overrides `generate_schema_name`:
+**Workaround:** compiled SQL is rewritten in relation positions only, from a
+per-run map of where each startup relation moved.
 
-- **Default macro** (the common case): after Jinja renders the raw SQL, we string-replace quoted occurrences of the startup default schema with the per-workflow schema in the compiled SQL (`patch_compiled_schema` / `compute_patched_relation`). This is brittle — it assumes the schema appears as a quoted identifier and that no column or alias happens to match the schema name — but only applies when the project's schema naming follows dbt's default `<target_schema>[_<custom>]` pattern.
-- **Custom macro**: `build_schema_rewrite_map` re-executes the project's actual `generate_schema_name` macro through the already-patched Jinja env (`env_var()` overridden, `target` patched with the per-workflow schema/database) for every distinct schema in the project, then `patch_sql_with_schema_map` replaces every distinct schema in compiled SQL using the resulting map — handling both double-quoted (PostgreSQL/Snowflake/Redshift) and backtick-quoted (BigQuery) identifiers. This matches vanilla dbt's per-run macro evaluation instead of guessing at the pattern, and replaces what used to be a hard `Configuration` error when a custom macro's output didn't follow the default suffix pattern.
+- [`schema_patch`](../src/activities/execute_node/schema_patch.rs) computes
+  that map **per node**. With dbt's default naming macros it reconstructs the
+  `<target_schema>[_<custom>]` pattern against the rebuilt `target`; when the
+  project overrides `generate_schema_name` (or `generate_database_name`) it
+  re-executes the project's own macro with the real node, through the Jinja env
+  whose `env_var()` and `target` carry the workflow's overrides — what dbt does
+  per run.
+- [`sql_rewrite`](../src/activities/execute_node/sql_rewrite.rs) applies it with
+  a lexer rather than search-and-replace: string literals, dollar-quoted bodies
+  and comments are skipped, only the leading components of a dotted chain are
+  candidates, and each site is rewritten once from the original text, so
+  chained mappings cannot cascade.
 
-**Known limitation:** the custom-macro path only passes `node.name` into the macro call, not the full dbt node object — macros reading `node.config`, `node.fqn`, etc. may still need the `profiles.yml`-level approach where `target.schema` carries the per-tenant value instead.
+**Known limitation:** it is a lexer, not a parser, so it cannot tell
+`schema.table` from `alias.column` when a table alias shadows a schema name.
+The durable fix is to resolve relations from per-run metadata before rendering
+rather than patching text afterwards.
 
 ## 3. ADBC PostgreSQL driver built from source (macOS ARM64)
 
@@ -88,12 +104,13 @@ both produced the same SIGSEGV, so re-run the script if you see it again):
 
 ## 4. Relation cache goes stale in a long-lived worker
 
-dbt-fusion's `RelationCache` is built for the CLI's one-shot lifetime. The
+dbt v2's `RelationCache` is built for the CLI's one-shot lifetime. The
 first existence check lists the whole schema and marks that schema
-**complete**; nothing writes back to it when a materialization subsequently
-creates or drops a relation (the bundled macros carry no `cache_added` /
-`cache_dropped` / `cache_renamed` calls). For the CLI that is sound — the
-process exits and the next invocation starts from an empty cache.
+**complete**; nothing adds to it when a materialization subsequently creates a
+relation. As of v2.0.5 `adapter.drop_relation` and `adapter.rename_relation`
+do update the cache, in Rust, but creation still does not, and the bundled
+macros carry no `cache_added` calls. For the CLI that is sound — the process
+exits and the next invocation starts from an empty cache.
 
 A dbt-temporal worker outlives the run and shares one engine across every
 workflow, so the cache goes stale as soon as the first node materializes. The
@@ -118,9 +135,10 @@ cache was designed around. The cost is one schema listing per node rather than
 one per worker lifetime. Covered by
 `tests/duckdb_scenarios.rs::rerunning_a_*_model_replaces_the_existing_relation`.
 
-**Upstream angle:** the durable fix is for the materialization macros to
-maintain the cache (as dbt-core's Python macros do), or for `insert_schema` to
-carry an invalidation hook. Not yet filed — see the filing policy note below.
+**Upstream angle:** drops and renames are now maintained; the remaining gap is
+creation — the materializations would need to `cache_added` what they create,
+as dbt-core's Python macros do. Not yet filed — see the filing policy note
+below.
 
 ## 5. dbt's telemetry data layer assumes it owns the process
 
@@ -183,6 +201,11 @@ run controls:
 - **Across runs.** Scratch state written by one workflow's macros is visible to
   the next, where dbt-core would have started clean.
 
+Upstream now documents that contract explicitly: `reset_invocation_graph` is
+what "a long-lived process (LSP, service) calls once per invocation". That
+assumes one invocation at a time, which a worker running concurrent workflows
+cannot provide.
+
 **No workaround.** The reset is global, so calling it per run would clear a
 concurrently rendering workflow's graph — worse than the leak. Nothing in the
 API scopes the map to a caller. The durable fix is upstream: hand out a handle
@@ -198,7 +221,7 @@ data solely in the multi-project case.
 | Workaround | Description |
 |---|---|
 | **dbt's data layer on every tracing stack** | dbt code reads span start info and `TelemetryAttributes` out of span extensions and panics when either is missing; the types are private to `dbt-tracing`, so only its own `TelemetryDataLayer` can put them there. [`tracing_setup`](../src/tracing_setup.rs) wires that layer with no middlewares and no consumers into the non-OTLP stack, where it records the state and exports nothing. Any process that renders dbt Jinja — the worker, every integration test — needs it in its subscriber. |
-| **Forked arrow-rs and ring** | dbt-fusion uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
+| **Forked arrow-rs and ring** | dbt v2 uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
 ## Candidate upstream issues
@@ -208,8 +231,8 @@ approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
 
 Each entry records the rev it was last confirmed against. The current pin is
-`6f725fbe` (2026-09-06, `2.0.0-rc.1`); anything confirmed against an older rev
-needs re-checking before it is filed or acted on.
+the `v2.0.5` release tag (`a3bdd96b`, 2026-09-18); anything confirmed against
+an older rev needs re-checking before it is filed or acted on.
 
 **2026-07-08 audit:** a duplicate check turned up prior filings against
 `dbt-labs/dbt-core` under the `thejens` account that predate this doc and
@@ -327,16 +350,18 @@ pin before filing (upstream cleanup may have already addressed some of these).
   not nested under `config:`** (dbt 1.10+ shape) — no parse error, just an
   ERROR-level log line. Silent data loss for a user writing the older (still
   common) YAML shape.
-- **`PostgresMetadataAdapter::list_relations_schemas_inner` is `todo!()`** and
+- **`PostgresMetadataAdapter::list_relations_schemas_inner` is `todo!()`**
+  (**re-confirmed at v2.0.5**, where `list_relations_schemas_by_patterns` and
+  `freshness` are `todo!()` too) and
   panics; inside a long-lived worker activity this wedges the worker until
   the activity timeout fires, presenting as a hang rather than a crash.
-- **Bundled `get_unit_test_sql` macro has no `ORDER BY`**, so
+- **Bundled `get_unit_test_sql` macro has no `ORDER BY`** (re-confirmed at v2.0.5), so
   `compare_record_batches`'s positional row comparison is nondeterministic
   against unordered query results.
 - **`get_fixture_sql(rows, column_name_to_data_types)` emits broken SQL**
   (`as ` with an empty column name) when `column_name_to_data_types` is passed
   rather than `none`.
-- **`DbtManifest` does not round-trip through `serde_json`** — dbt-fusion's
+- **`DbtManifest` does not round-trip through `serde_json`** — dbt v2's
   own emitted `manifest.json` fails against the derived `Deserialize` impl
   (demands a literal `__warehouse_specific_config__` field the serializer
   doesn't always produce). Requires the `typed_struct_from_json_str`

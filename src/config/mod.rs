@@ -156,6 +156,25 @@ pub enum WorkerTuningConfig {
     },
 }
 
+impl WorkerTuningConfig {
+    /// The most activities this worker runs at once.
+    ///
+    /// Every activity that touches the warehouse does so on the dbt pool, so
+    /// this is also how many pool threads the worker can use: fewer, and an
+    /// activity holding a slot would queue for a thread while its timeout runs.
+    pub const fn max_activity_slots(&self) -> usize {
+        match self {
+            Self::Fixed {
+                max_concurrent_activities,
+                ..
+            } => *max_concurrent_activities,
+            Self::ResourceBased {
+                activity_max_slots, ..
+            } => *activity_max_slots,
+        }
+    }
+}
+
 /// Newtype wrapper for search attribute config.
 #[derive(Debug, Clone)]
 pub struct SearchAttributeConfig(pub BTreeMap<String, String>);
@@ -258,6 +277,26 @@ mod tests {
     use super::*;
 
     use crate::config::test_util::with_env;
+
+    /// The pool is sized from this, so it has to follow whichever tuner is
+    /// active: fixed slots, or the resource tuner's ceiling.
+    #[test]
+    fn max_activity_slots_follows_the_active_tuner() {
+        let fixed = WorkerTuningConfig::Fixed {
+            max_concurrent_workflow_tasks: 200,
+            max_concurrent_activities: 25,
+            max_concurrent_local_activities: 10,
+        };
+        assert_eq!(fixed.max_activity_slots(), 25);
+
+        let resource = WorkerTuningConfig::ResourceBased {
+            target_mem_usage: 0.8,
+            target_cpu_usage: 0.9,
+            activity_min_slots: 1,
+            activity_max_slots: 64,
+        };
+        assert_eq!(resource.max_activity_slots(), 64);
+    }
 
     /// Env vars touched by `from_env`. Tests blank-slate these between cases so
     /// host environment doesn't leak into assertions.

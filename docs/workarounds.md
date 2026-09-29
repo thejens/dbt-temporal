@@ -2,6 +2,10 @@
 
 dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.5` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
+The long-lived-worker gaps (sections 4–6) were last re-checked on 2026-09-29 against
+dbt `main` (`24206524`), which already carries the 2.0.7 changes: none of them
+is addressed there yet.
+
 ## 1. `ResultStore` not injectable into context builders — **resolved upstream**
 
 **Issue:** [dbt-labs/dbt-core#14245](https://github.com/dbt-labs/dbt-core/issues/14245)
@@ -238,21 +242,22 @@ an older rev needs re-checking before it is filed or acted on.
 `dbt-labs/dbt-core` under the `thejens` account that predate this doc and
 were never reconciled into it:
 
-- [#14245](https://github.com/dbt-labs/dbt-core/issues/14245) `[FEAT] ResultStore` — open, matches item 1 above.
+- [#14245](https://github.com/dbt-labs/dbt-core/issues/14245) `[FEAT] ResultStore` — **closed as completed** (2026-09-17); this is item 1 above.
 - [#14244](https://github.com/dbt-labs/dbt-core/issues/14244) `RunConfig` missing `call()` — **closed, fixed upstream in preview.134**
   (`dbt-labs/fs#7600`). Confirmed fixed at rev `37ba42bd`
-  (`RunConfig` now implements `fn call`) — the `NoopConfig` swap workaround in
-  `src/activities/execute_node.rs` (see `todo/upstream-dbt-fusion-api.md` item 2)
-  is dead code and should be removed.
+  (`RunConfig` now implements `fn call`); the `NoopConfig` swap that worked
+  around it has been removed from `execute_node.rs`.
 - [#14243](https://github.com/dbt-labs/dbt-core/issues/14243) `execute` not a Jinja global — **closed**, maintainer couldn't
   reproduce via the CLI and closed once we confirmed it's a library-consumer-only
   issue (`configure_compile_and_run_jinja_environment` embedders, not `dbt run`
-  itself). Our workaround (item 3 in the todo file) is still needed on our side;
+  itself). Our workaround — registering `execute` as an environment global in
+  `render_env.rs` — is still needed: re-checked at `v2.0.5`, upstream still only
+  puts it in the context;
   re-filing isn't likely to land differently without a CLI-visible repro.
   **Note:** a follow-up comment on that thread was posted from the `jens-gilion`
   (work) account on a `thejens`-owned personal issue — an identity mixup worth
   being aware of before commenting further on that thread.
-- `TARGET_PACKAGE_NAME` in `build_run_node_context()` (item 4 in the todo file) was
+- `TARGET_PACKAGE_NAME` in `build_run_node_context()` was
   only ever raised as a *comment* on the now-closed
   [#14148](https://github.com/dbt-labs/dbt-core/issues/14148), which fixed a
   narrower case (query-comment macros) but not the general run-phase gap.
@@ -321,31 +326,15 @@ directly as a fallback signal.
 Observed several bumps back; confirm each still reproduces against the current
 pin before filing (upstream cleanup may have already addressed some of these).
 
-- **`State::lookup` on a missing macro name recurses without bound and
-  overflows the stack.** A genuine crash bug — highest filing priority in
-  this group if still reproducible.
-
-  **2026-07-08: confirmed still reproducing, root cause pinned down, minimal
-  repro built.** Root cause: `DispatchObject::call()` →
-  `execute_template()` (`crates/dbt-jinja/minijinja/src/dispatch_object.rs`)
-  does `template_state.lookup(leaf_name, listeners).expect(...)`, but
-  `State::lookup()` (`crates/dbt-jinja/minijinja/src/vm/state.rs`) doesn't
-  check whether the macro is actually *defined* — it falls back to
-  `macro_namespace_template_resolver`, which only checks whether a
-  *template file* by that name exists. When a template exists at the
-  dispatch-convention name but doesn't define the macro, `lookup` hands back
-  a **new, equivalent `DispatchObject`** pointing at the same template.
-  Calling it repeats the same steps forever — no cycle/depth guard actually
-  fires. Reproduces with a ~15-line Rust program depending only on the
-  vendored `minijinja` crate (no CLI, no project, no adapter) against
-  latest `dbt-labs/dbt-core` main (`e4c0c1ef`, 2026-07-07). This bug is in
-  dbt-specific dispatch code grafted onto the fork — `dispatch_object.rs`
-  and `macro_namespace_template_resolver` don't exist in upstream
-  `mitsuhiko/minijinja` — so it belongs in `dbt-labs/dbt-core`, not
-  upstream minijinja. Draft body ready; still needs final go-ahead to file.
-  **2026-07-27: still open per the DISPATCH_CONFIG/antlr4/`..`-path status
-  check above** — none of the fixes that landed since 07-08 touch dispatch
-  or macro resolution, so this one still needs filing.
+- **`State::lookup` on a missing macro name recursed without bound and
+  overflowed the stack** — **resolved upstream.** When a template existed at
+  the dispatch-convention name but did not define the macro, `lookup` handed
+  back an equivalent `DispatchObject` pointing at the same template, and
+  calling it repeated forever. Filed as
+  [dbt-labs/dbt#15700](https://github.com/dbt-labs/dbt/issues/15700); fixed by
+  `3cb8e724` ("return dispatch errors for templates without macros",
+  2026-08-08), which the `v2.0.5` pin includes. Dispatch now fails with an
+  error instead of aborting the process.
 - **Source freshness YAML silently drops `loaded_at_field`/`freshness` when
   not nested under `config:`** (dbt 1.10+ shape) — no parse error, just an
   ERROR-level log line. Silent data loss for a user writing the older (still

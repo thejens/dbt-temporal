@@ -30,7 +30,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   # No standalone test job: `make coverage` runs the same
-  # `cargo test --workspace -- --test-threads=1` under llvm-cov instrumentation
+  # `cargo test --workspace --features aws -- --test-threads=1` under llvm-cov instrumentation
   # and only then checks the floor, so a failing test already fails this job.
   # Running both duplicated a full compile and test cycle per PR for a second
   # copy of the same signal.

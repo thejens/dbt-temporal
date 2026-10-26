@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn extract_ephemeral_names_returns_empty_when_absent() {
-        assert!(extract_ephemeral_names("select 1").is_empty());
+        assert_eq!(extract_ephemeral_names("select 1"), Vec::<String>::new());
     }
 
     #[test]

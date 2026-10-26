@@ -821,7 +821,7 @@ hooks:
         let (hooks, retry, _timeouts) = load_project_config(&dir)?;
         assert_eq!(hooks.on_failure.len(), 1);
         assert_eq!(retry.max_attempts, 3);
-        assert!(retry.non_retryable_errors.is_empty());
+        assert!(retry.non_retryable_errors.is_empty(), "{:?}", retry.non_retryable_errors);
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

@@ -7,7 +7,7 @@ as of this writing — always check the linked sources for the current terms.
 
 [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite of dbt developed in
 the `dbt-labs/dbt` repository (formerly `dbt-labs/dbt-core`), is **Apache 2.0**
-as of the pinned `v2.0.5` release. The workspace license applies to every crate
+as of the pinned `v2.0.8` release. The workspace license applies to every crate
 dbt-temporal consumes, including the bundled `minijinja` fork.
 
 dbt Labs also ships its own distribution of dbt v2 with product-specific

@@ -440,7 +440,7 @@ mod tests {
     fn test_topological_levels_empty() {
         let d = deps(&[]);
         let levels = topological_levels(&d).unwrap();
-        assert!(levels.is_empty());
+        assert!(levels.is_empty(), "{levels:?}");
     }
 
     #[test]

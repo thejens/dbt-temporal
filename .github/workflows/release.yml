@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build deps
         run: |
@@ -58,7 +58,7 @@ jobs:
 
       # Reused by the container job so the image isn't compiled a second time.
       - name: Upload binary for the container job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dbt-temporal-linux-x86_64
           path: target/release/dbt-temporal
@@ -69,7 +69,7 @@ jobs:
           cargo deb --no-build
 
       - name: Upload .deb to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: target/debian/*.deb
           fail_on_unmatched_files: true
@@ -81,7 +81,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build deps
         run: |
@@ -109,7 +109,7 @@ jobs:
           cargo generate-rpm
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: target/generate-rpm/*.rpm
           fail_on_unmatched_files: true
@@ -122,10 +122,10 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the Debian-built binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dbt-temporal-linux-x86_64
           path: .
@@ -133,10 +133,10 @@ jobs:
       - name: Make binary executable
         run: chmod +x dbt-temporal
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -145,7 +145,7 @@ jobs:
       # Default image (debian-slim): :<version>, :<major.minor>, :latest
       - name: Metadata (debian-slim)
         id: meta_slim
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -154,7 +154,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push (debian-slim)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.release
@@ -165,7 +165,7 @@ jobs:
       # Distroless variant: :<version>-distroless, :<major.minor>-distroless, :distroless
       - name: Metadata (distroless)
         id: meta_distroless
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           flavor: |
@@ -177,7 +177,7 @@ jobs:
             type=raw,value=distroless,suffix=
 
       - name: Build and push (distroless)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile.distroless

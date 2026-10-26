@@ -134,5 +134,5 @@ nothing.
 
 | Dependency | Status | Role |
 |------------|--------|------|
-| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `1.0.0`, stable (GA) | Workflow orchestration |
-| [dbt v2](https://github.com/dbt-labs/dbt) | `v2.0.5` release, stable (GA), pinned by git rev in [Cargo.toml](../Cargo.toml) — the crates are not published | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |
+| [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) | `1.1.0`, stable (GA) | Workflow orchestration |
+| [dbt v2](https://github.com/dbt-labs/dbt) | `v2.0.8` release, stable (GA), pinned by git rev in [Cargo.toml](../Cargo.toml) — the crates are not published | Project loading, parsing, DAG construction, Jinja rendering, adapter execution |

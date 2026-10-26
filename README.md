@@ -6,8 +6,8 @@ Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node ru
 
 > **Status**: Not production-ready. dbt-temporal builds on two stable, generally
 > available releases: [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite
-> of dbt (pinned to the `v2.0.5` release), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.0.0`). dbt v2's
+> of dbt (pinned to the `v2.0.8` release), and the
+> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.1.0`). dbt v2's
 > crates are an internal API rather than a published library, though, and several
 > [workarounds](docs/workarounds.md) are needed to run them in a long-lived
 > worker. Consider dbt-temporal itself a proof of concept — largely developed by

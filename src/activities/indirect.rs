@@ -216,9 +216,9 @@ mod tests {
             ),
             selected
         );
-        assert!(
-            expand_indirect_selection(vec![], &nodes, &eligible, IndirectSelection::Eager)
-                .is_empty()
+        assert_eq!(
+            expand_indirect_selection(vec![], &nodes, &eligible, IndirectSelection::Eager),
+            Vec::<String>::new()
         );
     }
 }

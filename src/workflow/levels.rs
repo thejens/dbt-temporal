@@ -531,7 +531,7 @@ mod tests {
     fn a_full_window_starts_nothing_and_one_completion_starts_one() {
         let mut pending: VecDeque<usize> = (0..10).collect();
 
-        assert!(take_startable(&mut pending, MAX_ACTIVITIES_IN_FLIGHT).is_empty());
+        assert_eq!(take_startable(&mut pending, MAX_ACTIVITIES_IN_FLIGHT), Vec::<usize>::new());
         assert_eq!(pending.len(), 10, "nothing was taken");
 
         let next = take_startable(&mut pending, MAX_ACTIVITIES_IN_FLIGHT - 1);

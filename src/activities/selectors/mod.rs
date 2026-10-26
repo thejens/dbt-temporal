@@ -495,7 +495,7 @@ mod tests {
 
         let none = apply_selectors(ids, &nodes, Some("file:absent.sql"), None, None, &no_expansion)
             .unwrap();
-        assert!(none.is_empty());
+        assert!(none.is_empty(), "{none:?}");
     }
 
     #[test]
@@ -518,7 +518,7 @@ mod tests {
         nodes.project_name = Some("marketing".to_string());
         let none =
             apply_selectors(ids, &nodes, Some("package:this"), None, None, &no_expansion).unwrap();
-        assert!(none.is_empty());
+        assert!(none.is_empty(), "{none:?}");
     }
 
     #[test]
@@ -615,7 +615,7 @@ mod tests {
             &no_expansion,
         )
         .unwrap();
-        assert!(none.is_empty());
+        assert!(none.is_empty(), "{none:?}");
     }
 
     /// The generalisation: any config key, nested keys, and list-valued keys.
@@ -627,13 +627,13 @@ mod tests {
         };
 
         assert_eq!(select("config.schema:audit"), vec!["model.shop.a".to_string()]);
-        assert!(select("config.schema:marts").is_empty());
+        assert_eq!(select("config.schema:marts"), Vec::<String>::new());
 
         assert_eq!(select("config.meta.owner:finance"), vec!["model.shop.a".to_string()]);
-        assert!(select("config.meta.owner:marketing").is_empty());
+        assert_eq!(select("config.meta.owner:marketing"), Vec::<String>::new());
 
         assert_eq!(select("config.unique_key:order_id"), vec!["model.shop.b".to_string()]);
-        assert!(select("config.unique_key:customer_id").is_empty());
+        assert_eq!(select("config.unique_key:customer_id"), Vec::<String>::new());
     }
 
     /// A config key no node sets is a legitimately empty selection, not an
@@ -644,7 +644,7 @@ mod tests {
         let out =
             apply_selectors(ids, &nodes, Some("config.not_a_key:foo"), None, None, &no_expansion)
                 .unwrap();
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]
@@ -709,7 +709,7 @@ mod tests {
         let none =
             apply_selectors(ids, &nodes, Some("source:raw.customers"), None, None, &no_expansion)
                 .unwrap();
-        assert!(none.is_empty());
+        assert!(none.is_empty(), "{none:?}");
     }
 
     #[test]
@@ -720,9 +720,9 @@ mod tests {
         };
 
         assert_eq!(select("exposure:weekly"), vec!["exposure.shop.weekly".to_string()]);
-        assert!(select("exposure:monthly").is_empty());
+        assert_eq!(select("exposure:monthly"), Vec::<String>::new());
         assert_eq!(select("metric:revenue"), vec!["metric.shop.revenue".to_string()]);
-        assert!(select("metric:cost").is_empty());
+        assert_eq!(select("metric:cost"), Vec::<String>::new());
     }
 
     #[test]
@@ -734,11 +734,11 @@ mod tests {
 
         assert_eq!(select("test_type:generic"), vec!["test.shop.nn_orders".to_string()]);
         assert_eq!(select("test_type:singular"), vec!["test.shop.assert_totals".to_string()]);
-        assert!(select("test_type:unit").is_empty());
+        assert_eq!(select("test_type:unit"), Vec::<String>::new());
 
         // A generic test answers to the macro behind it, not its node name.
         assert_eq!(select("test_name:not_null"), vec!["test.shop.nn_orders".to_string()]);
-        assert!(select("test_name:unique").is_empty());
+        assert_eq!(select("test_name:unique"), Vec::<String>::new());
     }
 
     #[test]
@@ -756,9 +756,9 @@ mod tests {
         };
 
         assert_eq!(select("group:finance"), vec!["model.shop.orders".to_string()]);
-        assert!(select("group:marketing").is_empty());
+        assert_eq!(select("group:marketing"), Vec::<String>::new());
         assert_eq!(select("access:public"), vec!["model.shop.orders".to_string()]);
-        assert!(select("access:private").is_empty());
+        assert_eq!(select("access:private"), Vec::<String>::new());
     }
 
     #[test]
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(select("version:latest"), vec!["model.shop.orders.v2".to_string()]);
         assert_eq!(select("version:old"), vec!["model.shop.orders.v1".to_string()]);
         assert_eq!(select("version:none"), vec!["model.shop.plain".to_string()]);
-        assert!(select("version:prerelease").is_empty());
+        assert_eq!(select("version:prerelease"), Vec::<String>::new());
     }
 
     // --- unsupported method rejection ---
@@ -1112,6 +1112,6 @@ mod tests {
         let ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
         let out = apply_selectors(ids, &nodes, Some("state:modified"), None, None, &no_expansion)
             .unwrap();
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "{out:?}");
     }
 }

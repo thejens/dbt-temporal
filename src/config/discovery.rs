@@ -171,7 +171,7 @@ mod tests {
         std::fs::create_dir_all(&tmp)?;
 
         let dirs = scan_for_projects(&tmp)?;
-        assert!(dirs.is_empty());
+        assert!(dirs.is_empty(), "{dirs:?}");
 
         std::fs::remove_dir_all(&tmp)?;
         Ok(())

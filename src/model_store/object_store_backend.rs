@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures::{StreamExt, TryStreamExt};
+use object_store::ObjectStoreExt as _;
 use tracing::info;
 
 /// How many objects to download at once.
@@ -103,7 +104,7 @@ async fn download_one(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use object_store::{ObjectStore as _, memory::InMemory, path::Path as ObjectPath};
+    use object_store::{memory::InMemory, path::Path as ObjectPath};
 
     async fn store_with(files: &[(&str, &[u8])]) -> InMemory {
         let store = InMemory::new();

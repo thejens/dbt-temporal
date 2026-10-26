@@ -95,6 +95,8 @@ Entries in `DBT_PROJECT_DIRS` can be local filesystem paths or remote URLs. Path
 
 The feature flags apply only to builds from source; the released packages and container images include both.
 
+Git sources shell out to the `git` CLI (and `ssh` for `git+ssh://`), so the worker needs them on its `PATH`. The default container image includes both. The `-distroless` image does not; with it, bake the project into the image, mount it, or fetch it from `gs://` / `s3://`.
+
 The `#branch` suffix is required for git URLs and specifies which branch (or tag) to check out. An optional `:subdir` can be appended to point at a subdirectory within the repo:
 
 ```

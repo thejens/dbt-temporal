@@ -4,6 +4,7 @@ pub mod engines;
 pub mod profile;
 pub mod project_checks;
 pub mod schemas;
+pub mod shutdown;
 pub mod temporal;
 
 use std::collections::BTreeMap;
@@ -285,7 +286,7 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
         std::num::NonZeroUsize::new(config.worker_tuning.max_activity_slots())
             .unwrap_or(std::num::NonZeroUsize::MIN),
     );
-    let mut worker = build_worker(&config).await?;
+    let worker = build_worker(&config).await?;
 
     // Start health file tracker if configured.
     let health_path = resolve_health_path(config.health_file.as_deref(), config.health_port);
@@ -313,13 +314,18 @@ pub async fn run_worker(config: DbtTemporalConfig) -> Result<()> {
         tracing::warn!("{msg}");
     }
 
+    // Installed only now, not before the (possibly long) project load above:
+    // a handler replaces SIGINT's default action, and Ctrl-C during startup
+    // should still just exit.
+    let signals = shutdown::ShutdownSignals::install()?;
+
     info!(
         task_queue = %config.temporal_task_queue,
         namespace = %config.temporal_namespace,
         "dbt-temporal worker started"
     );
 
-    worker.run().await.context("worker exited with error")
+    shutdown::run(worker, signals).await
 }
 
 /// Load and parse a single dbt project, returning initialized WorkerState.

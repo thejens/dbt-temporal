@@ -256,7 +256,7 @@ The resource-based tuner is cgroup-aware: in containers with CPU/memory limits, 
 |----------|---------|-------------|
 | `WORKER_MAX_ACTIVITIES_PER_SECOND` | unlimited | Per-worker rate limit on activities/second. Useful for protecting downstream warehouses from burst load. |
 | `WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND` | unlimited | Server-side rate limit on activities/second for the entire task queue (across all workers). |
-| `WORKER_GRACEFUL_SHUTDOWN_SECS` | none | Grace period (in seconds) before canceling in-flight activities on shutdown. Without this, the worker waits for all activities to complete. |
+| `WORKER_GRACEFUL_SHUTDOWN_SECS` | none | After `SIGTERM`/`SIGINT`, how long (in seconds) in-flight activities may keep running before they are cancelled and retried on another worker. Without this, the worker waits for all of them. New work stops at the signal either way; see [Graceful Shutdown](deployment.md#graceful-shutdown). |
 
 **Priority scheduling** — when activity slots are scarce (rate limits, resource-based tuning, or many concurrent runs on one task queue), Temporal can dispatch backlogged activities in a smarter order:
 

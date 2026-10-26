@@ -97,10 +97,11 @@ The feature flags apply only to builds from source; the released packages and co
 
 Git sources shell out to the `git` CLI (and `ssh` for `git+ssh://`), so the worker needs them on its `PATH`. The default container image includes both. The `-distroless` image does not; with it, bake the project into the image, mount it, or fetch it from `gs://` / `s3://`.
 
-The `#branch` suffix is required for git URLs and specifies which branch (or tag) to check out. An optional `:subdir` can be appended to point at a subdirectory within the repo:
+The `#rev` suffix is required for git URLs and names what to check out: a branch, a tag, or a full 40-character commit id. A branch is read once, at worker start-up, so workers started at different times can run different commits; pin a tag or commit id to make a deploy reproducible and change it deliberately. Abbreviated commit ids are not accepted, because they are indistinguishable from branch names. An optional `:subdir` can be appended to point at a subdirectory within the repo:
 
 ```
 git+https://github.com/org/dbt-models.git#main:path/to/dbt
+git+https://github.com/org/dbt-models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39:path/to/dbt
 ```
 
 When a subdirectory is specified, only that path is scanned for `dbt_project.yml` files.

@@ -23,12 +23,21 @@ the container images it deploys. Chart and app share one version.
 |---|---|---|
 | Baked into an image | `FROM ghcr.io/thejens/dbt-temporal:<v>` + `COPY project/ /dbt/project/`; set `image.repository`/`image.tag` and `dbt.projectDirs=/dbt/project` | Immutable and versioned per model release. |
 | Mounted volume | `extraVolumes` + `extraVolumeMounts` (ConfigMap, PVC, a git-sync sidecar's volume) | |
-| Git, at startup | `git+https://…#ref[:subdir]` or `git+ssh://…` | Needs the default image; distroless has no `git`. Private repos: `GITHUB_TOKEN` or `GIT_TOKEN` via `envFrom`. |
+| Git, at startup | `git+https://…#rev[:subdir]` or `git+ssh://…` | Needs the default image; distroless has no `git`. Private repos: `GITHUB_TOKEN` or `GIT_TOKEN` via `envFrom`. |
 | Bucket, at startup | `gs://bucket/prefix`, `s3://bucket/prefix` | Credentials from workload identity (`serviceAccount.annotations`) or env. |
 
-A project fetched at startup lands in `/tmp`, so size `tmp.sizeLimit` for it.
-Changing the commit you deploy means changing `dbt.projectDirs`, which changes
-the ConfigMap hash and rolls the pods.
+For git, `rev` is a branch, a tag or a full commit id. A branch is resolved
+when each pod starts, so pods started at different times can run different
+commits. For controlled deploys, pin the commit:
+
+```yaml
+dbt:
+  projectDirs: git+https://github.com/org/dbt-models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39
+```
+
+Bumping that id in your values file is the deploy: it changes the ConfigMap
+hash, which rolls the pods onto the new commit. A project fetched at startup
+lands in `/tmp`, so size `tmp.sizeLimit` for it.
 
 ## Warehouse credentials
 

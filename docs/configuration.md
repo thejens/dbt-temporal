@@ -33,7 +33,8 @@ If none are set, the current working directory is used (either as a project if i
 |----------|---------|-------------|
 | `DBT_PROFILES_DIR` | project dir | Path to profiles.yml |
 | `DBT_TARGET` | from profile | Target override |
-| `GITHUB_TOKEN` | - | Auth token for private git repos over HTTPS. Falls back to `GIT_TOKEN`. |
+| `GITHUB_TOKEN` | - | Auth token for private git repos over HTTPS. Falls back to `GIT_TOKEN`. See [Private Git Repositories](#private-git-repositories). |
+| `GIT_USERNAME` | - | Username sent with the token, which then goes as the password. Unset sends the token as the username (GitHub, Gitea). |
 
 ## Multiple Adapters per Target
 
@@ -97,10 +98,11 @@ The feature flags apply only to builds from source; the released packages and co
 
 Git sources shell out to the `git` CLI (and `ssh` for `git+ssh://`), so the worker needs them on its `PATH`. The default container image includes both. The `-distroless` image does not; with it, bake the project into the image, mount it, or fetch it from `gs://` / `s3://`.
 
-The `#branch` suffix is required for git URLs and specifies which branch (or tag) to check out. An optional `:subdir` can be appended to point at a subdirectory within the repo:
+The `#rev` suffix is required for git URLs and names what to check out: a branch, a tag, or a full 40-character commit id. A branch is read once, at worker start-up, so workers started at different times can run different commits; pin a tag or commit id to make a deploy reproducible and change it deliberately. Abbreviated commit ids are not accepted, because they are indistinguishable from branch names. An optional `:subdir` can be appended to point at a subdirectory within the repo:
 
 ```
 git+https://github.com/org/dbt-models.git#main:path/to/dbt
+git+https://github.com/org/dbt-models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39:path/to/dbt
 ```
 
 When a subdirectory is specified, only that path is scanned for `dbt_project.yml` files.
@@ -122,6 +124,51 @@ DBT_PROJECT_DIRS=s3://my-bucket/dbt-models cargo run --features aws
 # Mix local + remote
 DBT_PROJECT_DIRS=/local/analytics,git+https://github.com/org/shared-models.git#main cargo run
 ```
+
+### Private Git Repositories
+
+Every git invocation is unattended (`GIT_TERMINAL_PROMPT=0`): a repository that needs credentials the worker does not have fails start-up with git's error instead of waiting on a prompt.
+
+**HTTPS with a token.** Set `GITHUB_TOKEN` or `GIT_TOKEN`. The worker hands it to git as a `url.<authenticated>.insteadOf` rewrite in `GIT_CONFIG_*` environment variables, so it never appears in a process argument list or in the clone's `.git/config`, and it is redacted from errors. It is sent to whichever host the `git+https://` URL names, self-hosted ones included. Hosts disagree on where the token goes, which `GIT_USERNAME` covers:
+
+| Host | Token | `GIT_USERNAME` |
+|------|-------|----------------|
+| GitHub (incl. Enterprise Server) | fine-grained PAT, or a GitHub App installation token | unset, or `x-access-token` |
+| GitLab (incl. self-managed) | project/group access token, or deploy token | `oauth2`, or the deploy token's username |
+| Bitbucket Cloud | repository access token | `x-token-auth` |
+| Azure DevOps | PAT | any non-empty name |
+| Gitea / Forgejo | access token | unset |
+
+An installation token expires after an hour, but the worker clones only at start-up, so that is enough as long as whatever supplies the token mints a fresh one for each worker start. A read-only deploy token scoped to the one repository is the narrowest credential that works.
+
+**SSH.** `git+ssh://` uses the `ssh` client, configured the way git always configures it: point `GIT_SSH_COMMAND` at a key and a `known_hosts` file. Pre-seed the host key rather than disabling the check:
+
+```bash
+ssh-keyscan -t ed25519 git.example.com > known_hosts   # verify the fingerprint out of band
+GIT_SSH_COMMAND="ssh -i /secrets/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/secrets/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes" \
+  DBT_PROJECT_DIRS=git+ssh://git@git.example.com/data/models.git#v1.4.0 cargo run
+```
+
+`ssh` refuses a private key that other users can read, and it needs a passwd entry for the UID it runs as. The release image has one for UID 65532 (`nonroot`, home `/tmp`), the UID the Helm chart runs as.
+
+**Self-hosted with a private CA.** Point `GIT_SSL_CAINFO` at the CA bundle. Any other git setting can be supplied the same way through git's own `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` variables; the worker appends its token rewrite after them.
+
+**Docker:**
+
+```bash
+# HTTPS token, GitLab
+docker run -e GIT_TOKEN -e GIT_USERNAME=oauth2 \
+  -e DBT_PROJECT_DIRS='git+https://gitlab.example.com/data/models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39' \
+  ghcr.io/thejens/dbt-temporal:latest
+
+# SSH key and known_hosts mounted read-only
+docker run -v "$PWD/git-ssh:/secrets:ro" \
+  -e GIT_SSH_COMMAND='ssh -i /secrets/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/secrets/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes' \
+  -e DBT_PROJECT_DIRS='git+ssh://git@github.com/org/models.git#main' \
+  ghcr.io/thejens/dbt-temporal:latest
+```
+
+On Kubernetes, the Helm chart's `dbt.git` values wire all of this up from Secrets; see its [README](../charts/dbt-temporal/README.md#private-git-repositories).
 
 ## Artifact Storage
 

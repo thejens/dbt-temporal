@@ -4,6 +4,11 @@
 {{- if not .Values.dbt.projectDirs }}
 {{- fail "dbt.projectDirs is required: a baked-in or mounted path, git+https://…, gs://… or s3://…" }}
 {{- end }}
+{{- with .Values.dbt.git }}
+{{- if and (eq $.Values.image.variant "distroless") (or .token.existingSecret .ssh.existingSecret .caBundle.configMap) }}
+{{- fail "dbt.git credentials are set, but the distroless image has no git: use the default image variant" }}
+{{- end }}
+{{- end }}
 {{- if and .Values.dbt.profiles.existingSecret .Values.dbt.profiles.inline }}
 {{- fail "set dbt.profiles.existingSecret or dbt.profiles.inline, not both" }}
 {{- end }}
@@ -30,6 +35,17 @@ data:
   {{- end }}
   {{- if include "dbt-temporal.profilesSecret" . }}
   DBT_PROFILES_DIR: /etc/dbt
+  {{- end }}
+  {{- with .Values.dbt.git.username }}
+  GIT_USERNAME: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.dbt.git.ssh.existingSecret }}
+  # BatchMode: nobody can answer a prompt. StrictHostKeyChecking: an unknown
+  # host key is an error, never trust-on-first-use.
+  GIT_SSH_COMMAND: "ssh -i /etc/dbt-temporal/git-ssh/ssh-privatekey -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/dbt-temporal/git-ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
+  {{- end }}
+  {{- if .Values.dbt.git.caBundle.configMap }}
+  GIT_SSL_CAINFO: {{ printf "/etc/dbt-temporal/git-ca/%s" .Values.dbt.git.caBundle.key | quote }}
   {{- end }}
   WRITE_ARTIFACTS: {{ .Values.artifacts.enabled | toString | quote }}
   {{- if .Values.artifacts.enabled }}

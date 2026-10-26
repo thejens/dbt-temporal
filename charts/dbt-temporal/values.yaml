@@ -38,8 +38,9 @@ temporal:
 
 dbt:
   # Comma-separated project sources: local paths (baked into the image or
-  # mounted through extraVolumes), git+https://…#ref[:subdir], git+ssh://…,
-  # gs://…, s3://…. Required.
+  # mounted through extraVolumes), git+https://…#rev[:subdir], git+ssh://…,
+  # gs://…, s3://…. Required. For git, rev is a branch, tag or full commit id;
+  # pin a commit id to deploy exactly what you reviewed.
   projectDirs: ""
   target: ""
   profiles:
@@ -48,6 +49,27 @@ dbt:
     # Or the file itself, rendered into a Secret this chart owns. Prefer
     # env_var() for credentials and supply them through extraEnv / envFrom.
     inline: ""
+  # Credentials for git+https:// and git+ssh:// project sources.
+  git:
+    token:
+      # Secret holding an HTTPS access token (GitHub PAT or App token, GitLab
+      # project/deploy token, Bitbucket access token, ...). Sent to whichever
+      # host the git+https:// URL names.
+      existingSecret: ""
+      key: token
+    # Username sent with the token. Empty sends the token as the username,
+    # which GitHub and Gitea accept; GitLab wants "oauth2" (or the deploy
+    # token's username), Bitbucket "x-token-auth", Azure DevOps any name.
+    username: ""
+    ssh:
+      # Secret with an `ssh-privatekey` key (the kubernetes.io/ssh-auth layout)
+      # and a `known_hosts` key. Host keys are always verified.
+      existingSecret: ""
+    # ConfigMap holding the CA bundle of a self-hosted server whose
+    # certificate is not from a public CA.
+    caBundle:
+      configMap: ""
+      key: ca.crt
 
 artifacts:
   # Write run_results.json, manifest.json and the run log after each run.

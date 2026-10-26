@@ -23,12 +23,70 @@ the container images it deploys. Chart and app share one version.
 |---|---|---|
 | Baked into an image | `FROM ghcr.io/thejens/dbt-temporal:<v>` + `COPY project/ /dbt/project/`; set `image.repository`/`image.tag` and `dbt.projectDirs=/dbt/project` | Immutable and versioned per model release. |
 | Mounted volume | `extraVolumes` + `extraVolumeMounts` (ConfigMap, PVC, a git-sync sidecar's volume) | |
-| Git, at startup | `git+https://…#ref[:subdir]` or `git+ssh://…` | Needs the default image; distroless has no `git`. Private repos: `GITHUB_TOKEN` or `GIT_TOKEN` via `envFrom`. |
+| Git, at startup | `git+https://…#rev[:subdir]` or `git+ssh://…` | Needs the default image; distroless has no `git`. Private repos: see below. |
 | Bucket, at startup | `gs://bucket/prefix`, `s3://bucket/prefix` | Credentials from workload identity (`serviceAccount.annotations`) or env. |
 
-A project fetched at startup lands in `/tmp`, so size `tmp.sizeLimit` for it.
-Changing the commit you deploy means changing `dbt.projectDirs`, which changes
-the ConfigMap hash and rolls the pods.
+For git, `rev` is a branch, a tag or a full commit id. A branch is resolved
+when each pod starts, so pods started at different times can run different
+commits. For controlled deploys, pin the commit:
+
+```yaml
+dbt:
+  projectDirs: git+https://github.com/org/dbt-models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39
+```
+
+Bumping that id in your values file is the deploy: it changes the ConfigMap
+hash, which rolls the pods onto the new commit. A project fetched at startup
+lands in `/tmp`, so size `tmp.sizeLimit` for it.
+
+## Private git repositories
+
+Credentials come from Secrets you create; the chart only references them.
+
+HTTPS with an access token. `username` depends on the host: empty for GitHub
+and Gitea, `oauth2` for GitLab, `x-token-auth` for Bitbucket, any name for
+Azure DevOps.
+
+```bash
+kubectl create secret generic dbt-git-token --from-literal=token="$TOKEN"
+```
+
+```yaml
+dbt:
+  projectDirs: git+https://gitlab.example.com/data/models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39
+  git:
+    token:
+      existingSecret: dbt-git-token
+    username: oauth2
+```
+
+SSH, with a deploy key. The host key is always verified, so the Secret
+carries a `known_hosts` next to the key:
+
+```bash
+ssh-keyscan -t ed25519 git.example.com > known_hosts   # check the fingerprint out of band
+kubectl create secret generic dbt-git-ssh \
+  --from-file=ssh-privatekey=./deploy_key --from-file=known_hosts=./known_hosts
+```
+
+```yaml
+dbt:
+  projectDirs: git+ssh://git@git.example.com/data/models.git#v1.4.0
+  git:
+    ssh:
+      existingSecret: dbt-git-ssh
+```
+
+A self-hosted server with a certificate from a private CA also needs
+`dbt.git.caBundle.configMap`, a ConfigMap holding the bundle under
+`caBundle.key` (`ca.crt`). Token, SSH and CA bundle combine freely, so one
+worker can fetch from several hosts.
+
+The token is sent to whichever host a `git+https://` URL names. It never
+lands in the clone's `.git/config` or a process argument list, and it is
+redacted from errors. The [configuration
+reference](https://github.com/thejens/dbt-temporal/blob/main/docs/configuration.md#private-git-repositories)
+covers the mechanism and running the image outside Kubernetes.
 
 ## Warehouse credentials
 
@@ -87,6 +145,10 @@ connections; the health port is for the kubelet's probes.
 | `dbt.projectDirs` | — | **Required.** Project sources, see above. |
 | `dbt.target` | `""` | dbt target. Defaults to the profile's. |
 | `dbt.profiles.existingSecret` / `.inline` | `""` | One of the two. |
+| `dbt.git.token.existingSecret` / `.key` | `""` / `token` | HTTPS access token for private repos. |
+| `dbt.git.username` | `""` | Sent with the token. Host-dependent, see above. |
+| `dbt.git.ssh.existingSecret` | `""` | Secret with `ssh-privatekey` and `known_hosts`. |
+| `dbt.git.caBundle.configMap` / `.key` | `""` / `ca.crt` | CA bundle for a self-hosted server. |
 | `artifacts.enabled` | `false` | Write `run_results.json`, `manifest.json` and the run log. |
 | `artifacts.store` | `""` | `gs://…` / `s3://…`. A local path is lost with the pod. |
 | `artifacts.catalog` / `.runLog` | `false` / `true` | |
@@ -105,7 +167,7 @@ connections; the health port is for the kubelet's probes.
 | `keda.*` | disabled | `minReplicaCount`, `maxReplicaCount`, `targetQueueSize`, `activationTargetQueueSize`, `queueTypes`, `cooldownPeriod`, `useTemporalApiKey`. |
 | `podDisruptionBudget.enabled` / `.maxUnavailable` | `false` / `1` | |
 | `serviceAccount.create` / `.name` / `.annotations` | `true` / `""` / `{}` | Annotations for workload identity. |
-| `extraEnv` / `envFrom` | `[]` | Credentials, `GITHUB_TOKEN`, etc. |
+| `extraEnv` / `envFrom` | `[]` | Warehouse credentials, etc. |
 | `extraVolumes` / `extraVolumeMounts` | `[]` | |
 | `tmp.medium` / `.sizeLimit` | `""` / `1Gi` | `Memory` makes `/tmp` a tmpfs. |
 | `cache.sizeLimit` | `2Gi` | |

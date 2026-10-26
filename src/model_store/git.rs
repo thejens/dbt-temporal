@@ -16,38 +16,51 @@ const CLONE_TIMEOUT: Duration = Duration::from_mins(10);
 /// Parsed components of a git model store URL.
 struct GitUrl<'a> {
     repo_url: &'a str,
-    branch: &'a str,
+    /// Branch, tag, or full commit id.
+    rev: &'a str,
     subdir: Option<&'a str>,
 }
 
 /// Parse a git model store URL into its components.
 ///
 /// Accepted formats (after stripping the `git+` prefix):
-/// - `https://github.com/org/repo.git#branch`
-/// - `https://github.com/org/repo.git#branch:path/to/subdir`
+/// - `https://github.com/org/repo.git#rev`
+/// - `https://github.com/org/repo.git#rev:path/to/subdir`
+///
+/// `rev` is a branch, a tag, or a full commit id.
 fn parse_git_url(url: &str) -> Result<GitUrl<'_>> {
     let url = url.strip_prefix("git+").unwrap_or(url);
     let (repo_url, fragment) = url
         .rsplit_once('#')
-        .ok_or_else(|| anyhow::anyhow!("git model store URL must have #branch suffix: {url}"))?;
+        .ok_or_else(|| anyhow::anyhow!("git model store URL must have a #rev suffix: {url}"))?;
 
-    let (branch, subdir) = match fragment.split_once(':') {
-        Some((b, s)) => (b, Some(s)),
+    let (rev, subdir) = match fragment.split_once(':') {
+        Some((r, s)) => (r, Some(s)),
         None => (fragment, None),
     };
 
     Ok(GitUrl {
         repo_url,
-        branch,
+        rev,
         subdir,
     })
 }
 
+/// Whether `rev` is a full commit id: 40 hex digits (SHA-1) or 64 (SHA-256).
+///
+/// Abbreviated ids are deliberately not recognised. The fetch protocol only
+/// resolves full ids, and a short hex string is just as valid a branch name —
+/// `#deadbeef` keeps meaning the branch or tag of that name.
+fn is_commit_id(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Fetch dbt project(s) by cloning a git repository.
 ///
-/// URL format: `git+https://github.com/org/repo.git#branch[:subdir]`
+/// URL format: `git+https://github.com/org/repo.git#rev[:subdir]`
 ///
-/// Authentication token is read from `GITHUB_TOKEN`, then `GIT_TOKEN` (first non-empty wins).
+/// Authentication token is read from `GITHUB_TOKEN`, then `GIT_TOKEN` (first non-empty wins),
+/// and sent as the username unless `GIT_USERNAME` is set, in which case it is the password.
 /// The token reaches git through `GIT_CONFIG_*` env vars (a `url.<with-token>.insteadOf`
 /// rewrite) rather than the clone URL itself — an argv-embedded token is visible in the
 /// process list while git runs, and git persists the remote URL verbatim into the cloned
@@ -60,34 +73,11 @@ pub async fn fetch(url: &str) -> Result<FetchedProjects> {
     let dir = super::fetch_dir()?;
     let dest = dir.path();
 
-    info!(branch = parsed.branch, dest = %dest.display(), "cloning model store from git");
+    info!(rev = parsed.rev, dest = %dest.display(), "cloning model store from git");
 
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args([
-        "clone",
-        "--depth",
-        "1",
-        "--branch",
-        parsed.branch,
-        parsed.repo_url,
-    ])
-    .arg(dest)
-    // Nobody is at a terminal. Without this a private repo with no usable
-    // token leaves git waiting on a username prompt until something kills the
-    // worker, which reads as a hang rather than an authentication failure.
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env("GIT_ASKPASS", "")
-    .env("SSH_ASKPASS", "")
-    // Kill the child if this future is dropped — the timeout below does exactly
-    // that, and an orphaned clone would keep writing into a directory the
-    // worker is about to remove.
-    .kill_on_drop(true);
-    if let Some((key, value)) = token_rewrite_config(parsed.repo_url)? {
-        cmd.env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", key)
-            .env("GIT_CONFIG_VALUE_0", value);
-    }
-    let output = tokio::time::timeout(CLONE_TIMEOUT, cmd.output())
+    // One deadline for the whole checkout: a commit id takes several git
+    // invocations, and it is the total a stuck start-up has to be bounded by.
+    tokio::time::timeout(CLONE_TIMEOUT, checkout(&parsed, dest))
         .await
         .map_err(|_| {
             anyhow::anyhow!(
@@ -95,14 +85,7 @@ pub async fn fetch(url: &str) -> Result<FetchedProjects> {
                 redact_token(parsed.repo_url),
                 CLONE_TIMEOUT.as_secs()
             )
-        })?
-        .context("running git clone")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = redact_token(&stderr);
-        anyhow::bail!("git clone failed: {stderr}");
-    }
+        })??;
 
     info!(dest = %dest.display(), "git clone complete");
 
@@ -119,6 +102,94 @@ pub async fn fetch(url: &str) -> Result<FetchedProjects> {
 
     let projects = super::scan_for_projects(&scan_root)?;
     Ok(FetchedProjects::owned(dir, projects))
+}
+
+/// Check out `parsed.rev` into `dest` with history depth 1.
+///
+/// `git clone --branch` only takes branch and tag names, so a commit id is
+/// fetched by id into a fresh repository instead. That relies on the server
+/// serving unadvertised commits, which protocol v2 (git's default) and the
+/// major hosts do.
+async fn checkout(parsed: &GitUrl<'_>, dest: &Path) -> Result<()> {
+    if !is_commit_id(parsed.rev) {
+        let mut clone = git_command(parsed.repo_url)?;
+        clone
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                parsed.rev,
+                parsed.repo_url,
+            ])
+            .arg(dest);
+        return run_git(clone, "clone").await;
+    }
+
+    let mut init = git_command(parsed.repo_url)?;
+    init.args(["init", "--quiet"]).arg(dest);
+    run_git(init, "init").await?;
+
+    // Fetch from the URL rather than a configured remote, so the repository
+    // never records one; the token rewrite applies to the URL either way.
+    let mut fetch = git_command(parsed.repo_url)?;
+    fetch.arg("-C").arg(dest).args([
+        "fetch",
+        "--quiet",
+        "--depth",
+        "1",
+        parsed.repo_url,
+        parsed.rev,
+    ]);
+    run_git(fetch, "fetch").await?;
+
+    let mut switch = git_command(parsed.repo_url)?;
+    switch
+        .arg("-C")
+        .arg(dest)
+        .args(["checkout", "--quiet", "--detach", "FETCH_HEAD"]);
+    run_git(switch, "checkout").await
+}
+
+/// A `git` invocation set up for an unattended worker, authenticated for
+/// `repo_url` when a token is configured.
+fn git_command(repo_url: &str) -> Result<tokio::process::Command> {
+    let mut cmd = tokio::process::Command::new("git");
+    // Nobody is at a terminal. Without this a private repo with no usable
+    // token leaves git waiting on a username prompt until something kills the
+    // worker, which reads as a hang rather than an authentication failure.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        // Kill the child if its future is dropped — the checkout timeout does
+        // exactly that, and an orphaned git would keep writing into a
+        // directory the worker is about to remove.
+        .kill_on_drop(true);
+    if let Some((key, value)) = token_rewrite_config(repo_url)? {
+        // Append to whatever `GIT_CONFIG_*` entries the deployment sets itself
+        // (an extra header, a CA bundle) instead of overwriting the first one.
+        let index = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        cmd.env("GIT_CONFIG_COUNT", (index + 1).to_string())
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    Ok(cmd)
+}
+
+/// Run a git command to completion, failing with its (token-redacted) stderr.
+async fn run_git(mut cmd: tokio::process::Command, what: &str) -> Result<()> {
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("running git {what}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git {what} failed: {}", redact_token(&stderr));
+    }
+    Ok(())
 }
 
 /// Resolve a URL's `:subdir` fragment inside the clone.
@@ -154,6 +225,15 @@ fn git_token() -> Option<String> {
     None
 }
 
+/// The username to send with the token, from `GIT_USERNAME`.
+///
+/// Hosts disagree on where a token goes. GitHub and Gitea accept it as the
+/// username, which is the default; GitLab (`oauth2`), Bitbucket
+/// (`x-token-auth`) and Azure DevOps (any name) want it as the password.
+fn git_username() -> Option<String> {
+    std::env::var("GIT_USERNAME").ok().filter(|u| !u.is_empty())
+}
+
 /// Build the `url.<with-token>.insteadOf` git-config pair that authenticates an
 /// HTTPS clone. Returns `None` when no token is set or the URL isn't HTTPS
 /// (SSH auth comes from the agent/keys, not a token).
@@ -168,9 +248,13 @@ fn token_rewrite_config(repo_url: &str) -> Result<Option<(String, String)>> {
     }
 
     let mut with_token = parsed;
-    with_token
-        .set_username(&token)
-        .map_err(|()| anyhow::anyhow!("failed to set git token in URL"))?;
+    let set = match git_username() {
+        Some(user) => with_token
+            .set_username(&user)
+            .and_then(|()| with_token.set_password(Some(&token))),
+        None => with_token.set_username(&token),
+    };
+    set.map_err(|()| anyhow::anyhow!("failed to set git token in URL"))?;
     Ok(Some((format!("url.{with_token}.insteadOf"), repo_url.to_string())))
 }
 
@@ -188,46 +272,52 @@ mod tests {
     /// Serialize all git-token env var tests to avoid races.
     static GIT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// RAII guard that restores GITHUB_TOKEN/GIT_TOKEN on drop, including on panic.
-    /// The previous version restored after `f()` returned, so a test assertion panic
-    /// would leak the test's tokens into subsequent tests.
+    /// Every variable the git source reads from the environment.
+    const GIT_ENV_VARS: [&str; 4] = [
+        "GITHUB_TOKEN",
+        "GIT_TOKEN",
+        "GIT_USERNAME",
+        "GIT_CONFIG_COUNT",
+    ];
+
+    /// RAII guard that restores the git env vars on drop, including on panic,
+    /// so a failed assertion cannot leak one test's tokens into the next.
     #[allow(unsafe_code)]
-    struct TokenGuard {
-        github: Option<String>,
-        git: Option<String>,
-    }
+    struct GitEnvGuard(Vec<(&'static str, Option<String>)>);
 
     #[allow(unsafe_code)]
-    impl Drop for TokenGuard {
+    impl Drop for GitEnvGuard {
         fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("GITHUB_TOKEN");
-                std::env::remove_var("GIT_TOKEN");
-                if let Some(v) = &self.github {
-                    std::env::set_var("GITHUB_TOKEN", v);
-                }
-                if let Some(v) = &self.git {
-                    std::env::set_var("GIT_TOKEN", v);
+            for (var, value) in &self.0 {
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(var, v),
+                        None => std::env::remove_var(var),
+                    }
                 }
             }
         }
     }
 
-    /// Helper: run a closure with specific GITHUB_TOKEN and GIT_TOKEN values, restoring after.
+    /// Run a closure with specific GITHUB_TOKEN and GIT_TOKEN values and every
+    /// other git env var cleared, restoring all of them after.
     #[allow(unsafe_code)]
     fn with_git_tokens<F: FnOnce()>(github: Option<&str>, git: Option<&str>, f: F) {
         let Ok(_lock) = GIT_ENV_LOCK.lock() else {
             panic!("GIT_ENV_LOCK poisoned");
         };
 
-        let _restore = TokenGuard {
-            github: std::env::var("GITHUB_TOKEN").ok(),
-            git: std::env::var("GIT_TOKEN").ok(),
-        };
+        let _restore = GitEnvGuard(
+            GIT_ENV_VARS
+                .iter()
+                .map(|&var| (var, std::env::var(var).ok()))
+                .collect(),
+        );
 
         unsafe {
-            std::env::remove_var("GITHUB_TOKEN");
-            std::env::remove_var("GIT_TOKEN");
+            for var in GIT_ENV_VARS {
+                std::env::remove_var(var);
+            }
             if let Some(v) = github {
                 std::env::set_var("GITHUB_TOKEN", v);
             }
@@ -237,6 +327,12 @@ mod tests {
         }
 
         f();
+    }
+
+    /// Set an env var inside a `with_git_tokens` closure, which restores it.
+    #[allow(unsafe_code)]
+    fn set_git_env(var: &str, value: &str) {
+        unsafe { std::env::set_var(var, value) };
     }
 
     #[test]
@@ -282,6 +378,39 @@ mod tests {
     }
 
     #[test]
+    fn token_rewrite_config_sends_the_token_as_password_with_a_username() {
+        with_git_tokens(None, Some("glpat-tok"), || {
+            set_git_env("GIT_USERNAME", "oauth2");
+            let Ok(Some((key, _))) = token_rewrite_config("https://gitlab.example.com/g/r.git")
+            else {
+                panic!("expected a rewrite pair");
+            };
+            assert_eq!(key, "url.https://oauth2:glpat-tok@gitlab.example.com/g/r.git.insteadOf"); // pragma: allowlist secret
+        });
+    }
+
+    #[test]
+    fn the_token_rewrite_is_appended_to_existing_git_config_env() {
+        with_git_tokens(Some("tok"), None, || {
+            set_git_env("GIT_CONFIG_COUNT", "2");
+            let Ok(cmd) = git_command("https://github.com/org/repo.git") else {
+                panic!("git_command failed");
+            };
+            let envs: std::collections::HashMap<_, _> = cmd
+                .as_std()
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+                .collect();
+            assert_eq!(envs["GIT_CONFIG_COUNT"], "3");
+            assert_eq!(
+                envs["GIT_CONFIG_KEY_2"],
+                "url.https://tok@github.com/org/repo.git.insteadOf"
+            );
+            assert!(!envs.contains_key("GIT_CONFIG_KEY_0"), "entry 0 is the deployment's");
+        });
+    }
+
+    #[test]
     fn token_rewrite_config_none_without_token() {
         with_git_tokens(None, None, || {
             let Ok(pair) = token_rewrite_config("https://github.com/org/repo.git") else {
@@ -319,19 +448,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_git_url_branch_only() -> Result<()> {
+    fn parse_git_url_rev_only() -> Result<()> {
         let parsed = parse_git_url("git+https://github.com/org/repo.git#main")?;
         assert_eq!(parsed.repo_url, "https://github.com/org/repo.git");
-        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.rev, "main");
         assert!(parsed.subdir.is_none());
         Ok(())
     }
 
     #[test]
-    fn parse_git_url_branch_and_subdir() -> Result<()> {
+    fn parse_git_url_rev_and_subdir() -> Result<()> {
         let parsed = parse_git_url("git+https://github.com/org/repo.git#main:dbt/projects")?;
         assert_eq!(parsed.repo_url, "https://github.com/org/repo.git");
-        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.rev, "main");
         assert_eq!(parsed.subdir, Some("dbt/projects"));
         Ok(())
     }
@@ -340,7 +469,7 @@ mod tests {
     fn parse_git_url_ssh_with_subdir() -> Result<()> {
         let parsed = parse_git_url("git+ssh://git@github.com/org/repo.git#v2.0:src")?;
         assert_eq!(parsed.repo_url, "ssh://git@github.com/org/repo.git");
-        assert_eq!(parsed.branch, "v2.0");
+        assert_eq!(parsed.rev, "v2.0");
         assert_eq!(parsed.subdir, Some("src"));
         Ok(())
     }
@@ -411,6 +540,86 @@ mod tests {
 
         assert_eq!(fetched.projects.len(), 1);
         assert!(fetched.projects[0].ends_with("dbt"));
+
+        std::fs::remove_dir_all(&repo_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn only_full_hex_ids_are_commit_ids() {
+        assert!(is_commit_id(&"a".repeat(40)));
+        assert!(is_commit_id(&"0123456789abcdefABCDEF".repeat(3)[..64]));
+        // Abbreviated ids, or anything else of the right length, stay ref names.
+        for rev in [
+            "main",
+            "v1.2.3",
+            "deadbeef",
+            &"a".repeat(39),
+            &"g".repeat(40),
+            &"a".repeat(41),
+        ] {
+            assert!(!is_commit_id(rev), "{rev} must not be taken for a commit id");
+        }
+    }
+
+    /// Run git in `dir` with a fixed identity, failing the test on error.
+    fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
+
+    /// Pinning a commit is what makes a deploy reproducible: the checkout must
+    /// be that commit, not whatever the branch has moved on to.
+    #[tokio::test]
+    async fn fetch_pins_a_commit_behind_the_branch_tip() -> Result<()> {
+        let repo_dir =
+            std::env::temp_dir().join(format!("dbtt-test-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_dir)?;
+        git_in(&repo_dir, &["init", "-b", "main"])?;
+        std::fs::write(repo_dir.join("dbt_project.yml"), "name: pinned")?;
+        git_in(&repo_dir, &["add", "."])?;
+        git_in(&repo_dir, &["commit", "-m", "pinned"])?;
+        let pinned = git_in(&repo_dir, &["rev-parse", "HEAD"])?;
+        std::fs::write(repo_dir.join("dbt_project.yml"), "name: tip")?;
+        git_in(&repo_dir, &["commit", "-am", "tip"])?;
+
+        let fetched = fetch(&format!("git+file://{}#{pinned}", repo_dir.display())).await?;
+
+        assert_eq!(fetched.projects.len(), 1);
+        let project = std::fs::read_to_string(fetched.projects[0].join("dbt_project.yml"))?;
+        assert_eq!(project, "name: pinned");
+
+        std::fs::remove_dir_all(&repo_dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_of_an_unknown_commit_fails() -> Result<()> {
+        let repo_dir =
+            std::env::temp_dir().join(format!("dbtt-test-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo_dir)?;
+        git_in(&repo_dir, &["init", "-b", "main"])?;
+        std::fs::write(repo_dir.join("dbt_project.yml"), "name: p")?;
+        git_in(&repo_dir, &["add", "."])?;
+        git_in(&repo_dir, &["commit", "-m", "init"])?;
+
+        let missing = "0".repeat(40);
+        let err = fetch(&format!("git+file://{}#{missing}", repo_dir.display()))
+            .await
+            .expect_err("a commit the repository does not have must fail");
+        assert!(err.to_string().contains("git fetch failed"), "unexpected error: {err}");
 
         std::fs::remove_dir_all(&repo_dir).ok();
         Ok(())

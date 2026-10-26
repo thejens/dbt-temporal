@@ -134,8 +134,8 @@ aws = ["object_store/aws"]
 bigquery-tests = []
 
 [dev-dependencies]
-testcontainers = { version = "0.27", features = ["watchdog"] }
-testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
+testcontainers = { version = "0.27", features = ["watchdog", "http_wait_plain"] }
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"

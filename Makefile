@@ -15,8 +15,9 @@ build-release:
 
 # Same stack/thread discipline as coverage: dbt-fusion needs deep stacks and
 # the loader races when two tests load the same project in parallel.
+# `aws` compiles in the S3 artifact-store suite, which is gated on it.
 test:
-	RUST_MIN_STACK=16777216 cargo test --workspace -- --test-threads=1
+	RUST_MIN_STACK=16777216 cargo test --workspace --features aws -- --test-threads=1
 
 test-examples:
 	./tests/test_examples.sh
@@ -38,7 +39,7 @@ COVERAGE_IGNORE := src/main\.rs
 
 coverage:
 	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
-		RUST_MIN_STACK=16777216 cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		RUST_MIN_STACK=16777216 cargo test --workspace --features aws --no-fail-fast -- --test-threads=1 && \
 		cargo llvm-cov report \
 			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
 			--summary-only \
@@ -46,7 +47,7 @@ coverage:
 
 coverage-html:
 	@eval "$$(cargo llvm-cov show-env --export-prefix)" && \
-		RUST_MIN_STACK=16777216 cargo test --workspace --no-fail-fast -- --test-threads=1 && \
+		RUST_MIN_STACK=16777216 cargo test --workspace --features aws --no-fail-fast -- --test-threads=1 && \
 		cargo llvm-cov report \
 			--ignore-filename-regex '$(COVERAGE_IGNORE)' \
 			--html

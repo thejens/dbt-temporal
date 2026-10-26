@@ -1,4 +1,4 @@
-//! Integration test: ObjectStoreArtifactStore against Minio (S3-compatible).
+//! Integration test: ObjectStoreArtifactStore against RustFS (S3-compatible).
 //!
 //! Requires the `aws` feature flag:
 //!   cargo test --features aws --test artifact_store_s3
@@ -7,37 +7,54 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use testcontainers::core::wait::HttpWaitStrategy;
+use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::minio::MinIO;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use dbt_temporal::artifact_store::{ArtifactStore, ObjectStoreArtifactStore};
 
 const BUCKET: &str = "test-artifacts";
 const PREFIX: &str = "dbt-artifacts";
 
-/// Start Minio, create the test bucket, and return the ObjectStoreArtifactStore.
-async fn setup() -> Result<(testcontainers::ContainerAsync<MinIO>, ObjectStoreArtifactStore)> {
-    let container = MinIO::default()
+/// RustFS rather than MinIO: MinIO stopped publishing community images, and
+/// the tag `testcontainers-modules` defaults to no longer resolves. Pinned to
+/// a release so the S3 behaviour under test only changes when we bump it.
+const S3_IMAGE: &str = "rustfs/rustfs";
+const S3_TAG: &str = "1.0.4";
+const S3_PORT: u16 = 9000;
+const ACCESS_KEY: &str = "artifact-test";
+const SECRET_KEY: &str = "artifact-test-secret";
+
+/// Start RustFS, create the test bucket, and return the ObjectStoreArtifactStore.
+async fn setup() -> Result<(ContainerAsync<GenericImage>, ObjectStoreArtifactStore)> {
+    // RustFS logs to a file, not stdout, so readiness comes from its health
+    // endpoint: the S3 API answers once `/health/ready` does.
+    let container = GenericImage::new(S3_IMAGE, S3_TAG)
+        .with_exposed_port(S3_PORT.tcp())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/health/ready")
+                .with_port(S3_PORT.tcp())
+                .with_expected_status_code(200_u16),
+        ))
+        .with_env_var("RUSTFS_ACCESS_KEY", ACCESS_KEY)
+        .with_env_var("RUSTFS_SECRET_KEY", SECRET_KEY)
         .start()
         .await
-        .context("starting minio container")?;
+        .context("starting rustfs container")?;
 
-    let host = container.get_host().await.context("get minio host")?;
+    let host = container.get_host().await.context("get rustfs host")?;
     let port = container
-        .get_host_port_ipv4(9000)
+        .get_host_port_ipv4(S3_PORT)
         .await
-        .context("get minio port")?;
+        .context("get rustfs port")?;
     let endpoint = format!("http://{host}:{port}");
 
-    // Create the bucket via the AWS SDK (path-style required for Minio).
+    // Create the bucket via the AWS SDK (path-style: the bucket is not a DNS name).
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .endpoint_url(&endpoint)
         .credentials_provider(aws_credential_types::Credentials::new(
-            "minioadmin",
-            "minioadmin",
-            None,
-            None,
-            "test",
+            ACCESS_KEY, SECRET_KEY, None, None, "test",
         ))
         .region(aws_config::Region::new("us-east-1"))
         .load()
@@ -53,16 +70,15 @@ async fn setup() -> Result<(testcontainers::ContainerAsync<MinIO>, ObjectStoreAr
         .await
         .context("creating test bucket")?;
 
-    // Build the ObjectStoreArtifactStore pointing at Minio.
     let store = object_store::aws::AmazonS3Builder::new()
         .with_bucket_name(BUCKET)
         .with_endpoint(&endpoint)
-        .with_access_key_id("minioadmin")
-        .with_secret_access_key("minioadmin")
+        .with_access_key_id(ACCESS_KEY)
+        .with_secret_access_key(SECRET_KEY)
         .with_region("us-east-1")
         .with_allow_http(true)
         .build()
-        .context("building S3 object store for Minio")?;
+        .context("building S3 object store for rustfs")?;
 
     let artifact_store = ObjectStoreArtifactStore::new(Box::new(store), PREFIX.to_string());
 

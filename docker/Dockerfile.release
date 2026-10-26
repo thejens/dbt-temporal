@@ -1,5 +1,5 @@
-# Release runtime image built from the prebuilt glibc binary produced by the
-# `deb` job in .github/workflows/release.yml — the binary is compiled once and
+# Release runtime image built from the prebuilt glibc binaries produced by the
+# `deb` jobs in .github/workflows/release.yml — the binary is compiled once and
 # copied in, not rebuilt here. (docker/Dockerfile still builds from source and
 # is what the CI docker-build check uses.)
 #
@@ -25,6 +25,10 @@ RUN groupadd --gid 65532 nonroot \
     && useradd --uid 65532 --gid 65532 --home-dir /tmp --no-create-home \
     --shell /usr/sbin/nologin nonroot
 
-COPY dbt-temporal /usr/local/bin/dbt-temporal
+# One prebuilt binary per platform, at bin/dbt-temporal-linux-<arch>/ (see the
+# release workflow); buildx sets TARGETARCH for each platform it builds. Upload
+# artifacts drop the executable bit, hence --chmod.
+ARG TARGETARCH
+COPY --chmod=0755 bin/dbt-temporal-linux-${TARGETARCH}/dbt-temporal /usr/local/bin/dbt-temporal
 
 ENTRYPOINT ["dbt-temporal"]

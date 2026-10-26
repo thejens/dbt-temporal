@@ -56,21 +56,22 @@ flowchart TD
 
 ## Installation
 
-Tagged releases (`v*`) publish Debian/RHEL packages and a container image via
-GitHub Actions.
+Tagged releases (`v*`) publish Debian/RHEL packages and container images via
+GitHub Actions, each for linux/amd64 and linux/arm64.
 
 ```bash
 # From source with cargo (works with the git dependencies this crate uses):
 cargo install --git https://github.com/thejens/dbt-temporal --locked
 
-# Or pull a container image from GHCR (both glibc, so ADBC drivers load):
+# Or pull a container image from GHCR (both glibc, so ADBC drivers load;
+# multi-arch, so the same tag runs on amd64 and arm64):
 docker pull ghcr.io/thejens/dbt-temporal:latest         # debian-slim (has a shell)
 docker pull ghcr.io/thejens/dbt-temporal:distroless     # distroless/cc (minimal)
 
 # Or install a distro package from the latest GitHub Release
 # (https://github.com/thejens/dbt-temporal/releases):
-sudo apt install ./dbt-temporal_<version>_amd64.deb        # Debian/Ubuntu
-sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm     # RHEL/Alma/Rocky 8+
+sudo apt install ./dbt-temporal_<version>_amd64.deb        # Debian/Ubuntu (or _arm64)
+sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm     # RHEL/Alma/Rocky 8+ (or .aarch64)
 ```
 
 > **Not on crates.io.** dbt-temporal depends on dbt v2's crates, which dbt does

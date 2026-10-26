@@ -1,21 +1,23 @@
 name: Release
 
-# Publishes build artifacts when a version tag (v*) is pushed:
+# Publishes build artifacts when a version tag (v*) is pushed, each for
+# linux/amd64 and linux/arm64:
 #   - a Debian .deb package (built natively on Debian 12)
 #   - a RHEL .rpm package (built on AlmaLinux 8 / glibc 2.28, so it runs on
 #     RHEL/Alma/Rocky 8 and 9)
-#   - two container images pushed to GitHub Container Registry (GHCR), both
-#     built by copying the Debian-built glibc binary in (no in-image
-#     compilation): a debian-slim image (:latest, :<version>) and a distroless
-#     image (:distroless, :<version>-distroless)
+#   - two multi-arch container images pushed to GitHub Container Registry
+#     (GHCR), both built by copying the Debian-built glibc binaries in (no
+#     in-image compilation): a debian-slim image (:latest, :<version>) and a
+#     distroless image (:distroless, :<version>-distroless)
 #   - the Helm chart, pushed as an OCI artifact to
 #     oci://ghcr.io/<owner>/charts/dbt-temporal at the same version
 #
-# Each distro package is built inside that distro's own container so the binary
-# links against a matching glibc, and the container image reuses the Debian
-# binary rather than compiling a second time. A crates.io publish is
-# intentionally absent: the crate depends on dbt v2's unpublished crates via git
-# and on a `[patch.crates-io]` block for forked arrow-rs/ring, both of which
+# Each distro package is built inside that distro's own container, on a runner
+# of the target architecture, so the binary links against a matching glibc and
+# nothing is cross-compiled. The container images reuse the Debian binaries
+# rather than compiling again. A crates.io publish is intentionally absent: the
+# crate depends on dbt v2's unpublished crates via git and on a
+# `[patch.crates-io]` block for forked arrow-rs/ring, both of which
 # `cargo publish` rejects. Build from source with
 # `cargo install --git https://github.com/thejens/dbt-temporal` instead.
 on:
@@ -29,11 +31,22 @@ env:
 
 jobs:
   deb:
-    name: Debian package (.deb) + binary
-    runs-on: ubuntu-latest
+    name: Debian package (.deb) + binary, ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          # `platform` is Docker's TARGETARCH naming; `protoc` is protobuf's
+          # release-asset naming for the same architecture.
+          - platform: amd64
+            runner: ubuntu-latest
+            protoc: x86_64
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+            protoc: aarch_64
+    runs-on: ${{ matrix.runner }}
     container: debian:12
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -47,7 +60,7 @@ jobs:
       - name: Install protoc
         run: |
           curl -sSL -o /tmp/protoc.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${{ matrix.protoc }}.zip"
           unzip -o /tmp/protoc.zip -d /usr/local
 
       - name: Install Rust
@@ -62,10 +75,11 @@ jobs:
         run: cargo build --release --locked --features gcs,aws
 
       # Reused by the container job so the image isn't compiled a second time.
+      # The artifact name carries the Docker platform the binary is for.
       - name: Upload binary for the container job
         uses: actions/upload-artifact@v7
         with:
-          name: dbt-temporal-linux-x86_64
+          name: dbt-temporal-linux-${{ matrix.platform }}
           path: target/release/dbt-temporal
 
       - name: Package .deb
@@ -73,18 +87,28 @@ jobs:
           cargo install cargo-deb
           cargo deb --no-build
 
-      - name: Upload .deb to release
-        uses: softprops/action-gh-release@v3
+      - name: Upload .deb for the release job
+        uses: actions/upload-artifact@v7
         with:
-          files: target/debian/*.deb
-          fail_on_unmatched_files: true
+          name: package-deb-${{ matrix.platform }}
+          path: target/debian/*.deb
+          if-no-files-found: error
 
   rpm:
-    name: RHEL package (.rpm)
-    runs-on: ubuntu-latest
+    name: RHEL package (.rpm), ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+            protoc: x86_64
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+            protoc: aarch_64
+    runs-on: ${{ matrix.runner }}
     container: almalinux:8
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -97,7 +121,7 @@ jobs:
       - name: Install protoc
         run: |
           curl -sSL -o /tmp/protoc.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${{ matrix.protoc }}.zip"
           unzip -o /tmp/protoc.zip -d /usr/local
 
       - name: Install Rust
@@ -116,10 +140,32 @@ jobs:
           cargo install cargo-generate-rpm
           cargo generate-rpm
 
-      - name: Upload to release
+      - name: Upload .rpm for the release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-rpm-${{ matrix.platform }}
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  # One job attaches every package. Parallel jobs each calling
+  # action-gh-release can race to create the release and end up with two.
+  github-release:
+    name: GitHub release (packages)
+    runs-on: ubuntu-latest
+    needs: [deb, rpm]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload packages to release
         uses: softprops/action-gh-release@v3
         with:
-          files: target/generate-rpm/*.rpm
+          files: dist/*
           fail_on_unmatched_files: true
 
   container:
@@ -132,14 +178,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download the Debian-built binary
+      # Lands each binary at bin/dbt-temporal-linux-<platform>/dbt-temporal,
+      # which the Dockerfiles pick by TARGETARCH.
+      - name: Download the Debian-built binaries
         uses: actions/download-artifact@v8
         with:
-          name: dbt-temporal-linux-x86_64
-          path: .
+          pattern: dbt-temporal-linux-*
+          path: bin
 
-      - name: Make binary executable
-        run: chmod +x dbt-temporal
+      # The debian-slim image runs apt-get, so its arm64 stage needs emulation
+      # on this amd64 runner. Only package installs run emulated; the binary is
+      # already built.
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v4
 
@@ -166,6 +218,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.release
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta_slim.outputs.tags }}
           labels: ${{ steps.meta_slim.outputs.labels }}
@@ -189,6 +242,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.distroless
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta_distroless.outputs.tags }}
           labels: ${{ steps.meta_distroless.outputs.labels }}

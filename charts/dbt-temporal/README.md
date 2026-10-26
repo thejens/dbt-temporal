@@ -6,7 +6,7 @@ as workflows.
 
 ```bash
 helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \
-  --version 0.6.1 \
+  --version 0.7.0 \
   --set temporal.address=temporal-frontend.temporal:7233 \
   --set dbt.projectDirs='git+https://github.com/org/dbt-models.git#main' \
   --set dbt.profiles.existingSecret=dbt-profiles

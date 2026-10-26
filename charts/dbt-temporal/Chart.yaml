@@ -4,8 +4,8 @@ description: Run dbt DAGs as Temporal workflows — the dbt-temporal worker on K
 type: application
 # Chart and app are released together from one tag, so the two versions move
 # in lockstep; the Release workflow refuses a tag that disagrees with either.
-version: 0.6.1
-appVersion: "0.6.1"
+version: 0.7.0
+appVersion: "0.7.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/thejens/dbt-temporal
 sources:

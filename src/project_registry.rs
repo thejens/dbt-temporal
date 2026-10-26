@@ -132,7 +132,7 @@ mod tests {
         let reg = test_registry(&[]);
         assert_eq!(reg.len(), 0);
         assert!(!reg.has_default());
-        assert!(reg.project_names().is_empty());
+        assert_eq!(reg.project_names(), Vec::<&str>::new());
     }
 
     #[test]

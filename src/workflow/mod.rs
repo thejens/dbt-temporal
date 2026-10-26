@@ -680,7 +680,7 @@ mod continuation_tests {
 
         let point = build_resume_point(&plan(), Some(control_from(state, "seg-0.json")), true);
 
-        assert!(point.log_lines.is_empty());
+        assert!(point.log_lines.is_empty(), "{:?}", point.log_lines);
         assert!(point.all_results.is_empty());
         assert_eq!(point.prior_segments, vec!["seg-0.json".to_string()]);
     }

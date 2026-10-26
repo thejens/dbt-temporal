@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(rc.initial_interval_secs, 5);
         assert!((rc.backoff_coefficient - 2.0).abs() < f64::EPSILON);
         assert_eq!(rc.max_interval_secs, 60);
-        assert!(rc.non_retryable_errors.is_empty());
+        assert!(rc.non_retryable_errors.is_empty(), "{:?}", rc.non_retryable_errors);
     }
 
     #[test]

@@ -6,10 +6,14 @@
 # Debian slim keeps glibc so the ADBC warehouse drivers dbt dlopens at runtime
 # — the glibc builds shipped from the dbt CDN — load correctly. The binary is
 # built on debian:12 (same glibc as bookworm-slim), so it runs here unchanged.
+#
+# `git` (and `openssh-client` for `git+ssh://`) are runtime dependencies, not
+# conveniences: `git+https://` / `git+ssh://` entries in DBT_PROJECT_DIRS are
+# fetched by shelling out to the git CLI at startup.
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY dbt-temporal /usr/local/bin/dbt-temporal

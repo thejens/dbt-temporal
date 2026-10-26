@@ -53,8 +53,11 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # The cloud stores are compile-time features. Distributed builds carry
+      # both so that `gs://` / `s3://` work for ARTIFACT_STORE and
+      # DBT_PROJECT_DIRS without users rebuilding from source.
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features gcs,aws
 
       # Reused by the container job so the image isn't compiled a second time.
       - name: Upload binary for the container job
@@ -100,8 +103,11 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # The cloud stores are compile-time features. Distributed builds carry
+      # both so that `gs://` / `s3://` work for ARTIFACT_STORE and
+      # DBT_PROJECT_DIRS without users rebuilding from source.
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features gcs,aws
 
       - name: Package .rpm
         run: |

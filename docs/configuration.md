@@ -93,6 +93,8 @@ Entries in `DBT_PROJECT_DIRS` can be local filesystem paths or remote URLs. Path
 | `gs://` | `gcs` | `gs://my-bucket/dbt-models` |
 | `s3://` | `aws` | `s3://my-bucket/dbt-models` |
 
+The feature flags apply only to builds from source; the released packages and container images include both.
+
 The `#branch` suffix is required for git URLs and specifies which branch (or tag) to check out. An optional `:subdir` can be appended to point at a subdirectory within the repo:
 
 ```
@@ -124,11 +126,11 @@ DBT_PROJECT_DIRS=/local/analytics,git+https://github.com/org/shared-models.git#m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WRITE_ARTIFACTS` | `false` | Enable artifact writing (`run_results.json`, `manifest.json`, `log.txt`) after each run |
-| `ARTIFACT_STORE` | `/tmp/dbt-artifacts` | Local path or cloud URL (`gs://…`, `s3://…`). Cloud URLs require `gcs` or `aws` feature. |
+| `ARTIFACT_STORE` | `/tmp/dbt-artifacts` | Local path or cloud URL (`gs://…`, `s3://…`). Cloud URLs require the `gcs` or `aws` feature; released packages and images include both. |
 | `WRITE_RUN_LOG` | `true` | Write a CLI-style run log (`log.txt`) to the artifact store alongside `run_results.json` |
 | `WRITE_CATALOG` | `false` | Also generate a partial `catalog.json` (`dbt docs generate` equivalent): per-relation column names and types from the warehouse for every node the run built plus all sources. Table types come from each node's materialization; comments/owner/stats are omitted. Catalog problems are logged but never fail the run. Requires `WRITE_ARTIFACTS=1`. |
 
-`ARTIFACT_STORE` accepts the same URL schemes as `DBT_PROJECT_DIRS`:
+`ARTIFACT_STORE` accepts the same URL schemes as `DBT_PROJECT_DIRS`. The feature flags matter only when building from source: the released `.deb`, `.rpm` and container images are built with `gcs` and `aws`.
 
 | Scheme | Feature flag | Auth | Example |
 |--------|-------------|------|---------|

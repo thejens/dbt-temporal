@@ -153,7 +153,7 @@ Integration tests use [testcontainers](https://rust.testcontainers.org/) to spin
 
 ```bash
 cargo test --test waffle_hut                    # end-to-end test
-cargo test --features aws --test artifact_store_s3  # S3 artifact store against Minio
+cargo test --features aws --test artifact_store_s3  # S3 artifact store against RustFS
 ```
 
 ### Docker

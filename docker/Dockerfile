@@ -3,7 +3,7 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
-RUN cargo build --release
+RUN cargo build --release --features gcs,aws
 
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/dbt-temporal /usr/local/bin/

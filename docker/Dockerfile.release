@@ -16,6 +16,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# A passwd entry for the non-root UID that Kubernetes deployments (and the Helm
+# chart) run as, matching distroless's `nonroot`. OpenSSH resolves the user with
+# getpwuid() and refuses to start without one, so `git+ssh://` sources would
+# fail before connecting. Home is /tmp: the one path writable under a
+# read-only root filesystem.
+RUN groupadd --gid 65532 nonroot \
+    && useradd --uid 65532 --gid 65532 --home-dir /tmp --no-create-home \
+    --shell /usr/sbin/nologin nonroot
+
 COPY dbt-temporal /usr/local/bin/dbt-temporal
 
 ENTRYPOINT ["dbt-temporal"]

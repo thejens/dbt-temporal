@@ -1,0 +1,15 @@
+# Private and self-hosted git sources: token, SSH key and private CA paths.
+temporal:
+  address: temporal-frontend.temporal:7233
+dbt:
+  projectDirs: git+https://gitlab.example.com/data/models.git#3f9c2e1d8b7a6c5f4e3d2c1b0a9f8e7d6c5b4a39:dbt,git+ssh://git@github.com/org/shared-models.git#v1.4.0
+  profiles:
+    existingSecret: dbt-profiles  # pragma: allowlist secret
+  git:
+    token:
+      existingSecret: gitlab-deploy-token  # pragma: allowlist secret
+    username: oauth2
+    ssh:
+      existingSecret: git-ssh-key  # pragma: allowlist secret
+    caBundle:
+      configMap: corp-ca

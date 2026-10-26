@@ -71,7 +71,7 @@ spec:
             {{- with .Values.envFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or .Values.temporal.apiKey.existingSecret .Values.extraEnv }}
+          {{- if or .Values.temporal.apiKey.existingSecret .Values.dbt.git.token.existingSecret .Values.extraEnv }}
           env:
             {{- if .Values.temporal.apiKey.existingSecret }}
             - name: TEMPORAL_API_KEY
@@ -79,6 +79,15 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.temporal.apiKey.existingSecret }}
                   key: {{ .Values.temporal.apiKey.key }}
+            {{- end }}
+            {{- with .Values.dbt.git.token }}
+            {{- if .existingSecret }}
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .key }}
+            {{- end }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -114,6 +123,16 @@ spec:
               mountPath: /etc/temporal/tls
               readOnly: true
             {{- end }}
+            {{- if .Values.dbt.git.ssh.existingSecret }}
+            - name: git-ssh
+              mountPath: /etc/dbt-temporal/git-ssh
+              readOnly: true
+            {{- end }}
+            {{- if .Values.dbt.git.caBundle.configMap }}
+            - name: git-ca
+              mountPath: /etc/dbt-temporal/git-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -139,6 +158,29 @@ spec:
         - name: temporal-tls
           secret:
             secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.dbt.git.ssh.existingSecret }}
+        - name: git-ssh
+          secret:
+            secretName: {{ . }}
+            # ssh refuses a private key that others can read. The kubelet adds
+            # group read for fsGroup, which is how the non-root UID reads it.
+            defaultMode: 0400
+            items:
+              - key: ssh-privatekey
+                path: ssh-privatekey
+              - key: known_hosts
+                path: known_hosts
+        {{- end }}
+        {{- with .Values.dbt.git.caBundle }}
+        {{- if .configMap }}
+        - name: git-ca
+          configMap:
+            name: {{ .configMap }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

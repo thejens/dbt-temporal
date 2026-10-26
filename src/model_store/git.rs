@@ -59,7 +59,8 @@ fn is_commit_id(rev: &str) -> bool {
 ///
 /// URL format: `git+https://github.com/org/repo.git#rev[:subdir]`
 ///
-/// Authentication token is read from `GITHUB_TOKEN`, then `GIT_TOKEN` (first non-empty wins).
+/// Authentication token is read from `GITHUB_TOKEN`, then `GIT_TOKEN` (first non-empty wins),
+/// and sent as the username unless `GIT_USERNAME` is set, in which case it is the password.
 /// The token reaches git through `GIT_CONFIG_*` env vars (a `url.<with-token>.insteadOf`
 /// rewrite) rather than the clone URL itself — an argv-embedded token is visible in the
 /// process list while git runs, and git persists the remote URL verbatim into the cloned
@@ -165,9 +166,15 @@ fn git_command(repo_url: &str) -> Result<tokio::process::Command> {
         // directory the worker is about to remove.
         .kill_on_drop(true);
     if let Some((key, value)) = token_rewrite_config(repo_url)? {
-        cmd.env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", key)
-            .env("GIT_CONFIG_VALUE_0", value);
+        // Append to whatever `GIT_CONFIG_*` entries the deployment sets itself
+        // (an extra header, a CA bundle) instead of overwriting the first one.
+        let index = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        cmd.env("GIT_CONFIG_COUNT", (index + 1).to_string())
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
     Ok(cmd)
 }
@@ -218,6 +225,15 @@ fn git_token() -> Option<String> {
     None
 }
 
+/// The username to send with the token, from `GIT_USERNAME`.
+///
+/// Hosts disagree on where a token goes. GitHub and Gitea accept it as the
+/// username, which is the default; GitLab (`oauth2`), Bitbucket
+/// (`x-token-auth`) and Azure DevOps (any name) want it as the password.
+fn git_username() -> Option<String> {
+    std::env::var("GIT_USERNAME").ok().filter(|u| !u.is_empty())
+}
+
 /// Build the `url.<with-token>.insteadOf` git-config pair that authenticates an
 /// HTTPS clone. Returns `None` when no token is set or the URL isn't HTTPS
 /// (SSH auth comes from the agent/keys, not a token).
@@ -232,9 +248,13 @@ fn token_rewrite_config(repo_url: &str) -> Result<Option<(String, String)>> {
     }
 
     let mut with_token = parsed;
-    with_token
-        .set_username(&token)
-        .map_err(|()| anyhow::anyhow!("failed to set git token in URL"))?;
+    let set = match git_username() {
+        Some(user) => with_token
+            .set_username(&user)
+            .and_then(|()| with_token.set_password(Some(&token))),
+        None => with_token.set_username(&token),
+    };
+    set.map_err(|()| anyhow::anyhow!("failed to set git token in URL"))?;
     Ok(Some((format!("url.{with_token}.insteadOf"), repo_url.to_string())))
 }
 
@@ -252,46 +272,52 @@ mod tests {
     /// Serialize all git-token env var tests to avoid races.
     static GIT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// RAII guard that restores GITHUB_TOKEN/GIT_TOKEN on drop, including on panic.
-    /// The previous version restored after `f()` returned, so a test assertion panic
-    /// would leak the test's tokens into subsequent tests.
+    /// Every variable the git source reads from the environment.
+    const GIT_ENV_VARS: [&str; 4] = [
+        "GITHUB_TOKEN",
+        "GIT_TOKEN",
+        "GIT_USERNAME",
+        "GIT_CONFIG_COUNT",
+    ];
+
+    /// RAII guard that restores the git env vars on drop, including on panic,
+    /// so a failed assertion cannot leak one test's tokens into the next.
     #[allow(unsafe_code)]
-    struct TokenGuard {
-        github: Option<String>,
-        git: Option<String>,
-    }
+    struct GitEnvGuard(Vec<(&'static str, Option<String>)>);
 
     #[allow(unsafe_code)]
-    impl Drop for TokenGuard {
+    impl Drop for GitEnvGuard {
         fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("GITHUB_TOKEN");
-                std::env::remove_var("GIT_TOKEN");
-                if let Some(v) = &self.github {
-                    std::env::set_var("GITHUB_TOKEN", v);
-                }
-                if let Some(v) = &self.git {
-                    std::env::set_var("GIT_TOKEN", v);
+            for (var, value) in &self.0 {
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(var, v),
+                        None => std::env::remove_var(var),
+                    }
                 }
             }
         }
     }
 
-    /// Helper: run a closure with specific GITHUB_TOKEN and GIT_TOKEN values, restoring after.
+    /// Run a closure with specific GITHUB_TOKEN and GIT_TOKEN values and every
+    /// other git env var cleared, restoring all of them after.
     #[allow(unsafe_code)]
     fn with_git_tokens<F: FnOnce()>(github: Option<&str>, git: Option<&str>, f: F) {
         let Ok(_lock) = GIT_ENV_LOCK.lock() else {
             panic!("GIT_ENV_LOCK poisoned");
         };
 
-        let _restore = TokenGuard {
-            github: std::env::var("GITHUB_TOKEN").ok(),
-            git: std::env::var("GIT_TOKEN").ok(),
-        };
+        let _restore = GitEnvGuard(
+            GIT_ENV_VARS
+                .iter()
+                .map(|&var| (var, std::env::var(var).ok()))
+                .collect(),
+        );
 
         unsafe {
-            std::env::remove_var("GITHUB_TOKEN");
-            std::env::remove_var("GIT_TOKEN");
+            for var in GIT_ENV_VARS {
+                std::env::remove_var(var);
+            }
             if let Some(v) = github {
                 std::env::set_var("GITHUB_TOKEN", v);
             }
@@ -301,6 +327,12 @@ mod tests {
         }
 
         f();
+    }
+
+    /// Set an env var inside a `with_git_tokens` closure, which restores it.
+    #[allow(unsafe_code)]
+    fn set_git_env(var: &str, value: &str) {
+        unsafe { std::env::set_var(var, value) };
     }
 
     #[test]
@@ -342,6 +374,39 @@ mod tests {
             // what git stores as remote.origin.url.
             assert_eq!(key, "url.https://my-token@github.com/org/repo.git.insteadOf");
             assert_eq!(value, "https://github.com/org/repo.git");
+        });
+    }
+
+    #[test]
+    fn token_rewrite_config_sends_the_token_as_password_with_a_username() {
+        with_git_tokens(None, Some("glpat-tok"), || {
+            set_git_env("GIT_USERNAME", "oauth2");
+            let Ok(Some((key, _))) = token_rewrite_config("https://gitlab.example.com/g/r.git")
+            else {
+                panic!("expected a rewrite pair");
+            };
+            assert_eq!(key, "url.https://oauth2:glpat-tok@gitlab.example.com/g/r.git.insteadOf"); // pragma: allowlist secret
+        });
+    }
+
+    #[test]
+    fn the_token_rewrite_is_appended_to_existing_git_config_env() {
+        with_git_tokens(Some("tok"), None, || {
+            set_git_env("GIT_CONFIG_COUNT", "2");
+            let Ok(cmd) = git_command("https://github.com/org/repo.git") else {
+                panic!("git_command failed");
+            };
+            let envs: std::collections::HashMap<_, _> = cmd
+                .as_std()
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+                .collect();
+            assert_eq!(envs["GIT_CONFIG_COUNT"], "3");
+            assert_eq!(
+                envs["GIT_CONFIG_KEY_2"],
+                "url.https://tok@github.com/org/repo.git.insteadOf"
+            );
+            assert!(!envs.contains_key("GIT_CONFIG_KEY_0"), "entry 0 is the deployment's");
         });
     }
 

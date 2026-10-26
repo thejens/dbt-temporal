@@ -113,6 +113,52 @@
               "type": "string"
             }
           }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "token": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "existingSecret": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "username": {
+              "type": "string",
+              "description": "Sent with the token; empty sends the token as the username."
+            },
+            "ssh": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "existingSecret": {
+                  "type": "string",
+                  "description": "Secret with ssh-privatekey and known_hosts keys."
+                }
+              }
+            },
+            "caBundle": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "configMap": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
         }
       }
     },

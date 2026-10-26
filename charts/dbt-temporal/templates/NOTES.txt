@@ -1,0 +1,19 @@
+dbt-temporal worker {{ include "dbt-temporal.fullname" . }} polls task queue
+"{{ .Values.temporal.taskQueue }}" in namespace "{{ .Values.temporal.namespace }}" on {{ .Values.temporal.address }}.
+
+Watch it come up (the startup probe allows for the project load):
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "dbt-temporal.fullname" . }}
+
+Start a run:
+  temporal workflow start --type dbt_run --task-queue {{ .Values.temporal.taskQueue }} --input '{}'
+{{- if not .Values.temporal.deploymentName }}
+
+Note: temporal.deploymentName is unset, so the worker is unversioned. A rollout
+that changes workflow code can then break runs that are in flight. Set it to pin
+each run to the worker version that started it.
+{{- end }}
+{{- if and .Values.artifacts.enabled (not (or (hasPrefix "gs://" .Values.artifacts.store) (hasPrefix "s3://" .Values.artifacts.store))) }}
+
+Note: artifacts are written to a local path inside the pod, which is lost when
+the pod goes. Set artifacts.store to a gs:// or s3:// bucket to keep them.
+{{- end }}

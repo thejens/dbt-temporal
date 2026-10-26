@@ -1,0 +1,57 @@
+{{- if not .Values.temporal.address }}
+{{- fail "temporal.address is required (e.g. temporal-frontend.temporal:7233)" }}
+{{- end }}
+{{- if not .Values.dbt.projectDirs }}
+{{- fail "dbt.projectDirs is required: a baked-in or mounted path, git+https://…, gs://… or s3://…" }}
+{{- end }}
+{{- if and .Values.dbt.profiles.existingSecret .Values.dbt.profiles.inline }}
+{{- fail "set dbt.profiles.existingSecret or dbt.profiles.inline, not both" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dbt-temporal.fullname" . }}
+  labels:
+    {{- include "dbt-temporal.labels" . | nindent 4 }}
+data:
+  TEMPORAL_ADDRESS: {{ .Values.temporal.address | quote }}
+  TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
+  {{- with .Values.temporal.deploymentName }}
+  TEMPORAL_DEPLOYMENT_NAME: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.temporal.tls.existingSecret }}
+  TEMPORAL_TLS_CERT: /etc/temporal/tls/tls.crt
+  TEMPORAL_TLS_KEY: /etc/temporal/tls/tls.key
+  {{- end }}
+  DBT_PROJECT_DIRS: {{ .Values.dbt.projectDirs | quote }}
+  {{- with .Values.dbt.target }}
+  DBT_TARGET: {{ . | quote }}
+  {{- end }}
+  {{- if include "dbt-temporal.profilesSecret" . }}
+  DBT_PROFILES_DIR: /etc/dbt
+  {{- end }}
+  WRITE_ARTIFACTS: {{ .Values.artifacts.enabled | toString | quote }}
+  {{- if .Values.artifacts.enabled }}
+  {{- with .Values.artifacts.store }}
+  ARTIFACT_STORE: {{ . | quote }}
+  {{- end }}
+  WRITE_CATALOG: {{ .Values.artifacts.catalog | toString | quote }}
+  WRITE_RUN_LOG: {{ .Values.artifacts.runLog | toString | quote }}
+  {{- end }}
+  HEALTH_PORT: {{ .Values.health.port | quote }}
+  {{- if include "dbt-temporal.isSet" .Values.worker.gracefulShutdownSeconds }}
+  WORKER_GRACEFUL_SHUTDOWN_SECS: {{ .Values.worker.gracefulShutdownSeconds | int | quote }}
+  {{- end }}
+  {{- range $name, $value := .Values.worker.tuning }}
+  {{ $name }}: {{ $value | toString | quote }}
+  {{- end }}
+  {{- if .Values.metrics.enabled }}
+  TEMPORAL_METRICS_EXPORTER: prometheus
+  TEMPORAL_METRICS_PROMETHEUS_ADDR: {{ printf "0.0.0.0:%d" (.Values.metrics.port | int) | quote }}
+  {{- end }}
+  # The pod runs as an arbitrary non-root UID on a read-only root filesystem:
+  # git needs a writable HOME, and dbt installs ADBC drivers under
+  # $XDG_CACHE_HOME on first use.
+  HOME: /tmp
+  XDG_CACHE_HOME: /var/cache/dbt-temporal

@@ -136,6 +136,7 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 | [Error Handling](docs/error-handling.md) | Error classification, retry configuration, and non-retryable error patterns |
 | [Architecture](docs/architecture.md) | Workflow execution flow, project structure, and dependency overview |
 | [Deployment](docs/deployment.md) | Docker, Kubernetes, Cloud Run, ECS, and other deployment options |
+| [Helm chart](charts/dbt-temporal/README.md) | Deploying the worker on Kubernetes: `oci://ghcr.io/thejens/charts/dbt-temporal` |
 | [dbt v2 Workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
 | [Examples](examples/README.md) | Walkthrough of included example projects |
 

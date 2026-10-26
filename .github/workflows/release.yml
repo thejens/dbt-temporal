@@ -8,6 +8,8 @@ name: Release
 #     built by copying the Debian-built glibc binary in (no in-image
 #     compilation): a debian-slim image (:latest, :<version>) and a distroless
 #     image (:distroless, :<version>-distroless)
+#   - the Helm chart, pushed as an OCI artifact to
+#     oci://ghcr.io/<owner>/charts/dbt-temporal at the same version
 #
 # Each distro package is built inside that distro's own container so the binary
 # links against a matching glibc, and the container image reuses the Debian
@@ -190,3 +192,39 @@ jobs:
           push: true
           tags: ${{ steps.meta_distroless.outputs.tags }}
           labels: ${{ steps.meta_distroless.outputs.labels }}
+
+  # After the images: the chart defaults to the image tagged with its own
+  # appVersion, so it must never be published ahead of that image.
+  chart:
+    name: Helm chart (OCI on GHCR)
+    runs-on: ubuntu-latest
+    needs: [container]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.1
+
+      - name: Check the chart version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(sed -n 's/^version: \(.*\)$/\1/p' charts/dbt-temporal/Chart.yaml)
+          app_version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' charts/dbt-temporal/Chart.yaml)
+          if [ "$version" != "$tag" ] || [ "$app_version" != "$tag" ]; then
+            echo "Chart.yaml has version $version / appVersion $app_version, tag is $tag" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: helm package charts/dbt-temporal --destination dist
+
+      - name: Push to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm push dist/dbt-temporal-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

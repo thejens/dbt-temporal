@@ -331,70 +331,42 @@ Two ways to stay safe:
 
 ## 1. Kubernetes (any provider)
 
-The worker needs a Deployment (not a Job — it's long-running) and a way to inject config/secrets.
-
-**Minimal resources:**
-
-- **Deployment** — runs the `dbt-temporal` container with `replicas: N` (scale workers horizontally)
-- **ConfigMap** — non-secret env vars (`TEMPORAL_ADDRESS`, `TEMPORAL_TASK_QUEUE`, etc.)
-- **Secret** — warehouse credentials, Temporal mTLS certs if applicable
-- **ServiceAccount** — if using workload identity for GCS/S3 artifact storage
-
-No Service or Ingress needed — the worker makes outbound connections only (the health port is only used by the kubelet's liveness probe).
-
-```yaml
-# Example sketch — not a complete chart
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: dbt-temporal
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: dbt-temporal
-  template:
-    metadata:
-      labels:
-        app: dbt-temporal
-    spec:
-      containers:
-        - name: worker
-          image: ghcr.io/your-org/dbt-temporal:latest
-          ports:
-            - name: health
-              containerPort: 8080
-          envFrom:
-            - configMapRef:
-                name: dbt-temporal-config
-            - secretRef:
-                name: dbt-temporal-secrets
-          livenessProbe:
-            httpGet:
-              path: /
-              port: health
-            initialDelaySeconds: 30
-            periodSeconds: 15
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "512Mi"
-```
-
-**Re-deploy**: update the image tag or change an env var. For model-only changes with git fetch, bumping an annotation works too:
+Use the Helm chart. It is published with every release as an OCI artifact on
+GHCR, at the same version as the worker:
 
 ```bash
-kubectl patch deployment dbt-temporal -p \
-  "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"deploy-trigger\":\"$(date +%s)\"}}}}}"
+helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \
+  --version <release> \
+  --set temporal.address=temporal-frontend.temporal:7233 \
+  --set temporal.deploymentName=dbt-temporal-prod \
+  --set dbt.projectDirs='git+https://github.com/org/dbt-models.git#main' \
+  --set dbt.profiles.existingSecret=dbt-profiles
 ```
 
-A Helm chart would wrap this into a parameterized package — a natural next step for packaging this deployment.
+It encodes what this guide describes:
+- A non-root pod on a read-only root filesystem, with `emptyDir`s for `/tmp`
+  and the ADBC driver cache.
+- A startup probe sized for the project load.
+- `terminationGracePeriodSeconds` derived from the
+  [drain window](#graceful-shutdown).
+- Surge-first rollouts.
+- Optional Prometheus metrics, a ServiceMonitor, a PodDisruptionBudget and a
+  KEDA `ScaledObject`.
+
+Every value is documented in the
+[chart README](../charts/dbt-temporal/README.md).
+
+Model changes with a git or bucket source roll out by changing
+`dbt.projectDirs`, for example to a new commit or tag. That changes the
+ConfigMap's hash in the pod template, which rolls the pods.
 
 ### Scaling with KEDA
 
 The standard Kubernetes HPA requires at least one pod running and scales on CPU/memory — neither is a good fit for a Temporal worker whose load is determined by task queue backlog, not resource usage.
 
 [KEDA](https://keda.sh/) (Kubernetes Event-Driven Autoscaler) has a native [Temporal scaler](https://keda.sh/docs/2.18/scalers/temporal/) (since KEDA v2.17) that monitors task queue backlog size and scales workers accordingly — including **scaling to zero** when there are no pending tasks.
+
+With the Helm chart, `keda.enabled: true` renders the `ScaledObject` below, plus a `TriggerAuthentication` when the worker uses an API key or mTLS. The manifests below are what it produces, for anyone not using the chart.
 
 ```yaml
 apiVersion: keda.sh/v1alpha1

@@ -1,0 +1,20 @@
+apiVersion: v2
+name: dbt-temporal
+description: Run dbt DAGs as Temporal workflows — the dbt-temporal worker on Kubernetes.
+type: application
+# Chart and app are released together from one tag, so the two versions move
+# in lockstep; the Release workflow refuses a tag that disagrees with either.
+version: 0.6.1
+appVersion: "0.6.1"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/thejens/dbt-temporal
+sources:
+  - https://github.com/thejens/dbt-temporal
+keywords:
+  - dbt
+  - temporal
+  - data
+  - orchestration
+maintainers:
+  - name: thejens
+    url: https://github.com/thejens

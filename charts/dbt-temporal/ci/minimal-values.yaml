@@ -1,0 +1,5 @@
+# Smallest working install: a self-hosted Temporal and a git-fetched project.
+temporal:
+  address: temporal-frontend.temporal:7233
+dbt:
+  projectDirs: git+https://github.com/dbt-labs/jaffle-shop-classic.git#main

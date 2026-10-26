@@ -1,0 +1,21 @@
+{{- if include "dbt-temporal.metricsService" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dbt-temporal.fullname" . }}-metrics
+  labels:
+    {{- include "dbt-temporal.labels" . | nindent 4 }}
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dbt-temporal.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

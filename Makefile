@@ -65,6 +65,11 @@ fmt:
 lint: fmt clippy
 	@echo "All lint checks passed."
 
+# Separate from `lint`: needs helm and kubeconform on PATH
+# (brew install helm kubeconform). CI runs it as its own job.
+chart-lint:
+	./scripts/chart-lint.sh
+
 docker-build:
 	docker build -f docker/Dockerfile -t dbt-temporal .
 

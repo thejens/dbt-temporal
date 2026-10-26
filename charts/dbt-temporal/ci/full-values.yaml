@@ -1,0 +1,73 @@
+# Every optional resource and wiring path switched on, for template coverage.
+image:
+  variant: distroless
+temporal:
+  address: ns.acct.tmprl.cloud:7233
+  namespace: ns.acct
+  taskQueue: dbt-prod
+  deploymentName: dbt-temporal-prod
+  apiKey:
+    existingSecret: temporal-api-key  # pragma: allowlist secret
+  tls:
+    existingSecret: temporal-mtls  # pragma: allowlist secret
+dbt:
+  projectDirs: /dbt/project,gs://models/shared
+  target: prod
+  profiles:
+    inline: |
+      jaffle_shop:
+        target: prod
+        outputs:
+          prod:
+            type: bigquery
+            method: oauth
+            project: "{{ env_var('GCP_PROJECT') }}"
+            dataset: analytics
+artifacts:
+  enabled: true
+  store: gs://artifacts/dbt
+  catalog: true
+worker:
+  gracefulShutdownSeconds: 600
+  tuning:
+    WORKER_TUNING_MODE: resource-based
+    WORKER_MAX_ACTIVITIES_PER_SECOND: 10
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+keda:
+  enabled: true
+  minReplicaCount: 0
+  useTemporalApiKey: true
+podDisruptionBudget:
+  enabled: true
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: dbt@proj.iam.gserviceaccount.com
+extraEnv:
+  - name: GCP_PROJECT
+    value: proj
+envFrom:
+  - secretRef:
+      name: warehouse-credentials
+extraVolumes:
+  - name: project
+    configMap:
+      name: dbt-project
+extraVolumeMounts:
+  - name: project
+    mountPath: /dbt/project
+    readOnly: true
+tmp:
+  medium: Memory
+  sizeLimit: 256Mi
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: dbt-temporal

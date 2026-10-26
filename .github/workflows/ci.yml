@@ -17,6 +17,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.1
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+      - run: make chart-lint
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

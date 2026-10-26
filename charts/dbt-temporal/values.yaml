@@ -1,0 +1,175 @@
+# Default values for dbt-temporal. Every option is documented in README.md.
+
+image:
+  repository: ghcr.io/thejens/dbt-temporal
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # "" for the default debian-slim image, or "distroless". Distroless has no
+  # `git`, so it cannot fetch `git+https://` / `git+ssh://` project sources.
+  variant: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Ignored when keda.enabled — KEDA owns the replica count then.
+replicaCount: 1
+
+temporal:
+  # Required. Frontend host:port, e.g. temporal-frontend.temporal:7233 or
+  # <namespace>.<account>.tmprl.cloud:7233.
+  address: ""
+  namespace: default
+  taskQueue: dbt-tasks
+  # Enables worker deployment versioning: an in-flight run finishes on the
+  # worker version that started it. Strongly recommended for rolling deploys —
+  # see docs/deployment.md "Workflow changes and in-flight runs".
+  deploymentName: ""
+  # Temporal Cloud API key, read from an existing Secret.
+  apiKey:
+    existingSecret: ""
+    key: api-key
+  # mTLS client certificate, from an existing kubernetes.io/tls Secret
+  # (keys tls.crt / tls.key).
+  tls:
+    existingSecret: ""
+
+dbt:
+  # Comma-separated project sources: local paths (baked into the image or
+  # mounted through extraVolumes), git+https://…#ref[:subdir], git+ssh://…,
+  # gs://…, s3://…. Required.
+  projectDirs: ""
+  target: ""
+  profiles:
+    # An existing Secret whose `profiles.yml` key holds the profiles file.
+    existingSecret: ""
+    # Or the file itself, rendered into a Secret this chart owns. Prefer
+    # env_var() for credentials and supply them through extraEnv / envFrom.
+    inline: ""
+
+artifacts:
+  # Write run_results.json, manifest.json and the run log after each run.
+  enabled: false
+  # Use a bucket (gs://… / s3://…): a local path lands on the pod's ephemeral
+  # storage and is gone when the pod is.
+  store: ""
+  catalog: false
+  runLog: true
+
+worker:
+  # After SIGTERM, how long in-flight activities may run before they are
+  # cancelled and retried on another worker. New work stops at the signal.
+  # Empty waits for every in-flight activity, however long it takes.
+  gracefulShutdownSeconds: 300
+  # Extra time Kubernetes waits beyond the drain before SIGKILL, for cancelled
+  # queries to actually stop. terminationGracePeriodSeconds is the sum.
+  terminationGraceBufferSeconds: 60
+  # Overrides the computed value outright.
+  terminationGracePeriodSeconds: null
+  # Any of the WORKER_* tuning variables, as NAME: value, e.g.
+  # WORKER_TUNING_MODE: resource-based. See docs/configuration.md.
+  tuning: {}
+
+health:
+  port: 8080
+  # The health server starts only after the projects are loaded and parsed,
+  # which includes any git/bucket fetch: the startup probe allows for that
+  # (failureThreshold × periodSeconds) before liveness takes over.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 60
+  livenessProbe:
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 4
+
+metrics:
+  # Expose the SDK's Prometheus metrics on a container port.
+  enabled: false
+  port: 9464
+  service:
+    # A ClusterIP Service in front of the metrics port.
+    enabled: false
+    annotations: {}
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs. Implies metrics.service.
+    enabled: false
+    interval: 30s
+    labels: {}
+
+keda:
+  # Scale on Temporal task-queue backlog. Requires KEDA >= 2.17.
+  enabled: false
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 10
+  # Keep above the drain window, or KEDA scales a pod down mid-drain.
+  cooldownPeriod: 300
+  targetQueueSize: "5"
+  activationTargetQueueSize: "1"
+  queueTypes: workflow,activity
+  # Authenticate the scaler with temporal.apiKey.
+  useTemporalApiKey: false
+
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  # e.g. iam.gke.io/gcp-service-account or eks.amazonaws.com/role-arn, for
+  # bucket access without static keys.
+  annotations: {}
+  automountServiceAccountToken: false
+
+# Extra environment, as a list of EnvVar (supports valueFrom).
+extraEnv: []
+# Whole ConfigMaps / Secrets as environment — warehouse credentials, GITHUB_TOKEN.
+envFrom: []
+
+extraVolumes: []
+extraVolumeMounts: []
+
+tmp:
+  # /tmp holds the startup resolve output, per-activity scratch dirs and a
+  # git/bucket-fetched project. "Memory" makes it tmpfs, counted against the
+  # pod's memory.
+  medium: ""
+  sizeLimit: 1Gi
+
+# dbt downloads ADBC warehouse drivers on first use into $XDG_CACHE_HOME.
+cache:
+  sizeLimit: 2Gi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 2Gi
+
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

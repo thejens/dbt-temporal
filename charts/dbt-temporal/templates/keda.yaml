@@ -1,0 +1,57 @@
+{{- if .Values.keda.enabled }}
+{{- $useKey := and .Values.keda.useTemporalApiKey .Values.temporal.apiKey.existingSecret }}
+{{- if and .Values.keda.useTemporalApiKey (not .Values.temporal.apiKey.existingSecret) }}
+{{- fail "keda.useTemporalApiKey needs temporal.apiKey.existingSecret" }}
+{{- end }}
+{{- $tls := .Values.temporal.tls.existingSecret }}
+{{- if or $useKey $tls }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "dbt-temporal.fullname" . }}
+  labels:
+    {{- include "dbt-temporal.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    {{- if $useKey }}
+    - parameter: apiKey
+      name: {{ .Values.temporal.apiKey.existingSecret }}
+      key: {{ .Values.temporal.apiKey.key }}
+    {{- end }}
+    {{- if $tls }}
+    - parameter: cert
+      name: {{ $tls }}
+      key: tls.crt
+    - parameter: key
+      name: {{ $tls }}
+      key: tls.key
+    {{- end }}
+---
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "dbt-temporal.fullname" . }}
+  labels:
+    {{- include "dbt-temporal.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "dbt-temporal.fullname" . }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  triggers:
+    - type: temporal
+      metadata:
+        endpoint: {{ .Values.temporal.address | quote }}
+        namespace: {{ .Values.temporal.namespace | quote }}
+        taskQueue: {{ .Values.temporal.taskQueue | quote }}
+        targetQueueSize: {{ .Values.keda.targetQueueSize | toString | quote }}
+        activationTargetQueueSize: {{ .Values.keda.activationTargetQueueSize | toString | quote }}
+        queueTypes: {{ .Values.keda.queueTypes | quote }}
+      {{- if or $useKey $tls }}
+      authenticationRef:
+        name: {{ include "dbt-temporal.fullname" . }}
+      {{- end }}
+{{- end }}

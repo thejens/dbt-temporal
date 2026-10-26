@@ -45,7 +45,7 @@ All config is via environment variables. The important ones:
 | `WORKER_NONSTICKY_TO_STICKY_POLL_RATIO` | | `0.2` — normal-to-sticky queue poll ratio |
 | `WORKER_MAX_ACTIVITIES_PER_SECOND` | | Per-worker activity rate limit |
 | `WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND` | | Server-side task-queue activity rate limit |
-| `WORKER_GRACEFUL_SHUTDOWN_SECS` | | Grace period before canceling in-flight activities |
+| `WORKER_GRACEFUL_SHUTDOWN_SECS` | | After SIGTERM, how long in-flight activities may run before they are cancelled and retried elsewhere (unset: wait for them all) — see [Graceful Shutdown](#graceful-shutdown) |
 | `HEALTH_PORT` | | `8080` — enables the built-in HTTP health server (on by default in the Docker image) |
 | `HEALTH_FILE` | | `/tmp/health` — explicit health file path (auto-set when `HEALTH_PORT` is used) |
 
@@ -234,6 +234,48 @@ volumes:
       medium: Memory
       sizeLimit: 128Mi    # generous — typical peak usage is ~10 MB
 ```
+
+## Graceful Shutdown
+
+On `SIGTERM` or `SIGINT` the worker **stops taking new work and lets what is
+in flight finish**:
+
+1. Polling stops at once. No new activity starts on this worker, and nodes that
+   become ready later — the next DAG level — wait for another worker.
+2. Activities already running carry on. If `WORKER_GRACEFUL_SHUTDOWN_SECS` is
+   unset, the worker waits for all of them, however long they take.
+3. With `WORKER_GRACEFUL_SHUTDOWN_SECS` set, activities still running when it
+   elapses are cancelled and reported failed, so the server retries them on
+   another worker. The run itself is unaffected: it is durable on the server
+   and continues wherever a worker picks it up.
+4. The process exits `0` once nothing is running. A second signal exits
+   immediately with an error; that is how you skip a long drain with Ctrl-C.
+
+A cancelled activity stops dbt's warehouse work and **waits for it to stop**.
+It does not abandon the query, because the abandoned query could then write
+alongside its own retry. How soon that happens depends on whether the adapter
+can interrupt a running statement. Embedded DuckDB cannot, so a cancelled
+DuckDB model holds the shutdown until its current statement finishes.
+
+**Kubernetes:** set `terminationGracePeriodSeconds` comfortably above
+`WORKER_GRACEFUL_SHUTDOWN_SECS`. The gap is the time cancelled queries need to
+stop. If the pod is `SIGKILL`ed first, its in-flight activities are only
+retried once their heartbeat timeout expires (`timeouts.node_heartbeat_secs`
+in `dbt_temporal.yml`, 5 minutes by default; see
+[error handling](error-handling.md)).
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 360   # the drain, plus time for cancels to land
+  containers:
+    - name: worker
+      env:
+        - name: WORKER_GRACEFUL_SHUTDOWN_SECS
+          value: "300"
+```
+
+Without `WORKER_GRACEFUL_SHUTDOWN_SECS`, a node that outlives
+`terminationGracePeriodSeconds` is killed mid-query rather than cancelled.
 
 ## Re-deploying on Changes
 

@@ -860,7 +860,7 @@ temporal workflow show --workflow-id <ID> --output json \
 
 dbt-temporal uses [dbt v2](https://github.com/dbt-labs/dbt) (Rust) as its rendering and execution engine rather than dbt v1 (the Python `dbt-core`). This means some dbt features behave differently or are not yet available.
 
-The statuses below were recorded against the early 2026 Fusion previews, before dbt v2 reached its stable v2.0.0 release, and most have not been re-verified at the pinned `v2.0.5`. Treat "Broken" as "last seen broken".
+The statuses below were recorded against the early 2026 Fusion previews, before dbt v2 reached its stable v2.0.0 release, and most have not been re-verified at the pinned `v2.0.8`. Treat "Broken" as "last seen broken".
 
 ### Not yet supported
 

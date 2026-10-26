@@ -1,6 +1,6 @@
 # dbt v2 Workarounds
 
-dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.5` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
+dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.8` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
 The long-lived-worker gaps (sections 4–6) were last re-checked on 2026-09-29 against
 dbt `main` (`24206524`), which already carries the 2.0.7 changes: none of them
@@ -235,8 +235,11 @@ approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
 
 Each entry records the rev it was last confirmed against. The current pin is
-the `v2.0.5` release tag (`a3bdd96b`, 2026-09-18); anything confirmed against
-an older rev needs re-checking before it is filed or acted on.
+the `v2.0.8` release tag (`43918198`, 2026-10-14). It was cut from the
+`2.0.latest` branch as `v2.0.5` plus one cherry-pick that touches only
+`dbt-adapter-engine`'s `MapReduce` and the CLI's `--write-catalog` default, so
+an entry confirmed at `v2.0.5` holds at `v2.0.8` unchanged. Anything confirmed
+against an older rev needs re-checking before it is filed or acted on.
 
 **2026-07-08 audit:** a duplicate check turned up prior filings against
 `dbt-labs/dbt-core` under the `thejens` account that predate this doc and

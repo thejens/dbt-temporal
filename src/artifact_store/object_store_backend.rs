@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use object_store::ObjectStore;
 use object_store::path::Path;
+use object_store::{ObjectStore, ObjectStoreExt as _};
 
 use super::ArtifactStore;
 
@@ -105,8 +105,8 @@ impl ObjectStoreArtifactStore {
 impl ArtifactStore for ObjectStoreArtifactStore {
     async fn store(&self, invocation_id: &str, filename: &str, content: Bytes) -> Result<String> {
         let path = Path::from(self.prefix.as_str())
-            .child(invocation_id)
-            .child(filename);
+            .join(invocation_id)
+            .join(filename);
         self.store
             .put(&path, content.into())
             .await

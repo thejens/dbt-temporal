@@ -155,6 +155,7 @@ pub fn build_unit_test_sql(
         &[],
         &[],
         &render_filename,
+        None,
     )
     .map_err(|e| {
         DbtTemporalError::Compilation(format!(

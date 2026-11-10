@@ -25,6 +25,7 @@ use dbt_adapter::AdapterEngine;
 use dbt_adapter::AdapterType;
 use dbt_adapter::cache::RelationCache;
 use dbt_adapter::engine::query_comment::QueryCommentConfig;
+use dbt_adapter::engine::retry::QueryRetryPolicy;
 use dbt_adapter::engine::{Options, SidecarClient};
 use dbt_adapter::sql_types::TypeOps;
 use dbt_adapter::stmt_splitter::StmtSplitter;
@@ -193,6 +194,9 @@ impl AdapterEngine for FaultInjectingEngine {
     }
     fn get_config(&self) -> &AdapterConfig {
         self.inner.get_config()
+    }
+    fn query_retry_policy(&self) -> &QueryRetryPolicy {
+        self.inner.query_retry_policy()
     }
     fn relation_cache(&self) -> &Arc<RelationCache> {
         self.inner.relation_cache()

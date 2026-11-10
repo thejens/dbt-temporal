@@ -1,6 +1,6 @@
 # dbt v2 Workarounds
 
-dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.8` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
+dbt-temporal uses the crates of [dbt v2](https://github.com/dbt-labs/dbt) — the Rust rewrite of dbt, stable since v2.0.0 and pinned here to the `v2.0.11` release — as its rendering and execution engine. dbt does not publish those crates as a library, so their API is internal and changes without notice between releases. The crates are designed for the dbt CLI's single-invocation model, not for a long-lived worker that runs multiple workflows concurrently. Several workarounds are in place to bridge this gap.
 
 The long-lived-worker gaps (sections 4–6) were last re-checked on 2026-09-29 against
 dbt `main` (`24206524`), which already carries the 2.0.7 changes: none of them
@@ -47,8 +47,12 @@ rather than patching text afterwards.
 
 **Issue:** [apache/arrow-adbc#4663](https://github.com/apache/arrow-adbc/issues/4663) — filed
 against the driver manager's `RTLD_LAZY`, which is what makes this undiagnosable rather than a
-clean load error. The `-undefined dynamic_lookup` linkage of the driver itself is separate and
-not filed.
+clean load error. Fixed upstream by
+[apache/arrow-adbc#4665](https://github.com/apache/arrow-adbc/pull/4665) (`RTLD_NOW`), but dbt
+builds against its own fork, `dbt-labs/arrow-adbc`, which at the `v2.0.11` pin (`d2808cf`) still
+loads with `RTLD_LAZY`. Once the fork picks up the fix, a broken driver fails `dlopen` cleanly
+instead of crashing — the source build below is still needed to have a *working* driver. The
+`-undefined dynamic_lookup` linkage of the driver itself is separate and not filed.
 
 The CDN-shipped ADBC PostgreSQL driver is built with `-undefined dynamic_lookup`,
 which leaves OpenSSL and GSSAPI symbols unresolved. On macOS the OpenSSL ones
@@ -235,11 +239,13 @@ approval — check with the repo owner before opening any of these**, and never
 mention dbt-temporal by name in a filed issue body (see internal filing policy).
 
 Each entry records the rev it was last confirmed against. The current pin is
-the `v2.0.8` release tag (`43918198`, 2026-10-14). It was cut from the
-`2.0.latest` branch as `v2.0.5` plus one cherry-pick that touches only
-`dbt-adapter-engine`'s `MapReduce` and the CLI's `--write-catalog` default, so
-an entry confirmed at `v2.0.5` holds at `v2.0.8` unchanged. Anything confirmed
-against an older rev needs re-checking before it is filed or acted on.
+the `v2.0.11` release tag (`32b858a7`, 2026-11-03), a full release rather than
+a cherry-pick on `v2.0.8`: it touches about 300 files across the crates this
+project uses. The numbered workarounds above were re-checked against it (the
+`graph` reset and relation-cache paths are unchanged apart from progress
+labels; the telemetry data layer gained a span force-close but keeps its
+root-span assertion). The entries below were not, so anything confirmed at
+`v2.0.8` or earlier needs re-checking before it is filed or acted on.
 
 **2026-07-08 audit:** a duplicate check turned up prior filings against
 `dbt-labs/dbt-core` under the `thejens` account that predate this doc and

@@ -16,7 +16,7 @@
 //! - **OTLP** (`DBT_EXPORT_TO_OTLP=1`): dbt-fusion's own telemetry pipeline
 //!   (the same data layer + console output + OTLP trace/log export), assembled
 //!   by `FsTraceConfig::init`. dbt's structured events (`QueryExecuted`,
-//!   `ConnectionLimitWait`, …) export as OTEL spans. The export endpoint comes
+//!   `ThreadPoolWait`, …) export as OTEL spans. The export endpoint comes
 //!   from the standard `OTEL_EXPORTER_OTLP_ENDPOINT` /
 //!   `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
 //!   env vars (read by the upstream layer; OTLP over HTTP, collector port 4318).

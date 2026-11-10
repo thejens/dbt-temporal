@@ -246,6 +246,7 @@ fn persist_ephemeral_chain(
             NO_LISTENERS,
             &[],
             &raw_path,
+            None,
         )
         .map_err(|e| {
             // Same reasoning as the model render path: an ephemeral's body can

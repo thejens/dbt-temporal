@@ -1035,6 +1035,7 @@ fn execute_node_body(
                 &[],
                 &[],
                 &render_filename,
+                None,
             )
             .map_err(|e| {
                 // Rendering is not only templating: a model body can call

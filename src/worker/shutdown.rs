@@ -12,6 +12,7 @@ use std::future::Future;
 use anyhow::{Context, Result, anyhow};
 use futures::{Stream, StreamExt};
 use temporalio_sdk::Worker;
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 /// Run `worker` until it stops on its own or a signal shuts it down.
@@ -20,13 +21,20 @@ use tracing::{info, warn};
 /// while those already running continue. They finish on their own unless
 /// `WORKER_GRACEFUL_SHUTDOWN_SECS` elapses first, in which case the SDK
 /// cancels them and reports them failed so the server retries them elsewhere.
+///
+/// `run_until` rather than `run`: after the drain it finalizes the Core
+/// worker, which unregisters it, so the server records a clean shutdown
+/// instead of inferring one from heartbeats that stop arriving.
 #[allow(clippy::future_not_send)] // the SDK's `Worker` is !Send by design
-pub async fn run(mut worker: Worker, signals: ShutdownSignals) -> Result<()> {
-    let initiate_shutdown = worker.shutdown_handle();
+pub async fn run(worker: Worker, signals: ShutdownSignals) -> Result<()> {
     run_until_shutdown(
-        async move { worker.run().await.context("worker exited with error") },
+        |requested| async move {
+            worker
+                .run_until(requested)
+                .await
+                .context("worker exited with error")
+        },
         signals.into_stream(),
-        initiate_shutdown,
     )
     .await
 }
@@ -105,94 +113,99 @@ impl ShutdownSignals {
     }
 }
 
-/// Drive the worker's `run` future to completion around shutdown signals.
+/// Drive a worker run to completion around shutdown signals.
 ///
-/// The first signal calls `initiate_shutdown` and then keeps awaiting the
-/// *same* `run` future: the SDK resolves it once in-flight activities finish
-/// or its graceful-shutdown period cancels them, and dropping it instead would
-/// abandon exactly the work the drain exists to finish. A second signal stops
-/// waiting — the interactive "press Ctrl-C again" escape from a long drain.
-pub async fn run_until_shutdown(
-    run: impl Future<Output = Result<()>>,
+/// `run` receives a future that resolves on the first signal; the SDK's
+/// `run_until` initiates shutdown when it does and then keeps driving the
+/// same run until in-flight activities finish or its graceful-shutdown period
+/// cancels them. Dropping the run instead would abandon exactly the work the
+/// drain exists to finish. A second signal stops waiting — the interactive
+/// "press Ctrl-C again" escape from a long drain.
+pub async fn run_until_shutdown<F, Fut>(
+    run: F,
     signals: impl Stream<Item = ShutdownSignal>,
-    initiate_shutdown: impl FnOnce(),
-) -> Result<()> {
-    let mut run = std::pin::pin!(run);
+) -> Result<()>
+where
+    F: FnOnce(ShutdownRequested) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let (request, requested) = oneshot::channel();
+    // Held until the first signal: dropping the sender would resolve
+    // `requested` and shut the worker down with no signal at all.
+    let mut request = Some(request);
+    let mut run = std::pin::pin!(run(ShutdownRequested(requested)));
     let mut signals = std::pin::pin!(signals);
 
-    tokio::select! {
-        result = &mut run => return result,
-        Some(signal) = signals.next() => {
-            info!(%signal, "shutdown requested: polling stops, in-flight work drains");
-            initiate_shutdown();
+    loop {
+        tokio::select! {
+            result = &mut run => {
+                if request.is_none() {
+                    info!("worker shut down");
+                }
+                return result;
+            }
+            Some(signal) = signals.next() => {
+                let Some(request) = request.take() else {
+                    warn!(%signal, "second shutdown signal: exiting without waiting for in-flight work");
+                    return Err(anyhow!("forced shutdown on a second {signal}"));
+                };
+                info!(%signal, "shutdown requested: polling stops, in-flight work drains");
+                // The receiver lives inside `run`, which is still pending.
+                let _ = request.send(());
+            }
         }
     }
+}
 
-    tokio::select! {
-        result = &mut run => {
-            info!("worker shut down");
-            result
-        }
-        Some(signal) = signals.next() => {
-            warn!(%signal, "second shutdown signal: exiting without waiting for in-flight work");
-            Err(anyhow!("forced shutdown on a second {signal}"))
-        }
+/// Resolves when the first shutdown signal arrives.
+#[derive(Debug)]
+pub struct ShutdownRequested(oneshot::Receiver<()>);
+
+impl Future for ShutdownRequested {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        // A dropped sender also resolves it; `run_until_shutdown` holds the
+        // sender until the signal, so that only happens once nobody is waiting.
+        std::pin::Pin::new(&mut self.0).poll(cx).map(|_| ())
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tokio::sync::Notify;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
 
-    /// A stand-in for the SDK worker: `run` resolves only once shutdown has
-    /// been initiated, as the real one does.
-    fn drained_by_shutdown() -> (impl Future<Output = Result<()>>, impl FnOnce(), Arc<AtomicUsize>)
-    {
-        let notify = Arc::new(Notify::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let run = {
-            let notify = Arc::clone(&notify);
-            async move {
-                notify.notified().await;
-                Ok(())
-            }
-        };
-        let initiate = {
-            let calls = Arc::clone(&calls);
-            move || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                // `notify_one` stores a permit, so it lands even if `run` has
-                // not reached `notified()` yet.
-                notify.notify_one();
-            }
-        };
-        (run, initiate, calls)
+    /// A stand-in for the SDK's `run_until`: initiates shutdown when
+    /// `requested` resolves, then reports the drain's outcome. `requested`
+    /// records whether shutdown was ever asked for.
+    async fn drained_on_request(
+        requested: ShutdownRequested,
+        asked: &AtomicBool,
+        drain: Result<()>,
+    ) -> Result<()> {
+        requested.await;
+        asked.store(true, Ordering::SeqCst);
+        drain
     }
 
     #[tokio::test]
-    async fn a_run_that_ends_on_its_own_never_initiates_shutdown() {
-        let calls = AtomicUsize::new(0);
-        let result = run_until_shutdown(async { Ok(()) }, futures::stream::pending(), || {
-            calls.fetch_add(1, Ordering::SeqCst);
-        })
-        .await;
+    async fn a_run_that_ends_on_its_own_returns_without_a_signal() {
+        let result = run_until_shutdown(|_| async { Ok(()) }, futures::stream::pending()).await;
 
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn a_run_error_is_returned_as_is() {
         let err = run_until_shutdown(
-            async { Err(anyhow!("poller failed")) },
+            |_| async { Err(anyhow!("poller failed")) },
             futures::stream::pending(),
-            || {},
         )
         .await
         .expect_err("the run failed");
@@ -201,34 +214,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_signal_initiates_shutdown_once_and_waits_for_the_drain() {
-        let (run, initiate, calls) = drained_by_shutdown();
+    async fn without_a_signal_shutdown_is_never_requested() {
+        let asked = AtomicBool::new(false);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            run_until_shutdown(
+                |requested| drained_on_request(requested, &asked, Ok(())),
+                futures::stream::pending(),
+            ),
+        )
+        .await;
 
-        let result =
-            run_until_shutdown(run, futures::stream::iter([ShutdownSignal::Terminate]), initiate)
-                .await;
+        assert!(result.is_err(), "the run must still be going");
+        assert!(!asked.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_signal_requests_shutdown_and_waits_for_the_drain() {
+        let asked = AtomicBool::new(false);
+        let result = run_until_shutdown(
+            |requested| drained_on_request(requested, &asked, Ok(())),
+            futures::stream::iter([ShutdownSignal::Terminate]),
+        )
+        .await;
 
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(asked.load(Ordering::SeqCst));
     }
 
     /// The drain's own outcome is what the process reports: an error raised
     /// while finishing in-flight work must not be swallowed by the shutdown.
     #[tokio::test]
     async fn an_error_during_the_drain_is_returned() {
-        let notify = Arc::new(Notify::new());
-        let run = {
-            let notify = Arc::clone(&notify);
-            async move {
-                notify.notified().await;
-                Err(anyhow!("activity cancellation failed"))
-            }
-        };
-
+        let asked = AtomicBool::new(false);
         let err = run_until_shutdown(
-            run,
+            |requested| {
+                drained_on_request(requested, &asked, Err(anyhow!("activity cancellation failed")))
+            },
             futures::stream::iter([ShutdownSignal::Terminate]),
-            move || notify.notify_one(),
         )
         .await
         .expect_err("the drain failed");
@@ -238,20 +261,33 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_signal_stops_waiting_for_the_drain() {
-        let calls = AtomicUsize::new(0);
-
+        let asked = AtomicBool::new(false);
+        let draining = tokio::sync::Notify::new();
+        // The second signal arrives only once the drain is under way, as a
+        // person pressing Ctrl-C again would; two signals ready at once would
+        // let `select!` take the second before the run sees the first.
+        let signals = futures::stream::iter([ShutdownSignal::Terminate]).chain(
+            futures::stream::once(async {
+                draining.notified().await;
+                ShutdownSignal::Interrupt
+            }),
+        );
         let err = run_until_shutdown(
-            std::future::pending(),
-            futures::stream::iter([ShutdownSignal::Terminate, ShutdownSignal::Interrupt]),
-            || {
-                calls.fetch_add(1, Ordering::SeqCst);
+            |requested| async {
+                requested.await;
+                asked.store(true, Ordering::SeqCst);
+                // `notify_one` stores a permit, so it lands even if the stream
+                // has not reached `notified()` yet.
+                draining.notify_one();
+                std::future::pending().await
             },
+            signals,
         )
         .await
         .expect_err("a second signal forces the exit");
 
         assert_eq!(err.to_string(), "forced shutdown on a second SIGINT");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "shutdown is initiated only once");
+        assert!(asked.load(Ordering::SeqCst), "the first signal requested shutdown");
     }
 
     #[test]

@@ -1,0 +1,82 @@
+# cargo-about configuration: generates THIRD-PARTY-LICENSES.txt, the license
+# texts of every crate compiled into the release binary, which ships with each
+# .deb, .rpm and container image (`make licenses`; the release workflow runs it).
+#
+# `accepted` doubles as the licensing policy: a new dependency under a license
+# not listed here fails generation, in CI, before it can reach a release.
+# Everything here is permissive except MPL-2.0 (file-level copyleft), which the
+# bundle's header covers by pointing recipients at the source.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-2-Clause-Patent",
+    "BSD-3-Clause",
+    "0BSD",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+
+# The platforms release binaries are built for; target-specific dependencies
+# of other platforms never ship.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+# Build scripts and their dependencies run at build time and are not part of
+# the distributed binary.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# The checksums pin each clarification to the license text it was written
+# against: if a crate's license files change, the clarification stops applying
+# and generation fails, rather than describing terms that no longer hold.
+
+# ring declares `Apache-2.0 AND ISC` but splits it across files: its own code
+# is ISC (LICENSE-other-bits), code taken from BoringSSL is Apache-2.0
+# (LICENSE-BoringSSL), and LICENSE only explains the split. cargo-about's
+# built-in ring workaround describes an older ring, so this replaces it.
+[ring.clarify]
+license = "Apache-2.0 AND ISC"
+
+[[ring.clarify.files]]
+path = "LICENSE-other-bits"
+license = "ISC"
+checksum = "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"  # pragma: allowlist secret
+
+[[ring.clarify.files]]
+path = "LICENSE-BoringSSL"
+license = "Apache-2.0"
+checksum = "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"  # pragma: allowlist secret
+
+# Published with a `license-file` that holds the Apache-2.0 notice, but no
+# `license` expression.
+[stringmetrics.clarify]
+license = "Apache-2.0"
+
+[[stringmetrics.clarify.files]]
+path = "LICENSE"
+checksum = "408bbc4d10bdf74d8c9b74b64ea4910603257e24133da18edc4d16198e3b4010"  # pragma: allowlist secret
+
+# A crate of the dbt workspace (Apache-2.0) that does not inherit the
+# workspace's `license` field. The license is at the repository root.
+[minijinja-typecheck-builtins.clarify]
+license = "Apache-2.0"
+
+[[minijinja-typecheck-builtins.clarify.git]]
+path = "LICENSE"
+checksum = "aaec0fc491a8093b76b7301f6168b9ac05b0fd20e8ea717f7d90691b3b7d8772"  # pragma: allowlist secret
+
+# A crate of the ruff workspace (MIT), pulled in by dbt from git; it carries
+# no `license` field of its own.
+[ruff_text_size.clarify]
+license = "MIT"
+
+[[ruff_text_size.clarify.git]]
+path = "LICENSE"
+checksum = "3209c0b7fb7257c05b16433728c1e974bac40000fef171b8e9e89f095623c954"  # pragma: allowlist secret

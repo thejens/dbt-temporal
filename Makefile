@@ -70,6 +70,13 @@ lint: fmt clippy
 chart-lint:
 	./scripts/chart-lint.sh
 
+# License texts of every crate in the release binary, for the packages and
+# images (needs cargo-about: cargo install cargo-about --features cli). The
+# features and targets match the release build; about.toml holds the policy.
+licenses:
+	mkdir -p target/licenses
+	cargo about generate --features gcs,aws --fail -o target/licenses/THIRD-PARTY-LICENSES.txt about.hbs
+
 docker-build:
 	docker build -f docker/Dockerfile -t dbt-temporal .
 

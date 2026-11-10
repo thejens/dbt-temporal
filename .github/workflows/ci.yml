@@ -33,6 +33,18 @@ jobs:
             | sudo tar -xz -C /usr/local/bin kubeconform
       - run: make chart-lint
 
+  # Fails when a new dependency's license is outside about.toml's accepted
+  # list, so that surfaces on the PR that adds it rather than at release.
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: make licenses
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

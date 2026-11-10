@@ -4,7 +4,8 @@
 # For every values file under charts/dbt-temporal/ci/: `helm lint --strict`,
 # then the rendered manifests through kubeconform against the Kubernetes schemas
 # and the CRD catalog (KEDA, Prometheus Operator). Also enforces that the chart
-# and the crate carry the same version, since one tag releases both.
+# and the crate carry the same version, since one tag releases both, and that
+# the chart ships the project license.
 set -euo pipefail
 
 CHART=charts/dbt-temporal
@@ -16,6 +17,13 @@ chart_version=$(sed -n 's/^version: \(.*\)$/\1/p' "$CHART/Chart.yaml")
 app_version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' "$CHART/Chart.yaml")
 if [[ "$chart_version" != "$crate_version" || "$app_version" != "$crate_version" ]]; then
   echo "version mismatch: Cargo.toml $crate_version, Chart.yaml version $chart_version / appVersion $app_version" >&2
+  exit 1
+fi
+
+# The chart is distributed on its own (OCI on GHCR), so it carries the
+# project's license; the copy must not drift from the one at the root.
+if ! cmp -s LICENSE "$CHART/LICENSE"; then
+  echo "$CHART/LICENSE differs from LICENSE: copy it over" >&2
   exit 1
 fi
 

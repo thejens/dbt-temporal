@@ -33,6 +33,7 @@ If none are set, the current working directory is used (either as a project if i
 |----------|---------|-------------|
 | `DBT_PROFILES_DIR` | project dir | Path to profiles.yml |
 | `DBT_TARGET` | from profile | Target override |
+| `DBT_ALLOW_EXPERIMENTAL_ADAPTERS` | `false` | Read by dbt. Release builds load only the adapters dbt calls supported (Snowflake, BigQuery, Databricks, Redshift, DuckDB, Salesforce, ClickHouse) and refuse any other, Postgres included, with "adapter is not yet supported". Set `true` to allow them. Debug builds (`cargo run`, the examples) allow them by default. |
 | `GITHUB_TOKEN` | - | Auth token for private git repos over HTTPS. Falls back to `GIT_TOKEN`. See [Private Git Repositories](#private-git-repositories). |
 | `GIT_USERNAME` | - | Username sent with the token, which then goes as the password. Unset sends the token as the username (GitHub, Gitea). |
 
@@ -206,7 +207,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_ENDPOINT=http://minio:9000 A
 When `WRITE_RUN_LOG` is enabled (the default), each workflow run writes a `log.txt` to the artifact store containing high-level, dbt-CLI-style output:
 
 ```
-Running with dbt-temporal=0.7.2
+Running with dbt-temporal=<version>
 Found 5 models, 3 tests, 2 seeds
 Concurrency: 3 parallel levels
 
@@ -390,6 +391,10 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 ### Per-Node Activity Names
 
 Each dbt node uses the `summary` field on the Temporal activity to display a descriptive label in the UI Gantt chart (e.g. `model:stg_customers`, `test:not_null_orders_id`, `seed:raw_orders`). The `activity_id` is also set to the same label for identification in event details.
+
+### Console Logging
+
+Without OTLP export, the worker logs human-readable lines to stdout, filtered by `RUST_LOG` (default `info`). They are coloured only when stdout is a terminal and `NO_COLOR` is unset, so `kubectl logs` and log collectors get plain text.
 
 ### OpenTelemetry Export (dbt traces & logs)
 

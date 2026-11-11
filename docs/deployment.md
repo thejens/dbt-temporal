@@ -6,7 +6,7 @@ This means it works well on any platform that can run a persistent container, bu
 
 ## Docker Image
 
-The project ships a distroless Docker image (`gcr.io/distroless/cc-debian12`) — no shell, no package manager, just the static binary and CA certificates. Build with:
+The project ships a distroless Docker image (`gcr.io/distroless/cc-debian12`) — no shell, no package manager: the binary, CA certificates, and `libpq` for dbt's Postgres driver. Build with:
 
 ```bash
 docker build -f docker/Dockerfile -t dbt-temporal:latest .
@@ -183,7 +183,9 @@ HEALTH_PORT=8080
 
 ## Filesystem Permissions
 
-The project directory (`DBT_PROJECT_DIRS`) is **never written to** — not even a `target/` subdirectory. All temporary files go to `/tmp`. This means baked-in Docker images can use a fully read-only filesystem with just a writable `/tmp`.
+The worker never writes to the project directory (`DBT_PROJECT_DIRS`) — not even a `target/` subdirectory. All temporary files go to `/tmp`. This means baked-in Docker images can use a fully read-only filesystem with just a writable `/tmp`.
+
+dbt's loader makes one write of its own: if the project has a `.gitignore` that does not list `dbt_internal_packages/`, it appends that line, and the load fails if it cannot. When that write would fail (a read-only root filesystem, a ConfigMap mount), the worker copies the project to `/tmp/dbtt-project-*` and loads the copy instead, so a read-only project still loads. Add `dbt_internal_packages/` to the project's `.gitignore` to skip the copy.
 
 ### Writable paths
 
@@ -200,6 +202,7 @@ The project directory (`DBT_PROJECT_DIRS`) is **never written to** — not even 
 |------|----------|------|------|
 | `HEALTH_FILE` (default `/tmp/health`) | Process lifetime | 0 bytes (mtime-only) | Empty file, mtime updated every 15s. |
 | `/tmp/dbtt-models-*` | Process lifetime | Size of dbt project | Git clone or object download at startup. |
+| `/tmp/dbtt-project-*` | Process lifetime | Size of dbt project | Copy of a read-only local project whose `.gitignore` dbt needs to update (see above). |
 | `ARTIFACT_STORE` (default `/tmp/dbt-artifacts`) | **Accumulates** — one dir per workflow run | ~10-100 KB per run | `run_results.json`, `manifest.json`, `log.txt`. Only when `WRITE_ARTIFACTS=true` with a local path. |
 
 All writable paths are under `/tmp`. Nothing accumulates in normal operation — the resolve output is cleaned up after startup and per-activity temp dirs are cleaned up after each activity. The only growth risk is `ARTIFACT_STORE` when using a local path (disabled by default; use a cloud URL like `gs://…` or `s3://…` to avoid local accumulation).
@@ -208,7 +211,7 @@ All writable paths are under `/tmp`. Nothing accumulates in normal operation —
 
 | Path | Access | Notes |
 |------|--------|-------|
-| `DBT_PROJECT_DIR[S]` | Read-only | Model SQL, seed CSVs, dbt_project.yml. Never written to. |
+| `DBT_PROJECT_DIR[S]` | Read-only | Model SQL, seed CSVs, dbt_project.yml. Never written to; copied to `/tmp` when dbt would need to (see above). |
 | `DBT_PROFILES_DIR` | Read-only | profiles.yml. Never written to. |
 | `TEMPORAL_TLS_CERT` / `TEMPORAL_TLS_KEY` | Read-only | mTLS certificate files (if using mTLS). |
 

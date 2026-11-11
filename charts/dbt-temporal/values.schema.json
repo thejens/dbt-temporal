@@ -102,6 +102,9 @@
         "target": {
           "type": "string"
         },
+        "allowExperimentalAdapters": {
+          "type": "boolean"
+        },
         "profiles": {
           "type": "object",
           "additionalProperties": false,

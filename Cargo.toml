@@ -13,6 +13,11 @@ maintainer = "thejens <jens.larsson56@gmail.com>"
 section = "database"
 priority = "optional"
 depends = "$auto"
+# Loaded at runtime, so `$auto` (which reads the binary's linked libraries)
+# cannot see them, and only some deployments need them: libpq for dbt's
+# Postgres ADBC driver, which links it dynamically; git for git+https:// and
+# git+ssh:// project sources, fetched through the git CLI.
+recommends = "libpq5, git"
 # The license files are distribution requirements (MIT for this crate; the
 # third-party bundle from `make licenses` for everything compiled in).
 assets = [
@@ -27,6 +32,11 @@ assets = [
     { source = "LICENSE", dest = "/usr/share/licenses/dbt-temporal/LICENSE", mode = "0644", doc = true },
     { source = "target/licenses/THIRD-PARTY-LICENSES.txt", dest = "/usr/share/licenses/dbt-temporal/THIRD-PARTY-LICENSES.txt", mode = "0644", doc = true },
 ]
+
+# Same weak dependencies as the .deb's `recommends`, for the same reasons.
+[package.metadata.generate-rpm.recommends]
+libpq = "*"
+git = "*"
 
 [[bin]]
 name = "dbt-temporal"

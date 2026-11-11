@@ -13,6 +13,7 @@ temporal:
 dbt:
   projectDirs: /dbt/project,gs://models/shared
   target: prod
+  allowExperimentalAdapters: true
   profiles:
     inline: |
       jaffle_shop:

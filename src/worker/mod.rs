@@ -91,7 +91,7 @@ async fn resolve_project_sources(entries: &[String]) -> Result<Vec<FetchedProjec
             info!(url = %entry, "fetching dbt projects from remote source");
             sources.push(crate::model_store::fetch_models(entry).await?);
         } else {
-            sources.push(FetchedProjects::borrowed(vec![std::path::PathBuf::from(entry)]));
+            sources.push(crate::model_store::prepare_local(entry.into()).await?);
         }
     }
 
@@ -163,7 +163,7 @@ pub async fn connect_and_register(
     let temporal_url = temporal::normalize_address(&config.temporal_address)
         .context("parsing TEMPORAL_ADDRESS as URL")?;
     let mut conn_opts = ConnectionOptions::new(temporal_url)
-        .identity(format!("dbt-temporal-worker@{}", std::process::id()))
+        .identity(temporal::worker_identity())
         .build();
 
     if let Some(tls) = tls_options {

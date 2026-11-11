@@ -95,6 +95,11 @@ Profiles come from `dbt.profiles.existingSecret` (a Secret with a
 itself: reference them with `env_var()` and supply them through `envFrom` or
 `extraEnv`.
 
+dbt loads only the adapters it calls supported: Snowflake, BigQuery,
+Databricks, Redshift, DuckDB, Salesforce and ClickHouse. Any other, Postgres
+included, fails at startup with "adapter is not yet supported" until you set
+`dbt.allowExperimentalAdapters: true`.
+
 ## Shutdown and rollouts
 
 On SIGTERM the worker stops taking new work and drains what is in flight.
@@ -145,6 +150,7 @@ connections; the health port is for the kubelet's probes.
 | `dbt.projectDirs` | — | **Required.** Project sources, see above. |
 | `dbt.target` | `""` | dbt target. Defaults to the profile's. |
 | `dbt.profiles.existingSecret` / `.inline` | `""` | One of the two. |
+| `dbt.allowExperimentalAdapters` | `false` | Required for Postgres and other adapters dbt marks experimental. |
 | `dbt.git.token.existingSecret` / `.key` | `""` / `token` | HTTPS access token for private repos. |
 | `dbt.git.username` | `""` | Sent with the token. Host-dependent, see above. |
 | `dbt.git.ssh.existingSecret` | `""` | Secret with `ssh-privatekey` and `known_hosts`. |

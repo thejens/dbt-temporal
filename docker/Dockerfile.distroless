@@ -8,7 +8,17 @@
 # shell for `kubectl exec` debugging, and no `git` — so `git+https://` /
 # `git+ssh://` project sources do not work here. Bake the project into a
 # derived image, mount it, or fetch it from `gs://` / `s3://` instead.
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/cc-debian12 AS base
+
+# libpq for dbt's Postgres driver, which the cc image lacks: staged from the
+# Debian release distroless is built from, minus what the base already has.
+FROM debian:bookworm-slim AS libpq
+COPY --from=base / /base
+COPY docker/stage-libpq.sh /usr/local/bin/
+RUN stage-libpq.sh /base /staged
+
+FROM base
+COPY --from=libpq /staged/ /
 
 # One prebuilt binary per platform, at bin/dbt-temporal-linux-<arch>/ (see the
 # release workflow); buildx sets TARGETARCH for each platform it builds. Upload

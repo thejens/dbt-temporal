@@ -1,0 +1,77 @@
+name: Chart e2e
+
+# Installs the Helm chart on a k3d cluster and runs one dbt workflow through
+# it (scripts/chart-e2e.sh), for both image variants.
+#
+# On a pull request it tests the chart as changed against the newest released
+# image: building an image here would mean a full release build of dbt, and
+# the chart's own appVersion may not be published yet (a release bump names a
+# tag that only exists after the release). The release workflow calls this
+# with the version it just pushed, which is what tests the image itself.
+on:
+  pull_request:
+    paths:
+      - charts/**
+      - tests/chart-e2e/**
+      - scripts/chart-e2e.sh
+      - .github/workflows/chart-e2e.yml
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: Image tag to test; empty for the newest release
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      image-tag:
+        description: Image tag (or v-prefixed git tag) to test; empty for the newest release
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  K3D_VERSION: v5.9.0
+
+jobs:
+  e2e:
+    name: Chart e2e (${{ matrix.variant || 'debian-slim' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ["", distroless]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.1
+
+      - name: Install k3d
+        run: curl -sSfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG="$K3D_VERSION" bash
+
+      - name: Resolve the image tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.image-tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$INPUT_TAG
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          # Git tags are v-prefixed, image tags are not.
+          tag=${tag#v}
+          echo "image tag: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Run
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE_VARIANT: ${{ matrix.variant }}
+          IMAGE_REPO: ghcr.io/${{ github.repository }}
+        run: ./scripts/chart-e2e.sh

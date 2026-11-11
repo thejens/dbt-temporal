@@ -1,0 +1,53 @@
+# What the chart needs around it, at the smallest size that works: a Temporal
+# dev server (the CLI image, which also gives the test a `temporal` to run
+# workflows with) and a Postgres for the dbt project to build into.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: temporal}
+spec:
+  selector: {matchLabels: {app: temporal}}
+  template:
+    metadata: {labels: {app: temporal}}
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/temporal:1.10.0
+          args: [server, start-dev, --ip, 0.0.0.0, --headless]
+          ports: [{containerPort: 7233}]
+          readinessProbe:
+            tcpSocket: {port: 7233}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: {name: temporal}
+spec:
+  selector: {app: temporal}
+  ports: [{port: 7233, targetPort: 7233}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres}
+spec:
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - {name: POSTGRES_USER, value: e2e}
+            - {name: POSTGRES_PASSWORD, value: e2e}
+            - {name: POSTGRES_DB, value: e2e}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: [pg_isready, -U, e2e, -d, e2e]}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres}
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432, targetPort: 5432}]

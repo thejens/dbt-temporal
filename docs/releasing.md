@@ -34,9 +34,15 @@ crates, which `cargo publish` rejects.
    git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0
    ```
 
-4. Watch the release workflow. When it finishes, check that the GitHub release
-   is marked Latest and has the four packages, and that both image tags and the
-   chart are on GHCR.
+4. Watch the release workflow. It pushes the images under their exact
+   version, runs the chart end-to-end test against both (`scripts/chart-e2e.sh`:
+   the chart on k3d, a dbt project on Postgres), and only when that passes
+   moves `:latest`, `:<major.minor>` and `:distroless`, publishes the Helm
+   chart and creates the GitHub release. A failure leaves nothing pointing at
+   the new images; fix it and release the next patch version.
+
+   When it finishes, check that the GitHub release is marked Latest and has
+   the four packages, and that both image tags and the chart are on GHCR.
 
 ## Workflow changes
 

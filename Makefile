@@ -70,6 +70,13 @@ lint: fmt clippy
 chart-lint:
 	./scripts/chart-lint.sh
 
+# Install the chart on a throwaway k3d cluster and run a dbt workflow through
+# it. Needs k3d, kubectl, helm, jq. Usage: make chart-e2e IMAGE_TAG=0.7.3
+# (IMAGE_VARIANT=distroless for the other image).
+chart-e2e:
+	@test -n "$(IMAGE_TAG)" || { echo "usage: make chart-e2e IMAGE_TAG=x.y.z [IMAGE_VARIANT=distroless]"; exit 1; }
+	IMAGE_TAG=$(IMAGE_TAG) IMAGE_VARIANT=$(IMAGE_VARIANT) ./scripts/chart-e2e.sh
+
 # Set the release version in the crate, the lockfile and the Helm chart, which
 # one tag releases together. Usage: make bump-version VERSION=0.8.0
 bump-version:

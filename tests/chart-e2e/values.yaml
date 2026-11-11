@@ -1,0 +1,28 @@
+# Chart values for the end-to-end test. scripts/chart-e2e.sh adds the image
+# and the project volume (generated from tests/chart-e2e/project/).
+temporal:
+  address: temporal:7233
+dbt:
+  projectDirs: /dbt/project
+  # Postgres is an experimental adapter in dbt release builds.
+  allowExperimentalAdapters: true
+  profiles:
+    inline: |
+      e2e:
+        target: dev
+        outputs:
+          dev:
+            type: postgres
+            host: postgres
+            port: 5432
+            user: e2e
+            password: "{{ env_var('PG_PASSWORD') }}"
+            dbname: e2e
+            schema: public
+            threads: 4
+extraEnv:
+  - name: PG_PASSWORD
+    value: e2e
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {memory: 2Gi}

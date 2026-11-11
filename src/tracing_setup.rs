@@ -26,6 +26,7 @@
 //! [`init_for_tests`] instead, which installs the same data layer against a
 //! test writer.
 
+use std::io::IsTerminal as _;
 use std::str::FromStr as _;
 
 use anyhow::{Context, Result};
@@ -67,7 +68,20 @@ fn env_truthy(name: &str) -> bool {
 
 /// The console stack used when OTLP export is off.
 fn init_default() {
-    install_data_layer(tracing_subscriber::fmt::layer().with_filter(console_filter()));
+    install_data_layer(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(console_ansi(std::io::stdout().is_terminal(), std::env::var_os("NO_COLOR")))
+            .with_filter(console_filter()),
+    );
+}
+
+/// Whether the console colours its output: only on a terminal, and not when
+/// `NO_COLOR` is set to anything non-empty (<https://no-color.org>).
+///
+/// Off a terminal the escape codes are noise: `kubectl logs`, journald and log
+/// collectors keep them verbatim, which garbles every line they index.
+fn console_ansi(stdout_is_terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
+    stdout_is_terminal && no_color.is_none_or(|v| v.is_empty())
 }
 
 /// Initialize tracing for integration tests.
@@ -252,6 +266,14 @@ mod tests {
         assert!(parse_log_level("TEST_TRACING_LEVEL").is_err());
         unsafe { std::env::remove_var("TEST_TRACING_LEVEL") };
         assert_eq!(parse_log_level("TEST_TRACING_LEVEL").unwrap(), None);
+    }
+
+    #[test]
+    fn console_colours_only_a_terminal_without_no_color() {
+        assert!(console_ansi(true, None));
+        assert!(console_ansi(true, Some("".into())));
+        assert!(!console_ansi(true, Some("1".into())));
+        assert!(!console_ansi(false, None));
     }
 
     #[test]

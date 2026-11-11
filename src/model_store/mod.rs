@@ -1,4 +1,5 @@
 mod git;
+mod local;
 #[cfg(any(feature = "gcs", feature = "aws"))]
 mod object_store_backend;
 
@@ -67,6 +68,8 @@ pub async fn fetch_models(url: &str) -> Result<FetchedProjects> {
         }
     }
 }
+
+pub use local::prepare as prepare_local;
 
 /// Create the temp directory a fetch downloads into.
 ///

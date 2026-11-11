@@ -43,6 +43,11 @@ dbt:
   # pin a commit id to deploy exactly what you reviewed.
   projectDirs: ""
   target: ""
+  # dbt release builds load only the adapters dbt calls supported (Snowflake,
+  # BigQuery, Databricks, Redshift, DuckDB, Salesforce, ClickHouse) and refuse
+  # the rest, Postgres among them, unless this is on. Sets
+  # DBT_ALLOW_EXPERIMENTAL_ADAPTERS.
+  allowExperimentalAdapters: false
   profiles:
     # An existing Secret whose `profiles.yml` key holds the profiles file.
     existingSecret: ""

@@ -70,6 +70,12 @@ lint: fmt clippy
 chart-lint:
 	./scripts/chart-lint.sh
 
+# Set the release version in the crate, the lockfile and the Helm chart, which
+# one tag releases together. Usage: make bump-version VERSION=0.8.0
+bump-version:
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=x.y.z"; exit 1; }
+	./scripts/bump-version.sh $(VERSION)
+
 # License texts of every crate in the release binary, for the packages and
 # images (needs cargo-about: cargo install cargo-about --features cli). The
 # features and targets match the release build; about.toml holds the policy.

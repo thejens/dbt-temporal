@@ -522,7 +522,7 @@ fn model_files(models: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn build_config(
+pub fn build_config(
     project_dir: &std::path::Path,
     profiles_dir: &std::path::Path,
 ) -> DbtTemporalConfig {

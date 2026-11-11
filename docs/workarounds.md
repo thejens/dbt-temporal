@@ -230,6 +230,7 @@ data solely in the multi-project case.
 |---|---|
 | **dbt's data layer on every tracing stack** | dbt code reads span start info and `TelemetryAttributes` out of span extensions and panics when either is missing; the types are private to `dbt-tracing`, so only its own `TelemetryDataLayer` can put them there. [`tracing_setup`](../src/tracing_setup.rs) wires that layer with no middlewares and no consumers into the non-OTLP stack, where it records the state and exports nothing. Any process that renders dbt Jinja — the worker, every integration test — needs it in its subscriber. |
 | **Forked arrow-rs and ring** | dbt v2 uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
+| **Read-only projects loaded from a copy** | dbt's loader appends `dbt_internal_packages/` to a project's `.gitignore` whenever it is missing, and fails the load when the write does. A project baked into an image with a read-only root filesystem, or mounted from a ConfigMap, cannot take the write. [`model_store::local`](../src/model_store/local.rs) applies the loader's own condition, and when the write would fail, copies the project under the temp dir and loads that. Remove once dbt skips or tolerates the write. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
 ## Candidate upstream issues
@@ -299,6 +300,19 @@ already-loosened `dbt-antlr4 = "1"` in this repo's `Cargo.toml`, no local
 change needed). `#14552` closed on a reporter's own repro confirmation
 ("Tried repro. Its already fixed!") — not independently re-verified against
 source, but no reason to doubt a third-party repro.
+
+### Confirmed against the `v2.0.11` tag (`32b858a7`)
+
+**Loading a project writes to its `.gitignore`, and a failed write fails the
+load.** `dbt-loader/src/loader.rs` appends `dbt_internal_packages/` to an
+existing `.gitignore` that lacks it, unconditionally, with `?` on the write. A
+project on a read-only filesystem (a container image run with a read-only
+root, a ConfigMap or other read-only mount) cannot be loaded at all; the
+error is a bare `Read-only file system (os error 30)` with no path. Present
+since at least `v2.0.5`. Skipping the write when the directory is not
+writable (it only maintains a convenience for git users) would fix it.
+Worked around by loading a copy, see "Read-only projects loaded from a copy"
+above.
 
 ### Confirmed against rev `37ba42bd` — not re-verified since
 

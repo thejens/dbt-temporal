@@ -9,11 +9,13 @@
 #
 # `git` (and `openssh-client` for `git+ssh://`) are runtime dependencies, not
 # conveniences: `git+https://` / `git+ssh://` entries in DBT_PROJECT_DIRS are
-# fetched by shelling out to the git CLI at startup.
+# fetched by shelling out to the git CLI at startup. So is `libpq5`: dbt's
+# Postgres ADBC driver links libpq.so.5 dynamically, and fails to load without
+# it. The other drivers dbt downloads need nothing beyond glibc.
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 git openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 libpq5 git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # A passwd entry for the non-root UID that Kubernetes deployments (and the Helm

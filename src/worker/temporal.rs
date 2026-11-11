@@ -86,6 +86,28 @@ pub fn normalize_address(address: &str) -> Result<Url> {
     Url::parse(&normalized).with_context(|| format!("invalid Temporal address: {address:?}"))
 }
 
+/// The identity this worker reports to Temporal: `<pid>@<hostname>`, the
+/// format Temporal's own SDKs use.
+///
+/// The UI shows it on every activity attempt and poller, so it has to tell
+/// workers apart. A PID alone cannot: it is 1 in every container. The hostname
+/// is the pod name on Kubernetes and the container id under Docker; both set
+/// `HOSTNAME`. A systemd service gets no `HOSTNAME`, hence the kernel's.
+pub fn worker_identity() -> String {
+    let hostname = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok());
+    format_identity(std::process::id(), hostname.as_deref())
+}
+
+fn format_identity(pid: u32, hostname: Option<&str>) -> String {
+    let host = hostname
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("dbt-temporal");
+    format!("{pid}@{host}")
+}
+
 /// Build TLS options when connecting to Temporal Cloud or a TLS-enabled server.
 ///
 /// Returns `Some(TlsOptions)` when any of `TEMPORAL_API_KEY`, `TEMPORAL_TLS_CERT`,
@@ -285,6 +307,14 @@ fn build_tuner(config: &DbtTemporalConfig) -> WorkerTuner {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_names_the_host() {
+        assert_eq!(format_identity(1, Some("dbt-7f5b6dc85c-dzwmx")), "1@dbt-7f5b6dc85c-dzwmx");
+        assert_eq!(format_identity(42, Some("box\n")), "42@box");
+        assert_eq!(format_identity(1, Some(" ")), "1@dbt-temporal");
+        assert_eq!(format_identity(1, None), "1@dbt-temporal");
+    }
 
     fn test_config() -> DbtTemporalConfig {
         DbtTemporalConfig {

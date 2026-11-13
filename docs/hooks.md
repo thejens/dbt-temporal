@@ -1,5 +1,10 @@
 # Hooks
 
+How dbt-temporal runs dbt's own `on-run-start` / `on-run-end` hooks, and its
+lifecycle hooks: Temporal child workflows that run before a dbt run, or after
+it succeeds or fails, for notifications, conditional skipping and credential
+resolution.
+
 dbt-temporal supports two distinct kinds of hooks:
 
 | Kind | Defined in | What runs | When |
@@ -17,7 +22,7 @@ Hooks defined in `dbt_project.yml`. These are standard dbt hooks and behave like
 
 | Event | Source | When it fires | Jinja context |
 |---|---|---|---|
-| `on-run-start` | `dbt_project.yml` (root or any package) | After planning, before any node executes | base context + `execute=true` |
+| `on-run-start` | `dbt_project.yml` (root or any package) | After planning, project checks and `pre_run` hooks, before any node executes | base context + `execute=true` |
 | `on-run-end` | `dbt_project.yml` (root or any package) | After all nodes complete and artifacts are stored, regardless of success | base context + `execute=true` + `results` |
 | `pre-hook` | model `config(pre_hook=…)` or `dbt_project.yml` `+pre-hook` | Inside each model's materialization, before the main SQL | full model context |
 | `post-hook` | model `config(post_hook=…)` or `dbt_project.yml` `+post-hook` | Inside each model's materialization, after the main SQL | full model context |
@@ -36,7 +41,7 @@ Per-workflow `env` overrides apply: the activity rebuilds the adapter engine if 
 **Failure semantics:**
 - `on-run-start` failure aborts the workflow — no nodes execute.
 - `on-run-end` failure is non-fatal: the error is logged and recorded in `DbtRunOutput.hook_errors`, but the run's `success` status is unchanged.
-- Cancellation skips both `store_artifacts` and `on-run-end`, matching the existing artifact behavior.
+- Cancellation skips both `store_artifacts` and `on-run-end`.
 
 **Example** (`dbt_project.yml` + a custom macro):
 

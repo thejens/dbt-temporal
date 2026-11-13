@@ -2,9 +2,15 @@
 name = "dbt-temporal"
 version = "0.7.3"
 edition = "2024"
+# The toolchain dbt v2 pins (its rust-toolchain.toml); older ones are untested.
+rust-version = "1.96"
 license = "MIT"
-description = "Execute dbt DAGs as Temporal Workflows"
+description = "Run dbt projects as durable Temporal workflows: a Temporal worker that executes each dbt node as an activity"
 repository = "https://github.com/thejens/dbt-temporal"
+homepage = "https://github.com/thejens/dbt-temporal"
+readme = "README.md"
+keywords = ["dbt", "temporal", "orchestration", "data-pipeline", "workflow"]
+categories = ["command-line-utilities", "database"]
 
 # Distro package metadata, consumed by the release workflow:
 #   cargo-deb (Debian .deb) and cargo-generate-rpm (RHEL .rpm).

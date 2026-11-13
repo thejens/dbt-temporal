@@ -96,7 +96,7 @@ worker:
   # Overrides the computed value outright.
   terminationGracePeriodSeconds: null
   # Any of the WORKER_* tuning variables, as NAME: value, e.g.
-  # WORKER_TUNING_MODE: resource-based. See docs/configuration.md.
+  # WORKER_TUNER: resource-based. See docs/configuration.md.
   tuning: {}
 
 health:

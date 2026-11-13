@@ -1,4 +1,4 @@
-# Hooks
+# Hooks: dbt Project Hooks and Temporal Lifecycle Hooks
 
 How dbt-temporal runs dbt's own `on-run-start` / `on-run-end` hooks, and its
 lifecycle hooks: Temporal child workflows that run before a dbt run, or after
@@ -16,7 +16,7 @@ The two are complementary. dbt project hooks are evaluated by dbt v2's Jinja eng
 
 ---
 
-# dbt project hooks
+## dbt project hooks
 
 Hooks defined in `dbt_project.yml`. These are standard dbt hooks and behave like they do under dbt-core.
 
@@ -71,11 +71,11 @@ Hooks from any loaded package are merged into the same lists by dbt v2's resolve
 
 ---
 
-# dbt-temporal lifecycle hooks
+## dbt-temporal lifecycle hooks
 
 Hooks let you run arbitrary Temporal workflows at specific points in the dbt run lifecycle. Each hook starts a child workflow, awaits its completion, and handles errors according to a configurable policy.
 
-## Hook Events
+### Hook Events
 
 | Event | Fires | Payload includes |
 |-------|-------|------------------|
@@ -85,7 +85,7 @@ Hooks let you run arbitrary Temporal workflows at specific points in the dbt run
 
 Each event supports multiple hooks, executed sequentially in list order.
 
-## Configuration
+### Configuration
 
 Hooks can be configured in two ways:
 
@@ -138,7 +138,7 @@ hooks:
 
 If `hooks` is set in the workflow input, it fully replaces the file-based defaults. To suppress all hooks for a single run, pass empty arrays. If `hooks` is omitted, the `dbt_temporal.yml` defaults apply.
 
-## Hook Config Fields
+### Hook Config Fields
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
@@ -149,7 +149,7 @@ If `hooks` is set in the workflow input, it fully replaces the file-based defaul
 | `input` | No | - | Custom input payload (replaces `HookPayload`, see below) |
 | `fire_and_forget` | No | `false` | Start the child workflow without awaiting its result |
 
-## Error Handling Policies
+### Error Handling Policies
 
 | Policy | Behavior |
 |--------|----------|
@@ -157,7 +157,7 @@ If `hooks` is set in the workflow input, it fully replaces the file-based defaul
 | `warn` | Log a warning, continue to the next hook. Error is recorded in `DbtRunOutput.hook_errors`. |
 | `ignore` | Swallow the error silently. |
 
-## Hook Payload
+### Hook Payload
 
 By default, every hook workflow receives a single JSON input (`HookPayload`):
 
@@ -176,7 +176,7 @@ By default, every hook workflow receives a single JSON input (`HookPayload`):
 
 The hook workflow can be written in any language with a Temporal SDK — Rust, Python, Go, TypeScript, etc. It just needs to be registered on the specified task queue.
 
-## Custom Input
+### Custom Input
 
 When a hook sets the `input` field, that value is sent as the child workflow input instead of `HookPayload`. This lets hooks start any workflow type — including `dbt_run` itself — with the native input format:
 
@@ -195,7 +195,7 @@ hooks:
 
 The `hooks: {}` override is important when starting `dbt_run` as a hook — without it, the child workflow would inherit the project's `dbt_temporal.yml` defaults and trigger hooks recursively.
 
-## Fire-and-Forget Mode
+### Fire-and-Forget Mode
 
 When `fire_and_forget: true`, the hook child workflow is started but not awaited. The parent workflow continues immediately without waiting for the hook to complete. The child workflow runs independently with `ParentClosePolicy: Abandon`, meaning it will keep running even if the parent workflow completes, fails, or is cancelled.
 
@@ -212,7 +212,7 @@ Error handling for fire-and-forget hooks only applies to the *start* phase — i
 
 Fire-and-forget hooks cannot return skip sentinels (since their result is never read).
 
-## Skip Sentinel (Pre-Run Hooks)
+### Skip Sentinel (Pre-Run Hooks)
 
 A `pre_run` hook can signal that the dbt run should be skipped entirely by returning a skip sentinel value. When a skip is detected, the workflow returns early with `success: true`, `skipped: true`, and no node results. Remaining hooks in the list are not executed.
 
@@ -228,7 +228,7 @@ Skip sentinel values (returned as the hook workflow's result):
 
 The skip reason (if provided) is included in `DbtRunOutput.skip_reason`. This is useful for conditional execution — e.g. a pre-hook that checks whether source data has changed and skips the run if nothing is new.
 
-## Extra Env (Pre-Run Hooks)
+### Extra Env (Pre-Run Hooks)
 
 A `pre_run` hook can inject environment variables into the dbt run by returning an `extra_env` map:
 
@@ -280,6 +280,6 @@ my_profile:
       schema: "{{ env_var('DB_SCHEMA', 'public') }}"
 ```
 
-## Limitations
+### Limitations
 
 - Hooks run as **child workflows** in the same Temporal namespace. Cross-namespace hooks are not yet supported (the Rust SDK doesn't expose a namespace field on `ChildWorkflowOptions`).

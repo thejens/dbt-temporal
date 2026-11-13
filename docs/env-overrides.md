@@ -1,4 +1,4 @@
-# Per-Workflow Environment Variables
+# Per-Workflow Environment Variables and Multi-Tenant Runs
 
 Run one dbt project against many warehouses, schemas or tenants from a single
 worker: each workflow passes its own `env` map, which `env_var()` in models,

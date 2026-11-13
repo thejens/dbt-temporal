@@ -1,4 +1,4 @@
-# Architecture
+# Architecture: How dbt Runs as a Temporal Workflow
 
 dbt-temporal runs a dbt project as a Temporal workflow. The worker parses the
 project once at startup; each run is a `dbt_run` workflow that plans the DAG,

@@ -1,6 +1,6 @@
-# Configuration
+# Configuration Reference
 
-All configuration is via environment variables.
+Every environment variable the dbt-temporal worker reads: the Temporal connection, dbt project discovery and remote sources, artifact storage, search attributes, worker tuning and observability. All configuration is via environment variables; per-project retry, timeout and hook settings live in `dbt_temporal.yml` (see [error handling](error-handling.md) and [hooks](hooks.md)).
 
 ## Temporal Connection
 

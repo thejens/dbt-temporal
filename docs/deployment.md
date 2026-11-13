@@ -1,4 +1,4 @@
-# Deployment
+# Deploying dbt-temporal
 
 How to run the dbt-temporal worker in production: on Kubernetes with the Helm
 chart, on Google Cloud Run, Compute Engine, AWS ECS/EKS or Azure, with health

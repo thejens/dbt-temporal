@@ -1,4 +1,4 @@
-# Examples
+# dbt-temporal Examples
 
 Five example setups demonstrating dbt-temporal features. Most examples use Postgres locally (via Docker). The `bigquery/` example requires GCP credentials.
 
@@ -244,7 +244,7 @@ temporal workflow start \
 
 ## Workflow Input Reference
 
-All fields except `command` are optional.
+All fields are optional; `command` defaults to `build`. The complete field list is in the [workflow input reference](../docs/workflow-input.md).
 
 ```json
 {

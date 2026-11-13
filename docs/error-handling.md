@@ -1,4 +1,4 @@
-# Error Handling
+# Error Handling, Retries and Timeouts
 
 How dbt-temporal classifies failures as retryable or permanent, retries
 transient warehouse errors, cancels running queries, bounds activity timeouts

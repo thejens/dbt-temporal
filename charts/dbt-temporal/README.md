@@ -1,8 +1,10 @@
 # dbt-temporal Helm chart
 
-Runs the [dbt-temporal](https://github.com/thejens/dbt-temporal) worker on
-Kubernetes: a Deployment that polls a Temporal task queue and executes dbt DAGs
-as workflows.
+Run dbt on Kubernetes with Temporal. This chart deploys the
+[dbt-temporal](https://github.com/thejens/dbt-temporal) worker: a Deployment
+that polls a Temporal task queue and executes dbt projects as durable
+workflows, one activity per model, with optional KEDA autoscaling, Prometheus
+metrics and a PodDisruptionBudget.
 
 ```bash
 helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \

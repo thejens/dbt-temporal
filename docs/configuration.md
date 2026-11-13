@@ -12,6 +12,8 @@ All configuration is via environment variables.
 | `TEMPORAL_API_KEY` | - | API key for Temporal Cloud (sent as `Authorization: Bearer` header) |
 | `TEMPORAL_TLS_CERT` | - | Path to client certificate PEM file (for mTLS) |
 | `TEMPORAL_TLS_KEY` | - | Path to client private key PEM file (for mTLS) |
+| `TEMPORAL_DEPLOYMENT_NAME` | - | Enables [worker deployment versioning](https://docs.temporal.io/worker-versioning) under this deployment name (e.g. `dbt-temporal-prod`). Runs are `Pinned`: each finishes on the worker build that started it, so a deploy never replays an in-flight run on new code. See [deployment](deployment.md#workflow-changes-and-in-flight-runs). |
+| `HOSTNAME` | `/proc/sys/kernel/hostname` | Host part of the worker identity shown in the Temporal UI, `<pid>@<hostname>`. On Kubernetes this is the pod name. |
 
 **Temporal Cloud**: Set `TEMPORAL_API_KEY` for API-key auth (recommended) or `TEMPORAL_TLS_CERT` + `TEMPORAL_TLS_KEY` for mTLS. TLS is enabled automatically when any of these are set. The address should be `<namespace>.<account>.tmprl.cloud:7233` and the namespace `<namespace>.<account>`.
 
@@ -234,7 +236,7 @@ Workflows automatically upsert [Temporal search attributes](https://docs.tempora
 | Attribute | Description |
 |-----------|-------------|
 | `DbtProject` | Resolved project name |
-| `DbtCommand` | `run` or `build` |
+| `DbtCommand` | The dbt command: `run`, `build`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness` or `freshness` |
 | `DbtTarget` | Target name (only if specified in workflow input) |
 | `DbtSelector` | The `--select` expression (only if specified in workflow input) |
 | `DbtStatus` | Run outcome — starts at `running`, then re-upserted to `passed` / `failed` / `skipped` / `cancelled` when the run ends, so you can filter the workflow list by outcome |

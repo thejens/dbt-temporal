@@ -1,23 +1,34 @@
 # Deployment
 
+How to run the dbt-temporal worker in production: on Kubernetes with the Helm
+chart, on Google Cloud Run, Compute Engine, AWS ECS/EKS or Azure, with health
+checks, graceful shutdown, a read-only root filesystem and Temporal Cloud.
+
 `dbt-temporal` is a **long-running worker process** that polls a Temporal server for tasks. It maintains a persistent gRPC connection to Temporal and executes dbt workflows as activities arrive. It optionally serves a health endpoint (see [Health Check](#health-check)), but is otherwise not an HTTP service.
 
 This means it works well on any platform that can run a persistent container, but **cannot run on request-based serverless** like AWS Lambda or Google Cloud Functions (those expect a request→response lifecycle and cold-start per invocation; a Temporal worker must stay alive to poll).
 
-## Docker Image
+## Container Images
 
-The project ships a distroless Docker image (`gcr.io/distroless/cc-debian12`) — no shell, no package manager: the binary, CA certificates, and `libpq` for dbt's Postgres driver. Build with:
+Every release publishes two multi-arch (`linux/amd64`, `linux/arm64`) images to GitHub Container Registry:
+
+| Image | Base | Use when |
+|-------|------|----------|
+| `ghcr.io/thejens/dbt-temporal:<version>` (also `:<major.minor>`, `:latest`) | `debian:bookworm-slim` | You fetch projects with `git+https://` / `git+ssh://`, or want a shell for debugging. Includes `git`, `openssh-client` and `libpq`. |
+| `ghcr.io/thejens/dbt-temporal:<version>-distroless` (also `:distroless`) | `gcr.io/distroless/cc-debian12` | The project is baked in, mounted, or fetched from `gs://` / `s3://`. No shell, no package manager, no `git`. |
+
+Both run the same binary, carry its license and third-party license texts under `/usr/share/doc/dbt-temporal/`, and have no default command arguments: the entrypoint is `dbt-temporal`. To build from source instead (distroless, GCS and S3 support compiled in):
 
 ```bash
-docker build -f docker/Dockerfile -t dbt-temporal:latest .
+docker build -f docker/Dockerfile -t dbt-temporal:dev .
 ```
 
 **Baking model files into the image** (optional — alternative to fetching from git/GCS/S3 at startup):
 
 ```dockerfile
-FROM dbt-temporal:latest
+FROM ghcr.io/thejens/dbt-temporal:distroless
 COPY my-dbt-project/ /dbt/project/
-ENV DBT_PROJECT_DIR=/dbt/project
+ENV DBT_PROJECT_DIRS=/dbt/project
 ```
 
 This gives you an immutable, versioned image per model release.
@@ -39,6 +50,8 @@ All config is via environment variables. The important ones:
 | `DBT_TARGET` | | `prod` |
 | `WRITE_ARTIFACTS` | | `true` — write run_results.json, manifest.json, log.txt after each run (default: `false`) |
 | `ARTIFACT_STORE` | | `/data/dbt-artifacts`, `gs://bucket/prefix`, or `s3://bucket/prefix` |
+| `TEMPORAL_DEPLOYMENT_NAME` | | `dbt-temporal-prod` — enables worker versioning, see [Workflow changes and in-flight runs](#workflow-changes-and-in-flight-runs) |
+| `DBT_ALLOW_EXPERIMENTAL_ADAPTERS` | | `true` — required for adapters dbt marks experimental, Postgres among them |
 | `WORKER_TUNER` | | `fixed` (default) or `resource-based` |
 | `WORKER_MAX_CACHED_WORKFLOWS` | | `1000` — workflows cached on sticky queues |
 | `WORKER_STICKY_QUEUE_TIMEOUT_SECS` | | `10` — sticky queue fallback timeout |
@@ -46,10 +59,10 @@ All config is via environment variables. The important ones:
 | `WORKER_MAX_ACTIVITIES_PER_SECOND` | | Per-worker activity rate limit |
 | `WORKER_MAX_TASK_QUEUE_ACTIVITIES_PER_SECOND` | | Server-side task-queue activity rate limit |
 | `WORKER_GRACEFUL_SHUTDOWN_SECS` | | After SIGTERM, how long in-flight activities may run before they are cancelled and retried elsewhere (unset: wait for them all) — see [Graceful Shutdown](#graceful-shutdown) |
-| `HEALTH_PORT` | | `8080` — enables the built-in HTTP health server (on by default in the Docker image) |
+| `HEALTH_PORT` | | `8080` — enables the built-in HTTP health server (off unless set; the Helm chart sets it) |
 | `HEALTH_FILE` | | `/tmp/health` — explicit health file path (auto-set when `HEALTH_PORT` is used) |
 
-Warehouse credentials are passed via `profiles.yml` or adapter-specific env vars — treat them as secrets.
+Warehouse credentials are passed via `profiles.yml` or adapter-specific env vars — treat them as secrets. The full list is in [configuration](configuration.md).
 
 ### Temporal Cloud
 
@@ -132,7 +145,7 @@ livenessProbe:
 ```bash
 gcloud run deploy dbt-temporal \
   --set-env-vars "HEALTH_PORT=8080" \
-  --liveness-probe httpGet,path=/,port=8080
+  --liveness-probe httpGet.path=/,httpGet.port=8080,periodSeconds=15
 ```
 
 **ECS** — use the exec-based healthcheck subcommand (the distroless image has no `curl`):
@@ -326,8 +339,8 @@ Two ways to stay safe:
    # Kubernetes: update env var → triggers rolling restart
    kubectl set env deployment/dbt-temporal GIT_COMMIT=abc123
 
-   # Cloud Run: update env var → new revision
-   gcloud run services update dbt-temporal --update-env-vars GIT_COMMIT=abc123
+   # Cloud Run worker pool: update env var → new revision
+   gcloud run worker-pools update dbt-temporal --update-env-vars GIT_COMMIT=abc123
    ```
 
 ---
@@ -419,29 +432,41 @@ Then reference it in the trigger with `authenticationRef: { name: temporal-auth 
 
 ## 2. Google Cloud Run
 
-Cloud Run supports **always-on** containers (min-instances >= 1, no-cpu-throttle), which is what a Temporal worker needs. Without this, Cloud Run will throttle or shut down the container when there are no HTTP requests.
+Cloud Run pulls images from Artifact Registry or Docker Hub, not GHCR. Copy the release image into Artifact Registry (or point an Artifact Registry remote repository at `ghcr.io`) and deploy from there.
+
+**Worker pools** are Cloud Run's resource for pull-based workloads: no URL, no request routing, always-allocated CPU. A Temporal worker is exactly that, so prefer a worker pool:
+
+```bash
+gcloud run worker-pools deploy dbt-temporal \
+  --image REGION-docker.pkg.dev/your-project/dbt/dbt-temporal:<version> \
+  --instances 1 \
+  --cpu 1 --memory 1Gi \
+  --set-env-vars "TEMPORAL_ADDRESS=temporal.internal:7233,TEMPORAL_TASK_QUEUE=dbt-tasks,DBT_PROFILES_DIR=/secrets/profiles" \
+  --set-secrets "/secrets/profiles/profiles.yml=dbt-profiles:latest" \
+  --network your-vpc --subnet your-subnet  # if Temporal is on a private network
+```
+
+`--set-secrets` with a path mounts the Secret Manager secret as a file; `DBT_PROFILES_DIR` points at its directory.
+
+**Services** also work, if worker pools are unavailable to you. A service must be kept alive and its CPU allocated without requests:
 
 ```bash
 gcloud run deploy dbt-temporal \
-  --image gcr.io/your-project/dbt-temporal:latest \
+  --image REGION-docker.pkg.dev/your-project/dbt/dbt-temporal:<version> \
   --no-cpu-throttle \
   --min-instances 1 \
-  --cpu 1 --memory 512Mi \
-  --set-env-vars "TEMPORAL_ADDRESS=temporal.internal:7233,TEMPORAL_TASK_QUEUE=dbt-tasks,HEALTH_PORT=8080" \
-  --set-secrets "DBT_PROFILES_DIR=/secrets/profiles:dbt-profiles:latest" \
-  --liveness-probe httpGet,path=/,port=8080 \
-  --vpc-connector your-connector  # if Temporal is on a private network
+  --cpu 1 --memory 1Gi \
+  --set-env-vars "TEMPORAL_ADDRESS=temporal.internal:7233,TEMPORAL_TASK_QUEUE=dbt-tasks,HEALTH_PORT=8080,DBT_PROFILES_DIR=/secrets/profiles" \
+  --set-secrets "/secrets/profiles/profiles.yml=dbt-profiles:latest" \
+  --liveness-probe httpGet.path=/,httpGet.port=8080,periodSeconds=15
 ```
 
 Key flags:
 - `--no-cpu-throttle` — CPU is always allocated, not just during requests
 - `--min-instances 1` — keeps the worker alive
 - `--liveness-probe` — uses the built-in HTTP health server
-- `--vpc-connector` — needed if Temporal runs in a VPC
 
-**Re-deploy**: `gcloud run services update dbt-temporal --update-env-vars GIT_COMMIT=<new-sha>` or push a new image tag.
-
-**Caveat**: Cloud Run is optimized for request-driven workloads. It works for a Temporal worker with the flags above, but you're paying for always-on compute anyway — at that point GCE or GKE may be simpler.
+**Re-deploy**: `gcloud run worker-pools update dbt-temporal --update-env-vars GIT_COMMIT=<new-sha>` (with `DBT_PROJECT_DIRS=git+https://...#${GIT_COMMIT}`) or deploy a new image tag; either creates a new revision.
 
 ## 3. Google Compute Engine
 
@@ -449,7 +474,7 @@ The most straightforward option. Run the container on a VM with Docker or use a 
 
 ```bash
 gcloud compute instances create-with-container dbt-temporal \
-  --container-image gcr.io/your-project/dbt-temporal:latest \
+  --container-image ghcr.io/thejens/dbt-temporal:<version> \
   --container-env "TEMPORAL_ADDRESS=temporal.internal:7233,TEMPORAL_TASK_QUEUE=dbt-tasks" \
   --machine-type e2-small \
   --zone us-central1-a
@@ -459,7 +484,7 @@ gcloud compute instances create-with-container dbt-temporal \
 
 ```bash
 gcloud compute instances update-container dbt-temporal \
-  --container-image gcr.io/your-project/dbt-temporal:new-tag
+  --container-image ghcr.io/thejens/dbt-temporal:<new-version>
 ```
 
 For HA, run multiple instances behind an instance group, or just run N independent VMs on the same task queue (Temporal distributes work automatically).
@@ -483,7 +508,7 @@ aws ecs create-service \
   --launch-type FARGATE
 ```
 
-**EKS**: same Kubernetes manifests as section 1, just on AWS-managed K8s.
+**EKS**: the same Helm chart as section 1. Use IRSA or EKS Pod Identity (via `serviceAccount.annotations`) for `s3://` project sources and artifact stores.
 
 **Re-deploy**: update the task definition with a new image or env var, then `aws ecs update-service --force-new-deployment`.
 
@@ -501,7 +526,7 @@ aws ecs create-service \
 az container create \
   --resource-group mygroup \
   --name dbt-temporal \
-  --image your-registry.azurecr.io/dbt-temporal:latest \
+  --image ghcr.io/thejens/dbt-temporal:<version> \
   --cpu 1 --memory 1 \
   --environment-variables \
     TEMPORAL_ADDRESS=temporal.internal:7233 \
@@ -509,7 +534,7 @@ az container create \
   --restart-policy Always
 ```
 
-**Azure Kubernetes Service (AKS)**: same Kubernetes manifests as section 1.
+**Azure Kubernetes Service (AKS)**: the same Helm chart as section 1.
 
 **Azure Container Apps**: similar to Cloud Run — supports always-on containers with `--min-replicas 1`. Works but has the same caveat: it's designed for HTTP workloads, and you're paying for always-on anyway.
 
@@ -520,7 +545,7 @@ az container create \
 | Platform | Complexity | Best for |
 |----------|-----------|----------|
 | **Kubernetes** (any) | Medium | Teams already on K8s; multiple workers; fine-grained control |
-| **Cloud Run** | Low | Quick GCP deploy; works with `--no-cpu-throttle --min-instances 1` |
+| **Cloud Run** | Low | Quick GCP deploy; a worker pool, or a service with `--no-cpu-throttle --min-instances 1` |
 | **Compute Engine** | Low | Simplest GCP option; good for single-worker setups |
 | **ECS Fargate** | Low-Medium | AWS without managing servers |
 | **EKS** | Medium | AWS teams already on K8s |

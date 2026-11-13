@@ -1,6 +1,19 @@
 # dbt-temporal
 
-Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node runs as a Temporal activity, giving you distributed execution, automatic retries, observability, and workflow management for free.
+[![CI](https://github.com/thejens/dbt-temporal/actions/workflows/ci.yml/badge.svg)](https://github.com/thejens/dbt-temporal/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/thejens/dbt-temporal)](https://github.com/thejens/dbt-temporal/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Run dbt on [Temporal](https://temporal.io/).** dbt-temporal is a Temporal worker, written in Rust, that executes [dbt](https://www.getdbt.com/) projects as durable Temporal workflows. Every model, test, seed and snapshot runs as its own Temporal activity, so a dbt build gets distributed execution across workers, per-node retries, crash recovery, live progress in the Temporal UI, and scheduling, signals and child workflows from the rest of your Temporal platform. No Python, no Airflow, no separate dbt orchestrator.
+
+It embeds [dbt v2](https://github.com/dbt-labs/dbt) (the Rust rewrite of dbt, formerly dbt Fusion) directly, so the worker parses the project once at startup and runs SQL against Postgres, Snowflake, BigQuery, Databricks, Redshift, DuckDB and the other warehouses dbt v2 supports. It ships as container images, a Helm chart for Kubernetes, and `.deb` / `.rpm` packages.
+
+## Why
+
+- **dbt jobs that survive restarts.** A run's state lives in Temporal, not in a process. Kill a worker mid-build and the run continues on another one: finished nodes stay finished, and only the nodes that were in flight run again.
+- **One orchestrator.** Teams already on Temporal can schedule, trigger and chain dbt runs with the same tooling as their other workflows, and hook any Temporal workflow (in any language) in before or after a run.
+- **Retries per node, not per job.** A transient warehouse error retries one model, with backoff, instead of failing the whole `dbt build`.
+- **Scale by adding workers.** Independent models in a DAG level run in parallel across every worker on the task queue; KEDA can scale workers on queue backlog, down to zero.
 
 ![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
 
@@ -56,10 +69,15 @@ flowchart TD
 
 ## Installation
 
-Tagged releases (`v*`) publish Debian/RHEL packages and container images via
-GitHub Actions, each for linux/amd64 and linux/arm64.
+Tagged releases (`v*`) publish Debian/RHEL packages, container images and a
+Helm chart via GitHub Actions, each for linux/amd64 and linux/arm64.
 
 ```bash
+# Kubernetes: the Helm chart, published to GHCR as an OCI artifact
+helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \
+  --set temporal.address=temporal-frontend.temporal:7233 \
+  --set dbt.projectDirs='git+https://github.com/org/dbt-models.git#main'
+
 # From source with cargo (works with the git dependencies this crate uses):
 cargo install --git https://github.com/thejens/dbt-temporal --locked
 
@@ -136,7 +154,7 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 | [Per-Workflow Env Overrides](docs/env-overrides.md) | How `env` overrides work for model SQL, macros, and database connections |
 | [Error Handling](docs/error-handling.md) | Error classification, retry configuration, and non-retryable error patterns |
 | [Architecture](docs/architecture.md) | Workflow execution flow, project structure, and dependency overview |
-| [Deployment](docs/deployment.md) | Docker, Kubernetes, Cloud Run, ECS, and other deployment options |
+| [Deployment](docs/deployment.md) | Container images, Kubernetes, Cloud Run, ECS, Azure; health checks, graceful shutdown, Temporal Cloud |
 | [Helm chart](charts/dbt-temporal/README.md) | Deploying the worker on Kubernetes: `oci://ghcr.io/thejens/charts/dbt-temporal` |
 | [dbt v2 Workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
 | [Releasing](docs/releasing.md) | Cutting a release: version bump, tag, what the release workflow publishes |
@@ -144,7 +162,7 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 
 ## Development
 
-**Prerequisites**: Rust 1.85+, Docker + Docker Compose, a dbt project with a configured profile.
+**Prerequisites**: Rust 1.96+, `protoc`, Docker + Docker Compose, and the [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`) for the examples.
 
 ```bash
 make run-examples       # one-command demo: Postgres + Temporal + workers + workflows
@@ -163,5 +181,9 @@ cargo test --features aws --test artifact_store_s3  # S3 artifact store against 
 
 ```bash
 docker build -f docker/Dockerfile -t dbt-temporal .
-docker run -v ./my-project:/dbt/project -e TEMPORAL_ADDRESS=host.docker.internal:7233 dbt-temporal
+docker run -v ./my-project:/dbt/project:ro \
+  -e DBT_PROJECT_DIRS=/dbt/project \
+  -e DBT_PROFILES_DIR=/dbt/project \
+  -e TEMPORAL_ADDRESS=host.docker.internal:7233 \
+  dbt-temporal
 ```

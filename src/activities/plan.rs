@@ -147,10 +147,27 @@ pub fn select_command_node_ids(
 /// nodes is more useful than a blanket "vars may not work": it points at the
 /// exact models whose config would silently keep the startup value.
 fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json::Value>) {
-    if vars.is_empty() {
-        return;
+    let affected = nodes_reading_vars_in_config(state, vars);
+    if !affected.is_empty() {
+        warn!(
+            nodes = ?affected,
+            "workflow vars are referenced inside config() blocks, which are evaluated \
+             when the worker parses the project — those uses keep their startup value. \
+             Only render-time var() calls reflect the workflow's vars"
+        );
     }
-    let affected: Vec<String> = state
+}
+
+/// The nodes whose `config()` block reads one of `vars`, capped at 20: enough
+/// to name the pattern in a warning without flooding it on a large project.
+pub fn nodes_reading_vars_in_config(
+    state: &WorkerState,
+    vars: &BTreeMap<String, serde_json::Value>,
+) -> Vec<String> {
+    if vars.is_empty() {
+        return Vec::new();
+    }
+    state
         .resolver_state
         .nodes
         .iter()
@@ -162,16 +179,7 @@ fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json:
         })
         .map(|(id, _)| id.clone())
         .take(20)
-        .collect();
-
-    if !affected.is_empty() {
-        warn!(
-            nodes = ?affected,
-            "workflow vars are referenced inside config() blocks, which are evaluated \
-             when the worker parses the project — those uses keep their startup value. \
-             Only render-time var() calls reflect the workflow's vars"
-        );
-    }
+        .collect()
 }
 
 /// True if `raw_code` has a `config(...)` block mentioning `var('<name>')` for

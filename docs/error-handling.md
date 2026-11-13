@@ -1,4 +1,8 @@
-# Error Handling
+# Error Handling, Retries and Timeouts
+
+How dbt-temporal classifies failures as retryable or permanent, retries
+transient warehouse errors, cancels running queries, bounds activity timeouts
+and keeps very large runs under Temporal's history limit.
 
 | Error Type | Retryable? | Examples |
 |-----------|-----------|----------|
@@ -39,9 +43,9 @@ artifact write) are tagged `ArtifactStore` and retried. That matters most for
 A node's compile-and-materialize phase is synchronous: once dbt is inside a
 query, nothing in that call stack yields. It therefore runs on a blocking
 thread, leaving the activity's own task free to heartbeat and to notice
-cancellation — previously a long query stalled both, so the server's heartbeat
-timeout could reschedule the node on another worker while the first attempt was
-still writing.
+cancellation. Were the query to block that task, the server's heartbeat timeout
+could reschedule the node on another worker while the first attempt was still
+writing.
 
 Each activity carries its own `CancellationTokenSource`, handed to the adapter
 through the render environment. Cancelling the activity cancels that source, so
@@ -92,8 +96,7 @@ A model configured with `{{ config(on_error='continue') }}` (or `on_error: conti
 ## Activity Timeouts
 
 Each activity's start-to-close and heartbeat timeouts are configurable in
-`dbt_temporal.yml` under `timeouts:`. Defaults reproduce the values these were
-previously hardcoded to:
+`dbt_temporal.yml` under `timeouts:`. The defaults:
 
 ```yaml
 timeouts:

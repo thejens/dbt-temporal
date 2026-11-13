@@ -1,23 +1,47 @@
-# dbt-temporal
+<h1 align="center">dbt-temporal</h1>
 
-Execute dbt DAGs as [Temporal](https://temporal.io/) Workflows. Each dbt node runs as a Temporal activity, giving you distributed execution, automatic retries, observability, and workflow management for free.
+<p align="center">
+  <strong>Run dbt on Temporal.</strong><br>
+  A Temporal worker that executes dbt projects as durable workflows, one activity per model.
+</p>
 
-![Temporal UI showing a completed dbt workflow](docs/temporal-ui.png)
+<p align="center">
+  <a href="https://github.com/thejens/dbt-temporal/actions/workflows/ci.yml"><img src="https://github.com/thejens/dbt-temporal/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/thejens/dbt-temporal/releases/latest"><img src="https://img.shields.io/github/v/release/thejens/dbt-temporal" alt="Latest release"></a>
+  <a href="https://github.com/thejens/dbt-temporal/pkgs/container/dbt-temporal"><img src="https://img.shields.io/badge/container-ghcr.io-2ea44f" alt="Container image on GHCR"></a>
+  <a href="charts/dbt-temporal/README.md"><img src="https://img.shields.io/badge/helm-chart-0f1689" alt="Helm chart"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
 
-> **Status**: Not production-ready. dbt-temporal builds on two stable, generally
-> available releases: [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite
-> of dbt (pinned to the `v2.0.11` release), and the
-> [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.2.0`). dbt v2's
-> crates are an internal API rather than a published library, though, and several
-> [workarounds](docs/workarounds.md) are needed to run them in a long-lived
-> worker. Consider dbt-temporal itself a proof of concept — largely developed by
-> [Claude Code](https://claude.ai/claude-code) with no guarantees of code
-> quality.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#features">Features</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="charts/dbt-temporal/README.md">Helm chart</a> ·
+  <a href="examples/README.md">Examples</a>
+</p>
 
-> **License**: dbt-temporal itself is [MIT-licensed](LICENSE). Its two main
-> dependencies are permissively licensed as well — dbt v2 is **Apache 2.0**
-> and the Temporal Rust SDK is **MIT**. See
-> [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for details.
+---
+
+**dbt-temporal** is an open-source [Temporal](https://temporal.io/) worker, written in Rust, that runs [dbt](https://www.getdbt.com/) projects as durable Temporal workflows. Every model, test, seed and snapshot is its own Temporal activity, so a `dbt build` gets parallel execution across workers, per-node retries, crash recovery and live progress in the Temporal UI. Runs are started, scheduled and chained like any other Temporal workflow.
+
+It embeds [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite of dbt, as a library. There is no Python and no dbt CLI to install: the worker parses your project once at startup and then executes SQL against your warehouse through dbt's own adapters.
+
+![The jaffle_shop dbt project running as a Temporal workflow: the Temporal UI timeline shows every seed, model and test as its own execute_node activity, level by level](docs/temporal-ui.png)
+
+> [!NOTE]
+> **Project status: proof of concept, not production-ready.** dbt-temporal builds on two stable, generally available releases: [dbt v2](https://github.com/dbt-labs/dbt) (pinned to `v2.0.11`) and the [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.2.0`). dbt v2's crates are an internal API rather than a published library, though, and several [workarounds](docs/workarounds.md) are needed to run them in a long-lived worker. The project is largely developed with [Claude Code](https://claude.ai/claude-code) and comes with no guarantees of code quality.
+
+## Why run dbt on Temporal
+
+- **Runs that survive restarts.** A run's state lives in Temporal, not in a process. Kill a worker mid-build and the run continues on another one: finished nodes stay finished, and only the nodes that were in flight run again.
+- **Retries per node, not per job.** A transient warehouse error retries one model, with backoff, instead of failing the whole `dbt build`.
+- **One orchestrator.** Teams already on Temporal can schedule, trigger and chain dbt runs with the tooling they use for every other workflow, and hook any Temporal workflow, in any language, in before or after a run.
+- **Scale by adding workers.** Independent models in a DAG level run in parallel across every worker on the task queue. On Kubernetes, KEDA scales workers on queue backlog, down to zero.
+- **See what is happening.** Each node is a named activity in the Temporal UI timeline, with live status, search attributes and a CLI-style run log.
+
+## How it works
 
 ```mermaid
 flowchart TD
@@ -36,91 +60,138 @@ flowchart TD
     OnEnd --> PostHooks["on_success / on_failure hooks (lifecycle)"]
 ```
 
-## Features
+1. At startup the worker loads one or more dbt projects, from a local directory, a git repository, S3 or GCS, and parses them once.
+2. Starting a `dbt_run` workflow plans the run: it applies `--select` / `--exclude` and sorts the DAG into levels of independent nodes.
+3. Each level fans out as Temporal activities, one per node. An activity renders the node's materialization with dbt's Jinja engine, which executes the SQL in your warehouse.
+4. Results, `run_results.json`, `manifest.json` and a run log are written to the artifact store.
 
-- **Parallel DAG execution** — nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors
-- **Multi-project** — load multiple dbt projects into one worker; select which to run per workflow invocation
-- **Multi-adapter targets** — a profile target may declare several adapters; the worker builds one engine per declared adapter and routes each node by its `+adapter` selection, falling back to the target's default. A node naming an undeclared adapter fails permanently rather than running against the wrong warehouse. Per-node selection is experimental in dbt and needs `DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER=true` on the worker
-- **Remote project sources** — fetch models from git repos (`git+https://`, `git+ssh://`), S3 (`s3://`), or GCS (`gs://`) at worker startup
-- **Full dbt hook parity** — `on-run-start` / `on-run-end` from `dbt_project.yml` (with the standard `results` context), per-model `pre-hook` / `post-hook`, plus dbt-temporal-native lifecycle hooks (`pre_run` / `on_success` / `on_failure`) that plug arbitrary Temporal workflows in any language for validation, notifications, catalog updates, or conditional execution
-- **store_failures & catalog.json** — test `store_failures` persists failing rows to the audit schema (created on demand); `WRITE_CATALOG=1` adds a partial `catalog.json` (warehouse column metadata) to each run's artifacts
-- **Freshness checks** — `source-freshness` measures sources; `freshness` also measures models that declare a freshness SLA. Each node's freshness query (`loaded_at_field` or `loaded_at_query`) runs as its own activity with no ordering between them, `warn_after`/`error_after` are evaluated per node, a node past `error_after` fails the run, and the results are written to `sources.json` (plus `freshness.json` for the unified command)
-- **Project checks** — SQL under `check-paths` (`checks/` by default) queries the project's own metadata (`dbt.models`, `dbt.checks`, …) and gates the build. Checks are evaluated after planning and before any hook fires, so a project that fails its gate performs no side effects; `warn` severity reports and proceeds, and a check that cannot execute is an error whatever its severity
-- **dbt unit tests** — `unit_tests:` definitions run as activities in `dbt build`, executing the model's SQL against `given` fixtures (dict/CSV/SQL, inline or fixture files) and comparing to `expect` rows order-insensitively; a unit test runs before its model and a failure skips the model and everything downstream
-- **Selector coverage** — 20 of dbt's 24 selector methods are evaluated, with dbt's own glob rules. Methods that need artifacts this worker does not have (`result:`, `source_status:`) are rejected by name rather than silently matching nothing. See [selector semantics](docs/selector-semantics.md)
-- **Per-workflow environment overrides** — each workflow can override `env_var()` values, including database connection settings, enabling parallel runs against different warehouses from a single worker
-- **Artifact storage** — write `run_results.json`, `manifest.json`, and a CLI-style run log to local disk, S3, or GCS
-- **Observability** — live node status in Temporal memos, per-node activity names in the Gantt chart, and custom search attributes for filtering
-- **Worker tuning** — fixed concurrency caps or resource-based auto-scaling (cgroup-aware for containers), rate limiting, and graceful shutdown
-- **Health checks** — built-in HTTP health server and exec-based liveness probe for Kubernetes
+The full lifecycle, with hooks and project checks, is in [architecture](docs/architecture.md).
+
+## Quick start
+
+You need Docker and the [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`).
+
+**Run your own dbt project.** From the project directory, with `profiles.yml` next to `dbt_project.yml`:
+
+```bash
+# 1. A local Temporal server (UI at http://localhost:8233)
+temporal server start-dev --ip 0.0.0.0
+
+# 2. The worker, with the project mounted read-only
+docker run --rm \
+  -v "$PWD:/dbt/project:ro" \
+  -e DBT_PROJECT_DIRS=/dbt/project \
+  -e DBT_PROFILES_DIR=/dbt/project \
+  -e TEMPORAL_ADDRESS=host.docker.internal:7233 \
+  ghcr.io/thejens/dbt-temporal:latest
+
+# 3. dbt build, as a workflow
+temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{"command": "build"}'
+```
+
+Open the Temporal UI to watch each model run as an activity. On Linux, add `--add-host=host.docker.internal:host-gateway` to `docker run`. Postgres profiles also need `-e DBT_ALLOW_EXPERIMENTAL_ADAPTERS=true` ([why](docs/configuration.md#dbt-project-discovery)).
+
+**Or run the bundled examples** from a clone of this repository, which start Postgres, Temporal and several workers, then submit workflows:
+
+```bash
+make run-examples
+```
+
+The [examples walkthrough](examples/README.md) covers single and multi-project workers, BigQuery, and per-workflow environment overrides.
 
 ## Installation
 
-Tagged releases (`v*`) publish Debian/RHEL packages and container images via
-GitHub Actions, each for linux/amd64 and linux/arm64.
+Each tagged release publishes a Helm chart, container images and distro packages, for `linux/amd64` and `linux/arm64`.
+
+| Method | Command |
+|--------|---------|
+| **Kubernetes (Helm)** | `helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal` — see the [chart README](charts/dbt-temporal/README.md) |
+| **Container, debian-slim** | `docker pull ghcr.io/thejens/dbt-temporal:latest` — has `git` and a shell |
+| **Container, distroless** | `docker pull ghcr.io/thejens/dbt-temporal:distroless` — minimal, no shell |
+| **Debian / Ubuntu** | `sudo apt install ./dbt-temporal_<version>_amd64.deb` from the [latest release](https://github.com/thejens/dbt-temporal/releases/latest) (or `_arm64`) |
+| **RHEL / Alma / Rocky 8+** | `sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm` from the [latest release](https://github.com/thejens/dbt-temporal/releases/latest) (or `.aarch64`) |
+| **From source** | `cargo install --git https://github.com/thejens/dbt-temporal --locked` |
+
+A minimal Helm install:
 
 ```bash
-# From source with cargo (works with the git dependencies this crate uses):
-cargo install --git https://github.com/thejens/dbt-temporal --locked
-
-# Or pull a container image from GHCR (both glibc, so ADBC drivers load;
-# multi-arch, so the same tag runs on amd64 and arm64):
-docker pull ghcr.io/thejens/dbt-temporal:latest         # debian-slim (has a shell)
-docker pull ghcr.io/thejens/dbt-temporal:distroless     # distroless/cc (minimal)
-
-# Or install a distro package from the latest GitHub Release
-# (https://github.com/thejens/dbt-temporal/releases):
-sudo apt install ./dbt-temporal_<version>_amd64.deb        # Debian/Ubuntu (or _arm64)
-sudo dnf install ./dbt-temporal-<version>-1.x86_64.rpm     # RHEL/Alma/Rocky 8+ (or .aarch64)
+helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \
+  --set temporal.address=temporal-frontend.temporal:7233 \
+  --set dbt.projectDirs='git+https://github.com/org/dbt-models.git#main' \
+  --set dbt.profiles.existingSecret=dbt-profiles
 ```
 
-> **Not on crates.io.** dbt-temporal depends on dbt v2's crates, which dbt does
-> not publish, via git and a `[patch.crates-io]` block for forked `arrow-rs`/`ring`.
-> `cargo publish` rejects both, so the crate is distributed via `cargo install
-> --git`, GHCR, and release binaries rather than `cargo install dbt-temporal`.
+Both images are glibc-based, so the ADBC warehouse drivers dbt loads at runtime work in either. dbt-temporal is not on crates.io: it depends on dbt v2's crates, which dbt does not publish, through git and a `[patch.crates-io]` block, and `cargo publish` rejects both.
 
-## Quick Start
+For production setups (Temporal Cloud, health checks, graceful shutdown, read-only filesystems, autoscaling) see [deployment](docs/deployment.md).
 
-```bash
-# Start everything (Postgres, Temporal, workers, submit workflows)
-make run-examples
+## Features
 
-# Or step by step:
-make dev                        # Terminal 1: Temporal dev server (UI at http://localhost:8233)
-make run-worker-single          # Terminal 2: start a worker
-make submit-workflow-single     # Terminal 3: submit a workflow
-```
+### Execution
 
-## Workflow Input
+- **Parallel DAG execution.** Nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors.
+- **All the dbt commands a scheduler needs.** `build`, `run`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness` and `freshness`, with `--select` / `--exclude`, `--target`, `--vars`, `--full-refresh` and `--fail-fast` as [workflow input](docs/workflow-input.md).
+- **Slim CI, defer and retry.** `state:` selectors against a previous manifest, `--defer` to production relations, and re-running only the nodes that failed in an earlier run.
+- **Runs of any size.** A run that outgrows Temporal's history limit continues as a new execution on its own, keeping one identity and one set of artifacts.
+- **Live control.** Query progress and toggle fail-fast on a running workflow.
+
+### dbt compatibility
+
+- **Full hook parity.** `on-run-start` / `on-run-end` with the standard `results` context, and per-model `pre-hook` / `post-hook`.
+- **Selectors.** 20 of dbt's 24 selector methods, with dbt's own glob rules. Methods that need artifacts the worker does not have (`result:`, `source_status:`) are rejected by name rather than silently matching nothing. See [selector semantics](docs/selector-semantics.md).
+- **Unit tests.** `unit_tests:` run as activities in `dbt build`, against `given` fixtures (dict, CSV or SQL). A unit test runs before its model, and a failure skips the model and everything downstream.
+- **Freshness.** `source-freshness` measures sources; `freshness` also measures models that declare a freshness SLA. A node past `error_after` fails the run, and results are written to `sources.json`.
+- **Project checks.** SQL under `check-paths` queries the project's own metadata (`dbt.models`, `dbt.checks`, …) and gates the build before any hook or model runs.
+- **`store_failures` and `catalog.json`.** Failing test rows persist to the audit schema; `WRITE_CATALOG=1` adds a partial `catalog.json` to each run's artifacts.
+- **Multi-adapter targets.** A profile target may declare several adapters; each node is routed by its `+adapter` selection. Per-node selection is experimental in dbt and needs `DBT_ENGINE_EXPERIMENTAL_MULTI_ADAPTER=true`.
+- **Functions.** dbt v2 scalar UDFs are built like any other node.
+
+### Platform
+
+- **Multi-project workers.** Load several dbt projects into one worker and pick one per workflow.
+- **Remote project sources.** Fetch projects at startup from git (`git+https://`, `git+ssh://`, pinned to a commit), S3 or GCS, including private repositories.
+- **Per-workflow environment overrides.** Each workflow can override `env_var()` values, including the ones `profiles.yml` reads, so one worker serves many warehouses, schemas or tenants in parallel. See [env overrides](docs/env-overrides.md).
+- **Lifecycle hooks.** `pre_run`, `on_success` and `on_failure` start arbitrary Temporal child workflows, in any language, for validation, notifications, catalog updates or conditional skipping. See [hooks](docs/hooks.md).
+- **Artifact storage.** `run_results.json`, `manifest.json` and a CLI-style run log on local disk, S3 or GCS.
+- **Observability.** Live node status in workflow memos, per-node activity names in the timeline, search attributes for filtering runs, Prometheus metrics and OpenTelemetry export.
+
+### Operations
+
+- **Kubernetes-native.** A [Helm chart](charts/dbt-temporal/README.md) with a non-root pod on a read-only root filesystem, startup and liveness probes, a PodDisruptionBudget, a ServiceMonitor and a KEDA `ScaledObject`. Every release is tested end to end on k3d before it is published.
+- **Graceful shutdown.** On `SIGTERM` the worker stops polling and lets in-flight models finish, or cancels and hands them to another worker after a deadline.
+- **Safe deploys.** Worker deployment versioning pins each run to the build that started it.
+- **Worker tuning.** Fixed concurrency caps or resource-based slot tuning (cgroup-aware), rate limits and poller autoscaling.
+- **Temporal Cloud.** API key or mTLS authentication.
+
+## Supported warehouses
+
+dbt-temporal runs SQL through dbt v2's adapters and adds no warehouse code of its own.
+
+| Warehouse | Status |
+|-----------|--------|
+| PostgreSQL | Covered by this repository's integration tests and the Helm chart's end-to-end test. dbt marks the adapter experimental, so set `DBT_ALLOW_EXPERIMENTAL_ADAPTERS=true`. |
+| DuckDB | Covered by this repository's scenario tests. |
+| BigQuery | Covered by opt-in integration tests and an [example](examples/README.md). |
+| Snowflake, Databricks, Redshift, ClickHouse, Salesforce | Supported by dbt v2; not exercised by this repository's tests. |
+
+## Starting a run
+
+A run is one execution of the `dbt_run` workflow. Its input mirrors the dbt CLI:
 
 ```bash
 temporal workflow start --type dbt_run --task-queue dbt-tasks --input '{
-  "project": "my_project",
-  "command": "run",
+  "command": "build",
   "select": "+my_model",
   "exclude": "tag:wip",
   "target": "prod",
   "full_refresh": false,
   "fail_fast": true,
   "vars": {"key": "value"},
-  "env": {"DB_SCHEMA": "prod_analytics"},
-  "hooks": null
+  "env": {"DB_SCHEMA": "prod_analytics"}
 }'
 ```
 
-All fields are optional. `command` defaults to `build`; `run`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness`, and `freshness` are also supported. `project` is auto-resolved when only one project is loaded. `resource_types` / `exclude_resource_types` narrow any plan to (or away from) named resource types, the `--resource-type` / `--exclude-resource-type` equivalents.
-
-dbt v2 **functions** (scalar UDFs) are executed: `build`, `compile` and `list` schedule them like any other buildable node. Whether a function actually creates depends on the adapter — dbt ships generic `CREATE OR REPLACE FUNCTION` SQL that Postgres, Snowflake, BigQuery and Databricks accept. Adapters without it (DuckDB, for one) need a project-level `<adapter>__scalar_function_sql` override, the same dispatch hook dbt uses everywhere else.
-
-The two freshness commands differ in what they measure. `source-freshness` covers sources only. `freshness` covers sources **plus** models that declare an SLA — a `freshness:` config block with `warn_after` and/or `error_after`. A model's `build_after` is deliberately not an SLA: it is a scheduling rule for state-aware builds, so a `build_after`-only model is never measured. Neither command builds anything; both need a `loaded_at_field` or `loaded_at_query` on every node they measure (dbt's relation-metadata fallback needs an adapter metadata interface the worker does not drive, so nodes that declare a rule without either are skipped and named in a warning). A rule naming `count` without `period`, or the reverse, aborts the plan rather than reading as "no rule".
-
-Exposures, metrics, saved queries and semantic models are parsed into the graph but have no execution path — they are excluded from every plan, and a `build` over a project containing them logs a warning naming the excluded resource types.
-
-`vars` and `full_refresh` apply per workflow: `vars` layer over the project's own (CLI-vars precedence, so a key you don't pass keeps its `dbt_project.yml` value), and `full_refresh` surfaces as `flags.FULL_REFRESH` / `flags.full_refresh`, which is what dbt's `should_full_refresh()` and `is_incremental()` read. One limit is worth knowing: the worker parses each project **once at startup**, so `var()` calls evaluated during parsing — inside `{{ config(...) }}` blocks or `dbt_project.yml` — keep their startup value. Only render-time `var()` (model bodies, macros, hooks) reflects the workflow's vars. The planner warns and names the nodes when it spots a run's vars inside a `config()` block. The same startup-parse constraint is why `config(schema=env_var(...))` is rejected outright.
-
-Additional inputs: `defer_manifest_ref` (defer unbuilt refs to a previous manifest, `--defer --state` equivalent), `event_time_start`/`event_time_end` (microbatch window — both or neither, and the start must precede the end; the planner rejects anything else rather than silently running unwindowed), `retry_from` — point it at a previous run's `run_results.json` artifact to re-run only the nodes that did not succeed (the `dbt retry` equivalent; start it with the same `select`/`exclude` as the original run) — and `state_manifest_ref`, which enables the `state:` select methods (`modified`, `new`, `old`, `unmodified`) against a previous `manifest.json` artifact (the `--state` equivalent; slim CI pattern: `"select": "state:modified+", "state_manifest_ref": "<prod manifest>"`, often combined with `defer_manifest_ref` pointing at the same manifest).
-
-While a run executes, query live progress and toggle fail-fast without restarting:
+All fields are optional; `command` defaults to `build`. The [workflow input reference](docs/workflow-input.md) covers every field, the commands, slim CI, retrying a failed run, scheduling with Temporal Schedules, and querying a run while it executes:
 
 ```bash
 temporal workflow query -w <workflow-id> --type run_status
@@ -131,20 +202,45 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 
 | Document | Contents |
 |----------|----------|
-| [Configuration](docs/configuration.md) | Environment variables for Temporal, dbt projects, artifact storage, search attributes, health checks, and worker tuning |
-| [Lifecycle Hooks](docs/hooks.md) | Hook events, configuration, error policies, fire-and-forget mode, skip sentinels, and extra_env injection |
-| [Per-Workflow Env Overrides](docs/env-overrides.md) | How `env` overrides work for model SQL, macros, and database connections |
-| [Error Handling](docs/error-handling.md) | Error classification, retry configuration, and non-retryable error patterns |
-| [Architecture](docs/architecture.md) | Workflow execution flow, project structure, and dependency overview |
-| [Deployment](docs/deployment.md) | Docker, Kubernetes, Cloud Run, ECS, and other deployment options |
-| [Helm chart](charts/dbt-temporal/README.md) | Deploying the worker on Kubernetes: `oci://ghcr.io/thejens/charts/dbt-temporal` |
-| [dbt v2 Workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
-| [Releasing](docs/releasing.md) | Cutting a release: version bump, tag, what the release workflow publishes |
-| [Examples](examples/README.md) | Walkthrough of included example projects |
+| [Workflow input](docs/workflow-input.md) | Every `dbt_run` input field, the supported commands, slim CI, retry and scheduling |
+| [Configuration](docs/configuration.md) | Environment variables: Temporal connection, project discovery, artifact storage, search attributes, worker tuning, observability |
+| [Deployment](docs/deployment.md) | Container images, Kubernetes, Cloud Run, ECS, Azure; health checks, graceful shutdown, Temporal Cloud |
+| [Helm chart](charts/dbt-temporal/README.md) | Chart values and recipes for Kubernetes: `oci://ghcr.io/thejens/charts/dbt-temporal` |
+| [Hooks](docs/hooks.md) | dbt project hooks and Temporal lifecycle hooks: events, error policies, skipping a run, injecting env |
+| [Per-workflow env overrides](docs/env-overrides.md) | How `env` overrides reach model SQL, macros and database connections |
+| [Error handling](docs/error-handling.md) | Error classification, retries, cancellation, timeouts and history size |
+| [Architecture](docs/architecture.md) | Run lifecycle, module layout and dependencies |
+| [Examples](examples/README.md) | Walkthrough of the bundled example projects |
+| [dbt v2 workarounds](docs/workarounds.md) | Upstream issues and the workarounds in place |
+| [Releasing](docs/releasing.md) | Cutting a release and what the release workflow publishes |
 
-## Development
+## FAQ
 
-**Prerequisites**: Rust 1.85+, Docker + Docker Compose, a dbt project with a configured profile.
+**Do I need Python or the dbt CLI?**
+No. dbt v2 is compiled into the worker binary. The warehouse drivers are downloaded by dbt on first use.
+
+**Does it run my existing dbt project?**
+It runs what dbt v2 runs. dbt v2 is stricter than dbt Core 1.x, so check your project against [dbt's own documentation](https://docs.getdbt.com/) first; `dbt_project.yml`, `profiles.yml`, models and macros are used as they are.
+
+**How is this different from running `dbt build` inside a single Temporal activity?**
+A single activity retries the whole build and shows one opaque step. dbt-temporal plans the DAG in the workflow, so each node retries, heartbeats and reports on its own, a crashed worker loses only the nodes it was running, and the project is parsed once per worker instead of once per run.
+
+**Does it work with Temporal Cloud?**
+Yes, with an API key or mTLS. See [deployment](docs/deployment.md#temporal-cloud).
+
+**How do I schedule runs?**
+With [Temporal Schedules](https://docs.temporal.io/schedule), or by starting `dbt_run` from another workflow. See [scheduling](docs/workflow-input.md#scheduling).
+
+**Can one worker serve several projects or environments?**
+Yes. A worker can load several projects, and each workflow can override `target` and `env_var()` values, including warehouse credentials.
+
+## License
+
+dbt-temporal is [MIT-licensed](LICENSE). Its two main dependencies are permissively licensed as well: dbt v2 is Apache 2.0 and the Temporal Rust SDK is MIT. See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md); every release artifact ships the full license texts.
+
+## Contributing and development
+
+**Prerequisites**: Rust 1.96+, `protoc`, Docker + Docker Compose, and the [Temporal CLI](https://docs.temporal.io/cli) (`brew install temporal`) for the examples.
 
 ```bash
 make run-examples       # one-command demo: Postgres + Temporal + workers + workflows
@@ -163,5 +259,9 @@ cargo test --features aws --test artifact_store_s3  # S3 artifact store against 
 
 ```bash
 docker build -f docker/Dockerfile -t dbt-temporal .
-docker run -v ./my-project:/dbt/project -e TEMPORAL_ADDRESS=host.docker.internal:7233 dbt-temporal
+docker run -v ./my-project:/dbt/project:ro \
+  -e DBT_PROJECT_DIRS=/dbt/project \
+  -e DBT_PROFILES_DIR=/dbt/project \
+  -e TEMPORAL_ADDRESS=host.docker.internal:7233 \
+  dbt-temporal
 ```

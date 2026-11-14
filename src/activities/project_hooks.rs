@@ -858,7 +858,7 @@ pass={{ ns.pass }} error={{ ns.error }}",
                 "invocation_id": "inv",
             }))
             .expect("deserialize");
-            assert!(input.prior_segments.is_empty());
+            assert_eq!(input.prior_segments, Vec::<String>::new());
         }
     }
 }

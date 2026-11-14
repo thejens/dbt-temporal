@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use dbt_schemas::schemas::Nodes;
 use dbt_schemas::schemas::telemetry::NodeType;
+use dbt_schemas::schemas::{InternalDbtNode, Nodes};
 
 /// Build a dependency map from Nodes, filtered to selected node IDs.
 ///
@@ -59,106 +59,100 @@ fn promote_ephemeral_deps(
     }
 }
 
-/// Inject test-gate dependencies.
+/// Inject test-gate dependencies, using the rule of `dbt build`.
 ///
-/// For each model M with tests T1..Tn, any non-test node N that depends on M should
-/// also depend on T1..Tn. This ensures tests run before downstream models and gate
-/// the pipeline — if a test fails, downstreams are skipped.
+/// A data test T runs before the models and snapshots that consume what it
+/// tests, so a failing test skips them. For T with upstream nodes P(T) (whatever
+/// it references: models, seeds, snapshots or sources), the edge `N → T` is added
+/// for a model or snapshot N when
 ///
-/// Skip the gate edge `N → T` whenever T already runs after N — i.e. T transitively
-/// depends on N. Adding the edge would close a cycle:
+/// * N directly depends on at least one node of P(T),
+/// * N is not itself an ancestor of T (T already runs after N), and
+/// * **every** node of P(T) is an ancestor of N.
 ///
-/// * Direct: a single test refs two siblings in a dep chain. Gating the lower sibling
-///   on the test it already refs is a 2-cycle.
-/// * Transitive: T refs M_x; M_x depends (via any chain) on a model M_y; another
-///   model N also depends on M_y but is not referenced by T. Gating N on T closes a
-///   cycle through the M_x→…→M_y chain. (The `logo_activity_model` case.)
+/// The last condition is what keeps the added edge from closing a cycle: any path
+/// from T to N would have to leave T through a node of P(T) that is not upstream
+/// of N. It also means a test spanning several parents (a `relationships` test)
+/// gates only what is downstream of all of them.
 ///
-/// Either way, T is already scheduled after N by the existing forward edge(s), so the
-/// gate would be redundant in addition to unsafe.
+/// Unit tests do not take part: they run before the model they test and are
+/// wired by [`inject_unit_test_gates`]. Seeds, sources and tests are never gated.
+///
+/// Ancestors are read from the dependency graph as passed in, so gate edges added
+/// here never influence which later gates are skipped, and the result does not
+/// depend on iteration order.
 ///
 /// # Complexity
 ///
-/// With V nodes and E dependency edges in `deps`, and P (node, test) gate candidates,
-/// the transitive ancestors of all tests come from one strongly-connected-component
-/// pass plus one reachability-bitset union per component, so they cost
-/// O((V + E) * V / 64) time and O(V^2 / 64) bits in the worst case, and each of the P
-/// candidates is then an O(log V) membership test. Computing a separate ancestor set
-/// per test by graph traversal would instead cost O(T * (V + E)) for T tests, which
-/// grows quadratically on projects whose test count scales with their model count.
+/// With V nodes and E dependency edges in `deps`, and P (node, test) gate
+/// candidates, the transitive ancestors of every test, model and snapshot come
+/// from one strongly-connected-component pass plus one reachability-bitset union
+/// per component, so they cost O((V + E) * V / 64) time and O(V^2 / 64) bits in
+/// the worst case. Each candidate is then checked with one O(log V) membership
+/// test for the cycle guard and one per parent of its test. Computing a separate
+/// ancestor set per node by graph traversal would instead cost O(V * (V + E)),
+/// which grows quadratically on projects whose test count scales with their
+/// model count.
 pub fn inject_test_gates(
     nodes: &Nodes,
     selected_ids: &[String],
     deps: &mut BTreeMap<String, BTreeSet<String>>,
 ) {
-    let selected_set: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
-
-    // Build model->tests map: for each model, collect all selected tests that depend on it.
-    let mut model_tests: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // Tests are the gate sources; models and snapshots are the nodes that can be
+    // gated. Every one of them needs ancestor queries, so all are index roots.
+    let mut tests: Vec<&str> = Vec::new();
+    let mut roots: Vec<&str> = Vec::new();
+    // Gateable nodes by the node they directly depend on.
+    let mut consumers: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for id in selected_ids {
-        if let Some(node) = nodes.get_node(id)
-            && node.resource_type() == NodeType::Test
-        {
-            for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
-                if selected_set.contains(dep_id.as_str())
-                    && nodes
-                        .get_node(dep_id)
-                        .is_some_and(|n| n.resource_type() == NodeType::Model)
-                {
-                    model_tests
-                        .entry(dep_id.as_str())
+        match nodes.get_node(id).map(InternalDbtNode::resource_type) {
+            Some(NodeType::Test) => {
+                tests.push(id);
+                roots.push(id);
+            }
+            Some(NodeType::Model | NodeType::Snapshot) => {
+                roots.push(id);
+                for dep in deps.get(id).into_iter().flatten() {
+                    consumers.entry(dep).or_default().push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let ancestors = AncestorIndex::new(deps, &roots);
+    let mut gates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for test in tests {
+        let Some(parents) = deps.get(test) else {
+            continue;
+        };
+        let mut considered: BTreeSet<&str> = BTreeSet::new();
+        for parent in parents {
+            for &node in consumers.get(parent.as_str()).into_iter().flatten() {
+                // A node reachable from several parents is judged once.
+                if !considered.insert(node) || ancestors.is_ancestor(test, node) {
+                    continue;
+                }
+                if ancestors.has_all_ancestors(node, parents) {
+                    gates
+                        .entry(node.to_string())
                         .or_default()
-                        .push(id.as_str());
+                        .insert(test.to_string());
                 }
             }
         }
     }
 
-    // Ancestor sets are taken from the raw (pre-injection) dep graph, so the
-    // gate edges added below never influence which gates are skipped.
-    let test_ids: Vec<&str> = selected_ids
-        .iter()
-        .filter(|id| {
-            nodes
-                .get_node(id)
-                .is_some_and(|n| n.resource_type() == NodeType::Test)
-        })
-        .map(String::as_str)
-        .collect();
-    let ancestors = AncestorIndex::new(deps, &test_ids);
-
-    // For each non-test node that depends on a model with tests, add the test IDs
-    // as additional dependencies — except where doing so would close a cycle.
-    for id in selected_ids {
-        let is_test = nodes
-            .get_node(id)
-            .is_some_and(|n| n.resource_type() == NodeType::Test);
-        if is_test {
-            continue;
-        }
-        if let Some(node_deps) = deps.get(id).cloned() {
-            let mut extra = BTreeSet::new();
-            for dep_id in &node_deps {
-                if let Some(tests) = model_tests.get(dep_id.as_str()) {
-                    for test_id in tests {
-                        if ancestors.is_ancestor(test_id, id) {
-                            continue;
-                        }
-                        extra.insert((*test_id).to_string());
-                    }
-                }
-            }
-            if !extra.is_empty()
-                && let Some(entry) = deps.get_mut(id)
-            {
-                entry.extend(extra);
-            }
+    for (node, node_gates) in gates {
+        if let Some(entry) = deps.get_mut(&node) {
+            entry.extend(node_gates);
         }
     }
 }
 
 /// Reachability over the raw dependency graph: answers "is `node` a transitive
-/// dependency of `root`" for a fixed set of roots.
+/// dependency of `root`" (and whether all of several nodes are) for a fixed set of
+/// roots.
 ///
 /// Strongly-connected components are condensed first so that the answer is also exact
 /// for a graph that contains a cycle (a node on a cycle is its own ancestor); the
@@ -290,6 +284,27 @@ impl AncestorIndex {
         self.component_of
             .get(&r)
             .is_some_and(|&c| self.reachable[c][n / 64] & (1 << (n % 64)) != 0)
+    }
+
+    /// Whether every one of `nodes` is reachable from `root`; vacuously true for
+    /// an empty set. `root` must have been passed to [`Self::new`].
+    fn has_all_ancestors<'a>(
+        &self,
+        root: &str,
+        nodes: impl IntoIterator<Item = &'a String>,
+    ) -> bool {
+        let reachable = self
+            .index_of
+            .get(root)
+            .and_then(|r| self.component_of.get(r))
+            .map(|&c| &self.reachable[c]);
+        nodes.into_iter().all(|node| {
+            reachable.is_some_and(|bits| {
+                self.index_of
+                    .get(node)
+                    .is_some_and(|&n| bits[n / 64] & (1 << (n % 64)) != 0)
+            })
+        })
     }
 }
 
@@ -429,7 +444,10 @@ mod tests {
 
     use dbt_common::CodeLocationWithFile;
     use dbt_schemas::schemas::common::NodeDependsOn;
-    use dbt_schemas::schemas::{CommonAttributes, DbtModel, DbtTest, NodeBaseAttributes};
+    use dbt_schemas::schemas::{
+        CommonAttributes, DbtModel, DbtSeed, DbtSnapshot, DbtSource, DbtTest, DbtUnitTest,
+        NodeBaseAttributes,
+    };
 
     use super::*;
 
@@ -440,6 +458,10 @@ mod tests {
                 (node.to_string(), node_deps.iter().map(ToString::to_string).collect())
             })
             .collect()
+    }
+
+    fn selected(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(ToString::to_string).collect()
     }
 
     fn make_common(unique_id: &str) -> CommonAttributes {
@@ -485,98 +507,94 @@ mod tests {
         nodes.tests.insert(unique_id.to_string(), Arc::new(test));
     }
 
-    /// Straightforward formulation of the gate rule: one ancestor traversal per
-    /// test. Kept as the specification that `inject_test_gates` must match.
-    #[cfg(test)]
+    fn add_unit_test_node(nodes: &mut Nodes, unique_id: &str, dep_ids: &[&str]) {
+        let unit_test = DbtUnitTest {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(dep_ids),
+            ..Default::default()
+        };
+        nodes
+            .unit_tests
+            .insert(unique_id.to_string(), Arc::new(unit_test));
+    }
+
+    fn add_seed(nodes: &mut Nodes, unique_id: &str) {
+        let seed = DbtSeed {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(&[]),
+            ..Default::default()
+        };
+        nodes.seeds.insert(unique_id.to_string(), Arc::new(seed));
+    }
+
+    fn add_source(nodes: &mut Nodes, unique_id: &str) {
+        let source = DbtSource {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(&[]),
+            ..Default::default()
+        };
+        nodes
+            .sources
+            .insert(unique_id.to_string(), Arc::new(source));
+    }
+
+    fn add_snapshot(nodes: &mut Nodes, unique_id: &str, dep_ids: &[&str]) {
+        let snapshot = DbtSnapshot {
+            __common_attr__: make_common(unique_id),
+            __base_attr__: make_base(dep_ids),
+            ..Default::default()
+        };
+        nodes
+            .snapshots
+            .insert(unique_id.to_string(), Arc::new(snapshot));
+    }
+
+    /// Every node reachable from `id` through one or more dependency edges,
+    /// by plain traversal.
+    fn ancestors_by_traversal(
+        deps: &BTreeMap<String, BTreeSet<String>>,
+        id: &str,
+    ) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        let mut stack: Vec<&String> = deps.get(id).into_iter().flatten().collect();
+        while let Some(current) = stack.pop() {
+            if found.insert(current.clone()) {
+                stack.extend(deps.get(current).into_iter().flatten());
+            }
+        }
+        found
+    }
+
+    /// Straightforward statement of dbt's rule: for each test T and each model
+    /// or snapshot N that directly depends on one of T's parents, N waits for T
+    /// unless N is an ancestor of T, provided all of T's parents are ancestors
+    /// of N. Ancestor sets come from one traversal per node. Kept as the
+    /// specification that `inject_test_gates` must match.
     fn inject_test_gates_reference(
         nodes: &Nodes,
         selected_ids: &[String],
         deps: &mut BTreeMap<String, BTreeSet<String>>,
     ) {
-        let selected_set: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
-
-        // Build model->tests map: for each model, collect all selected tests that depend on it.
-        let mut model_tests: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for id in selected_ids {
-            if let Some(node) = nodes.get_node(id)
-                && node.resource_type() == NodeType::Test
-            {
-                for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
-                    if selected_set.contains(dep_id.as_str())
-                        && nodes
-                            .get_node(dep_id)
-                            .is_some_and(|n| n.resource_type() == NodeType::Model)
-                    {
-                        model_tests
-                            .entry(dep_id.as_str())
-                            .or_default()
-                            .push(id.as_str());
-                    }
-                }
-            }
-        }
-
-        // Compute each test's transitive ancestor set in the raw (pre-injection) dep
-        // graph — every node T depends on, directly or via chains of model→model edges.
-        let test_ids: Vec<&str> = selected_ids
+        let raw = deps.clone();
+        let resource_type = |id: &String| nodes.get_node(id).map(InternalDbtNode::resource_type);
+        for test in selected_ids
             .iter()
-            .filter(|id| {
-                nodes
-                    .get_node(id)
-                    .is_some_and(|n| n.resource_type() == NodeType::Test)
-            })
-            .map(String::as_str)
-            .collect();
-        let mut test_ancestors: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-        for test_id in &test_ids {
-            let mut ancestors: BTreeSet<String> = BTreeSet::new();
-            let mut stack: Vec<String> = deps
-                .get(*test_id)
-                .map(|s| s.iter().cloned().collect())
-                .unwrap_or_default();
-            while let Some(cur) = stack.pop() {
-                if !ancestors.insert(cur.clone()) {
+            .filter(|id| resource_type(id) == Some(NodeType::Test))
+        {
+            let parents = &raw[test];
+            let test_ancestors = ancestors_by_traversal(&raw, test);
+            for node in selected_ids.iter().filter(|id| {
+                matches!(resource_type(id), Some(NodeType::Model | NodeType::Snapshot))
+            }) {
+                let consumes_a_parent = raw[node].iter().any(|d| parents.contains(d));
+                if !consumes_a_parent || test_ancestors.contains(node) {
                     continue;
                 }
-                if let Some(parent_deps) = deps.get(&cur) {
-                    for p in parent_deps {
-                        if !ancestors.contains(p) {
-                            stack.push(p.clone());
-                        }
-                    }
-                }
-            }
-            test_ancestors.insert(*test_id, ancestors);
-        }
-
-        // For each non-test node that depends on a model with tests, add the test IDs
-        // as additional dependencies — except where doing so would close a cycle.
-        for id in selected_ids {
-            let is_test = nodes
-                .get_node(id)
-                .is_some_and(|n| n.resource_type() == NodeType::Test);
-            if is_test {
-                continue;
-            }
-            if let Some(node_deps) = deps.get(id).cloned() {
-                let mut extra = BTreeSet::new();
-                for dep_id in &node_deps {
-                    if let Some(tests) = model_tests.get(dep_id.as_str()) {
-                        for test_id in tests {
-                            if test_ancestors
-                                .get(test_id)
-                                .is_some_and(|a| a.contains(id.as_str()))
-                            {
-                                continue;
-                            }
-                            extra.insert((*test_id).to_string());
-                        }
-                    }
-                }
-                if !extra.is_empty()
-                    && let Some(entry) = deps.get_mut(id)
+                let node_ancestors = ancestors_by_traversal(&raw, node);
+                if parents.iter().all(|p| node_ancestors.contains(p))
+                    && let Some(entry) = deps.get_mut(node)
                 {
-                    entry.extend(extra);
+                    entry.insert(test.clone());
                 }
             }
         }
@@ -648,9 +666,11 @@ mod tests {
             .collect()
     }
 
-    /// Builds a project of `size` models in the given shape plus `test_count`
-    /// tests that each reference one to four random models, returning the
-    /// selected ids (a random few models are left unselected).
+    /// Builds a project of `size` models in the given shape, a few seeds and
+    /// snapshots (some upstream of the first models, some downstream of
+    /// random models), plus `test_count` tests that each reference one to four
+    /// random nodes of any of those kinds. Returns the selected ids (a random
+    /// few models are left unselected).
     fn gate_fixture(
         shape: &str,
         size: usize,
@@ -659,19 +679,49 @@ mod tests {
     ) -> (Nodes, Vec<String>) {
         let mut rng = Xorshift(seed);
         let model_id = |i: usize| format!("model.g.m{i:03}");
+        let seed_id = |i: usize| format!("seed.g.s{i}");
+        let upstream_snapshot_id = |i: usize| format!("snapshot.g.u{i}");
+        let downstream_snapshot_id = |i: usize| format!("snapshot.g.d{i}");
         let mut nodes = Nodes::default();
         let mut selected = Vec::new();
+        for i in 0..3 {
+            add_seed(&mut nodes, &seed_id(i));
+            add_snapshot(&mut nodes, &upstream_snapshot_id(i), &[&seed_id(i)]);
+            selected.push(seed_id(i));
+            selected.push(upstream_snapshot_id(i));
+        }
         for (i, edges) in model_edges(shape, size, &mut rng).iter().enumerate() {
-            let dep_ids: Vec<String> = edges.iter().map(|&d| model_id(d)).collect();
+            let mut dep_ids: Vec<String> = edges.iter().map(|&d| model_id(d)).collect();
+            // Models without model parents read a seed or an upstream snapshot.
+            if dep_ids.is_empty() {
+                match rng.below(3) {
+                    0 => dep_ids.push(seed_id(rng.below(3))),
+                    1 => dep_ids.push(upstream_snapshot_id(rng.below(3))),
+                    _ => {}
+                }
+            }
             let dep_refs: Vec<&str> = dep_ids.iter().map(String::as_str).collect();
             add_model(&mut nodes, &model_id(i), &dep_refs);
             if rng.below(12) != 0 {
                 selected.push(model_id(i));
             }
         }
+        for i in 0..3 {
+            let dep_ids: Vec<String> = (0..=rng.below(2))
+                .map(|_| model_id(rng.below(size)))
+                .collect();
+            let dep_refs: Vec<&str> = dep_ids.iter().map(String::as_str).collect();
+            add_snapshot(&mut nodes, &downstream_snapshot_id(i), &dep_refs);
+            selected.push(downstream_snapshot_id(i));
+        }
         for t in 0..test_count {
             let dep_ids: Vec<String> = (0..=rng.below(4))
-                .map(|_| model_id(rng.below(size)))
+                .map(|_| match rng.below(8) {
+                    0 => seed_id(rng.below(3)),
+                    1 => upstream_snapshot_id(rng.below(3)),
+                    2 => downstream_snapshot_id(rng.below(3)),
+                    _ => model_id(rng.below(size)),
+                })
                 .collect();
             let dep_refs: Vec<&str> = dep_ids.iter().map(String::as_str).collect();
             let id = format!("test.g.t{t:03}");
@@ -682,28 +732,47 @@ mod tests {
     }
 
     /// The reachability-index implementation must produce exactly the edge
-    /// sets of the per-test traversal, across graph shapes, seeds and a graph
-    /// whose raw dependencies contain a cycle.
+    /// sets of the per-node traversal, across graph shapes and seeds, and
+    /// injecting gates into an acyclic graph must leave it acyclic. A graph
+    /// whose raw dependencies contain a cycle is compared too.
     #[test]
     fn inject_test_gates_matches_the_reference_on_generated_graphs() {
         let mut gated_edges = 0usize;
+        let mut gated_snapshots = 0usize;
+        let mut gated_by_seed_test = 0usize;
+        let mut multi_parent_gates = 0usize;
         let mut compared = 0usize;
         for shape in ["chain", "diamond", "fan_out", "disconnected", "random"] {
             for seed in 1..=12u64 {
                 let (nodes, selected) = gate_fixture(shape, 40, 25, seed * 0x9E37_79B9 + 7);
                 let raw = build_dependency_map(&nodes, &selected);
+                topological_levels(&raw).unwrap();
                 let mut expected = raw.clone();
                 inject_test_gates_reference(&nodes, &selected, &mut expected);
                 let mut actual = raw.clone();
                 inject_test_gates(&nodes, &selected, &mut actual);
                 assert_eq!(actual, expected, "shape {shape}, seed {seed}");
-                gated_edges += actual.values().map(BTreeSet::len).sum::<usize>()
-                    - raw.values().map(BTreeSet::len).sum::<usize>();
+                topological_levels(&actual)
+                    .unwrap_or_else(|e| panic!("shape {shape}, seed {seed}: {e}"));
+
+                for (node, node_deps) in &actual {
+                    for test in node_deps.difference(&raw[node]) {
+                        gated_edges += 1;
+                        gated_snapshots += usize::from(node.starts_with("snapshot."));
+                        gated_by_seed_test +=
+                            usize::from(raw[test].iter().any(|p| p.starts_with("seed.")));
+                        multi_parent_gates += usize::from(raw[test].len() > 1);
+                    }
+                }
                 compared += 1;
             }
         }
         assert_eq!(compared, 60);
+        // The generated graphs must actually exercise the interesting cases.
         assert!(gated_edges > 0, "generated graphs never exercised a gate");
+        assert!(gated_snapshots > 0, "no snapshot was gated");
+        assert!(gated_by_seed_test > 0, "no test on a seed gated anything");
+        assert!(multi_parent_gates > 0, "no multi-parent test gated anything");
 
         // Raw cycle (m000 <-> m001 and a self-loop on m002): not a valid
         // project, but both implementations must still agree.
@@ -921,27 +990,26 @@ mod tests {
         assert!(level_of("test.m.upstream_check") < level_of("model.m.downstream"));
     }
 
-    /// A test that depends on a model and its descendant should not gate
-    /// either of those models on itself, but should still gate any *other*
-    /// downstream consumer of the same upstream.
+    /// A test that depends on a model and its descendant gates neither of
+    /// them, and does not gate another consumer of the parent either: that
+    /// consumer is not downstream of the descendant, so the test is not one of
+    /// its upstream tests.
     #[test]
-    fn inject_test_gates_partial_back_edge_still_gates_other_consumers() {
+    fn inject_test_gates_ignores_consumers_outside_the_test_lineage() {
         let mut nodes = Nodes::default();
         add_model(&mut nodes, "model.m.parent", &[]);
         add_model(&mut nodes, "model.m.child_a", &["model.m.parent"]);
         add_model(&mut nodes, "model.m.child_b", &["model.m.parent"]);
-        // Test refs parent + child_a → must not gate child_a, but child_b is fair game.
+        add_model(&mut nodes, "model.m.grandchild", &["model.m.child_a"]);
         add_test(&mut nodes, "test.m.shared", &["model.m.parent", "model.m.child_a"]);
 
-        let selected: Vec<String> = [
+        let selected = selected(&[
             "model.m.parent",
             "model.m.child_a",
             "model.m.child_b",
+            "model.m.grandchild",
             "test.m.shared",
-        ]
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+        ]);
 
         let mut deps_map = build_dependency_map(&nodes, &selected);
         inject_test_gates(&nodes, &selected, &mut deps_map);
@@ -951,11 +1019,227 @@ mod tests {
             "child_a is referenced by the test — gating it would create a cycle"
         );
         assert!(
-            deps_map["model.m.child_b"].contains("test.m.shared"),
-            "child_b shares parent's test gate but is not referenced by the test"
+            !deps_map["model.m.child_b"].contains("test.m.shared"),
+            "child_b is not downstream of child_a, which the test also covers"
         );
+        // Downstream of every parent of the test, and not an ancestor of it.
+        assert!(deps_map["model.m.grandchild"].contains("test.m.shared"));
 
         topological_levels(&deps_map).unwrap();
+    }
+
+    /// Two tests that each span two models, where each model is downstream of
+    /// the other test's second parent. Gating every consumer of a tested model
+    /// would give N1 → T1 → N2 → T2 → N1; the rule only gates what is
+    /// downstream of all of a test's parents, so no edge is added.
+    #[test]
+    fn inject_test_gates_adds_no_edge_that_closes_a_cycle_across_two_tests() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.m1", &[]);
+        add_model(&mut nodes, "model.m.m2", &[]);
+        add_model(&mut nodes, "model.m.n1", &["model.m.m1"]);
+        add_model(&mut nodes, "model.m.n2", &["model.m.m2"]);
+        add_test(&mut nodes, "test.m.t1", &["model.m.m1", "model.m.n2"]);
+        add_test(&mut nodes, "test.m.t2", &["model.m.m2", "model.m.n1"]);
+        let selected = selected(&[
+            "model.m.m1",
+            "model.m.m2",
+            "model.m.n1",
+            "model.m.n2",
+            "test.m.t1",
+            "test.m.t2",
+        ]);
+
+        let raw = build_dependency_map(&nodes, &selected);
+        let mut deps_map = raw.clone();
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert_eq!(deps_map, raw);
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// A relationships-style test on `orders` and `customers` gates what is
+    /// downstream of both, not what is downstream of only one.
+    #[test]
+    fn inject_test_gates_gates_only_nodes_downstream_of_every_parent() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.orders", &[]);
+        add_model(&mut nodes, "model.m.customers", &[]);
+        add_model(&mut nodes, "model.m.orders_only", &["model.m.orders"]);
+        add_model(&mut nodes, "model.m.customers_only", &["model.m.customers"]);
+        add_model(&mut nodes, "model.m.both", &["model.m.orders", "model.m.customers"]);
+        add_model(&mut nodes, "model.m.via_both", &["model.m.both"]);
+        add_test(&mut nodes, "test.m.relationships", &["model.m.orders", "model.m.customers"]);
+        let selected = selected(&[
+            "model.m.orders",
+            "model.m.customers",
+            "model.m.orders_only",
+            "model.m.customers_only",
+            "model.m.both",
+            "model.m.via_both",
+            "test.m.relationships",
+        ]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.both"].contains("test.m.relationships"));
+        for ungated in [
+            "model.m.orders_only",
+            "model.m.customers_only",
+            "model.m.orders",
+            "model.m.customers",
+        ] {
+            assert!(
+                !deps_map[ungated].contains("test.m.relationships"),
+                "{ungated} is not downstream of both parents"
+            );
+        }
+        // `via_both` reaches the test through `both`, so it needs no edge of its own.
+        assert!(!deps_map["model.m.via_both"].contains("test.m.relationships"));
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// Only the nodes that consume a parent directly receive an edge; a node
+    /// further down is ordered after the test through the node in between.
+    #[test]
+    fn inject_test_gates_adds_edges_to_direct_consumers_only() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.a", &[]);
+        add_model(&mut nodes, "model.m.b", &["model.m.a"]);
+        add_model(&mut nodes, "model.m.c", &["model.m.b"]);
+        add_test(&mut nodes, "test.m.a_check", &["model.m.a"]);
+        let selected = selected(&["model.m.a", "model.m.b", "model.m.c", "test.m.a_check"]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.b"].contains("test.m.a_check"));
+        assert!(!deps_map["model.m.c"].contains("test.m.a_check"));
+    }
+
+    /// A test on a seed gates the models and snapshots that read the seed.
+    #[test]
+    fn inject_test_gates_gates_consumers_of_a_tested_seed() {
+        let mut nodes = Nodes::default();
+        add_seed(&mut nodes, "seed.m.countries");
+        add_model(&mut nodes, "model.m.stg", &["seed.m.countries"]);
+        add_snapshot(&mut nodes, "snapshot.m.snap", &["seed.m.countries"]);
+        add_model(&mut nodes, "model.m.unrelated", &[]);
+        add_test(&mut nodes, "test.m.seed_check", &["seed.m.countries"]);
+        let selected = selected(&[
+            "seed.m.countries",
+            "model.m.stg",
+            "snapshot.m.snap",
+            "model.m.unrelated",
+            "test.m.seed_check",
+        ]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.stg"].contains("test.m.seed_check"));
+        assert!(deps_map["snapshot.m.snap"].contains("test.m.seed_check"));
+        assert!(!deps_map["model.m.unrelated"].contains("test.m.seed_check"));
+        assert!(!deps_map["seed.m.countries"].contains("test.m.seed_check"));
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// A test on a snapshot gates the models downstream of the snapshot, and a
+    /// snapshot is itself gated by the tests of the models it reads.
+    #[test]
+    fn inject_test_gates_gates_through_and_into_snapshots() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.base", &[]);
+        add_snapshot(&mut nodes, "snapshot.m.snap", &["model.m.base"]);
+        add_model(&mut nodes, "model.m.report", &["snapshot.m.snap"]);
+        add_test(&mut nodes, "test.m.base_check", &["model.m.base"]);
+        add_test(&mut nodes, "test.m.snap_check", &["snapshot.m.snap"]);
+        let selected = selected(&[
+            "model.m.base",
+            "snapshot.m.snap",
+            "model.m.report",
+            "test.m.base_check",
+            "test.m.snap_check",
+        ]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["snapshot.m.snap"].contains("test.m.base_check"));
+        assert!(deps_map["model.m.report"].contains("test.m.snap_check"));
+        assert!(!deps_map["model.m.report"].contains("test.m.base_check"));
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// A test on a source gates the models that read the source.
+    #[test]
+    fn inject_test_gates_gates_consumers_of_a_tested_source() {
+        let mut nodes = Nodes::default();
+        add_source(&mut nodes, "source.m.raw.orders");
+        add_model(&mut nodes, "model.m.stg", &["source.m.raw.orders"]);
+        add_test(&mut nodes, "test.m.source_check", &["source.m.raw.orders"]);
+        let selected = selected(&["source.m.raw.orders", "model.m.stg", "test.m.source_check"]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.stg"].contains("test.m.source_check"));
+        assert!(!deps_map["source.m.raw.orders"].contains("test.m.source_check"));
+        topological_levels(&deps_map).unwrap();
+    }
+
+    /// Unit tests are wired by `inject_unit_test_gates` (they run before the
+    /// model they test) and are not gated by data tests on their model's inputs.
+    #[test]
+    fn inject_test_gates_leaves_unit_tests_alone() {
+        let mut nodes = Nodes::default();
+        add_model(&mut nodes, "model.m.upstream", &[]);
+        add_model(&mut nodes, "model.m.tested", &["model.m.upstream"]);
+        add_unit_test_node(&mut nodes, "unit_test.m.u", &["model.m.upstream"]);
+        add_test(&mut nodes, "test.m.upstream_check", &["model.m.upstream"]);
+        let selected = selected(&[
+            "model.m.upstream",
+            "model.m.tested",
+            "unit_test.m.u",
+            "test.m.upstream_check",
+        ]);
+
+        let mut deps_map = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut deps_map);
+
+        assert!(deps_map["model.m.tested"].contains("test.m.upstream_check"));
+        assert_eq!(deps_map["unit_test.m.u"], BTreeSet::from(["model.m.upstream".to_string()]));
+        assert_eq!(deps_map["test.m.upstream_check"].len(), 1);
+    }
+
+    /// Selection order must not change the planned edges.
+    #[test]
+    fn inject_test_gates_is_independent_of_selection_order() {
+        let (nodes, selected) = gate_fixture("random", 40, 25, 0x00C0_FFEE);
+        let mut reversed = selected.clone();
+        reversed.reverse();
+
+        let mut forward = build_dependency_map(&nodes, &selected);
+        inject_test_gates(&nodes, &selected, &mut forward);
+        let mut backward = build_dependency_map(&nodes, &reversed);
+        inject_test_gates(&nodes, &reversed, &mut backward);
+
+        assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn ancestor_index_answers_for_unknown_nodes() {
+        let graph = deps(&[("b", &["a"]), ("a", &[])]);
+        let index = AncestorIndex::new(&graph, &["b"]);
+        let a = "a".to_string();
+        let missing = "missing".to_string();
+
+        assert!(index.has_all_ancestors("b", [&a]));
+        assert!(index.has_all_ancestors("b", []));
+        assert!(!index.has_all_ancestors("b", [&a, &missing]));
+        assert!(!index.has_all_ancestors("missing", [&a]));
+        assert!(!index.has_all_ancestors("a", [&a]));
     }
 
     /// Phantom test nodes (zero `depends_on` — issue #2's symptom) must not

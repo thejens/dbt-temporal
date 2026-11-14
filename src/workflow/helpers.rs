@@ -237,54 +237,19 @@ fn bounded_node_status(tree: &NodeStatusTree) -> NodeStatusTree {
 }
 
 pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Skipped,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Skipped, Some(message.to_string()))
 }
 
 pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Cancelled,
-        execution_time: 0.0,
-        message: Some("cancelled".to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(
+        unique_id,
+        NodeStatus::Cancelled,
+        Some("cancelled".to_string()),
+    )
 }
 
 pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Error,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Error, Some(message.to_string()))
 }
 
 /// English pluralisation suffix: empty for 1, "s" otherwise.
@@ -1188,19 +1153,7 @@ mod tests {
     }
 
     fn result_with_status(uid: &str, status: NodeStatus) -> NodeExecutionResult {
-        NodeExecutionResult {
-            unique_id: uid.to_string(),
-            status,
-            execution_time: 0.0,
-            message: None,
-            adapter_response: BTreeMap::new(),
-            compiled_code: None,
-            timing: vec![],
-            failures: None,
-            freshness: None,
-            compiled_code_ref: None,
-            relation_name: None,
-        }
+        NodeExecutionResult::not_executed(uid, status, None)
     }
 
     fn tree_from_statuses(statuses: &[NodeStatus]) -> NodeStatusTree {

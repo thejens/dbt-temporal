@@ -153,10 +153,21 @@ async fn load_defer_nodes(
         return Ok(None);
     };
     // A manifest at a given reference is the run that produced it — immutable,
-    // and the same for every node of this run.
-    if let Some(cached) = state.defer_manifests.get(manifest_ref) {
-        return Ok(Some(cached));
-    }
+    // and the same for every node of this run, so the first node loads it and
+    // the rest wait for that load.
+    let nodes = state
+        .defer_manifests
+        .get_or_load(manifest_ref, || fetch_defer_nodes(activities, state, manifest_ref))
+        .await?;
+    Ok(Some(nodes))
+}
+
+/// Download and decode the manifest at `manifest_ref`.
+async fn fetch_defer_nodes(
+    activities: &DbtActivities,
+    state: &crate::worker_state::WorkerState,
+    manifest_ref: &str,
+) -> Result<Arc<dbt_schemas::schemas::Nodes>, anyhow::Error> {
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "defer_manifest_ref requires artifact storage to be configured \
@@ -187,12 +198,9 @@ async fn load_defer_nodes(
         identifier: Some(resolved.identifier),
         snowflake_ignore_case: None,
     };
-    let nodes =
-        Arc::new(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting));
-    state
-        .defer_manifests
-        .insert(manifest_ref, Arc::clone(&nodes));
-    Ok(Some(nodes))
+    Ok(Arc::new(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(
+        manifest, quoting,
+    )))
 }
 
 /// Build the compile+run base context.

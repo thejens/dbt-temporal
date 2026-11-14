@@ -102,15 +102,7 @@ pub fn expand_from_seeds(
 /// those descendants — everything needed to build the seeds' whole downstream.
 pub fn childrens_parents(maps: &DependencyMaps, seeds: &BTreeSet<String>) -> BTreeSet<String> {
     let descendants = expand_from_seeds(seeds, &maps.reverse, u32::MAX);
-    // Every ancestor of a descendant is an ancestor of some leaf, or is itself
-    // a descendant that leads to one, so walking up from the leaves alone
-    // reaches the same set as walking up from all descendants.
-    let leaves: BTreeSet<String> = descendants
-        .iter()
-        .filter(|node| maps.reverse.get(*node).is_none_or(BTreeSet::is_empty))
-        .cloned()
-        .collect();
-    expand_from_seeds(&leaves, &maps.deps, u32::MAX)
+    expand_from_seeds(&descendants, &maps.deps, u32::MAX)
 }
 
 #[cfg(test)]

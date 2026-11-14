@@ -33,9 +33,8 @@ use dbt_common::node_selector::{
 use dbt_schemas::schemas::Nodes;
 
 use criteria::{Criterion, MatchContext, criterion_support_error};
-use graph::LazyDependencyMaps;
 
-pub use graph::{DependencyMaps, reverse_dep_map};
+pub use graph::{DependencyMaps, LazyDependencyMaps, reverse_dep_map};
 pub use state::StateSelector;
 
 /// Apply --select and --exclude filters to a list of node IDs.
@@ -43,15 +42,15 @@ pub use state::StateSelector;
 /// `state` backs the `state:` methods; selectors using them match nothing when
 /// it is `None` (the planner validates this upfront).
 ///
-/// `expand_indirect` receives the project's dependency maps, built at most once
-/// per call and only if a graph operator or the expansion itself needs them.
+/// `expand_indirect` receives the project's dependency maps, which are built at
+/// most once per call, on the first graph operator or expansion that reads them.
 pub fn apply_selectors(
     mut selected_ids: Vec<String>,
     nodes: &Nodes,
     select: Option<&str>,
     exclude: Option<&str>,
     state: Option<&StateSelector>,
-    expand_indirect: &dyn Fn(Vec<String>, &DependencyMaps) -> Vec<String>,
+    expand_indirect: &dyn Fn(Vec<String>, &LazyDependencyMaps<'_>) -> Vec<String>,
 ) -> Result<Vec<String>, anyhow::Error> {
     let select_expr = parse_selector(select).context("invalid --select")?;
     let exclude_expr = parse_selector(exclude).context("invalid --exclude")?;
@@ -93,7 +92,7 @@ pub fn apply_selectors(
     // exclusion instead lets a test that was named in `--exclude` come back in
     // through the model it hangs off — undoing the one thing the user asked
     // for by name.
-    selected_ids = expand_indirect(selected_ids, graph.get());
+    selected_ids = expand_indirect(selected_ids, &graph);
 
     if let Some(expr) = exclude_expr {
         let matched = resolve_expression(nodes, &graph, ctx, &expr)?;
@@ -103,7 +102,7 @@ pub fn apply_selectors(
         // tests hanging off it. Subtracting only the literal matches left those
         // tests in the run, querying a model the same command had declined to
         // build.
-        let excluded = expand_indirect(matched.into_iter().collect(), graph.get());
+        let excluded = expand_indirect(matched.into_iter().collect(), &graph);
         let excluded: BTreeSet<&str> = excluded.iter().map(String::as_str).collect();
         selected_ids.retain(|uid| !excluded.contains(uid.as_str()));
     }
@@ -295,7 +294,7 @@ mod tests {
 
     /// Selection tests drive `--select`/`--exclude` alone; the expansion hook
     /// is exercised by the indirect-selection tests and by `plan_project`.
-    fn no_expansion(ids: Vec<String>, _: &DependencyMaps) -> Vec<String> {
+    fn no_expansion(ids: Vec<String>, _: &LazyDependencyMaps<'_>) -> Vec<String> {
         ids
     }
 

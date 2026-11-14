@@ -24,7 +24,7 @@ use std::str::FromStr;
 use dbt_schemas::schemas::Nodes;
 use dbt_schemas::schemas::nodes::InternalDbtNode;
 
-use super::selectors::DependencyMaps;
+use super::selectors::{DependencyMaps, LazyDependencyMaps};
 
 /// How aggressively to pull in tests that hang off the selected nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,7 +70,7 @@ impl FromStr for IndirectSelection {
 pub fn expand_indirect_selection(
     selected: Vec<String>,
     nodes: &Nodes,
-    maps: &DependencyMaps,
+    maps: &LazyDependencyMaps<'_>,
     eligible: &BTreeSet<String>,
     mode: IndirectSelection,
 ) -> Vec<String> {
@@ -80,9 +80,10 @@ pub fn expand_indirect_selection(
 
     let selected_set: BTreeSet<String> = selected.iter().cloned().collect();
 
-    // `maps` spans *every* node, not just the selection: the tests we are
-    // looking for are by definition outside it.
-    let DependencyMaps { deps, reverse } = maps;
+    // The maps span *every* node, not just the selection: the tests we are
+    // looking for are by definition outside it. Read only past the early
+    // return above, so a run without indirect selection never builds them.
+    let DependencyMaps { deps, reverse } = maps.get();
 
     // `buildable` also accepts parents that the run could have built — anything
     // upstream of the selection — plus sources, which are never "built" but
@@ -205,7 +206,7 @@ mod tests {
         let nodes = Nodes::default();
         let selected = vec!["model.p.a".to_string()];
         let eligible = BTreeSet::new();
-        let maps = DependencyMaps::default();
+        let maps = LazyDependencyMaps::new(&nodes);
         assert_eq!(
             expand_indirect_selection(
                 selected.clone(),

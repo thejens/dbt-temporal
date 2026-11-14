@@ -12,7 +12,7 @@ mod common;
 use common::duckdb::Harness;
 use dbt_temporal::activities::indirect::{IndirectSelection, expand_indirect_selection};
 use dbt_temporal::activities::plan::select_command_node_ids;
-use dbt_temporal::activities::selectors::{DependencyMaps, apply_selectors};
+use dbt_temporal::activities::selectors::{LazyDependencyMaps, apply_selectors};
 use dbt_temporal::types::DbtRunInput;
 
 /// A model with a test, plus a second model the shared test also depends on.
@@ -228,7 +228,7 @@ async fn expanding_a_full_selection_adds_nothing() {
     let expanded = expand_indirect_selection(
         all.clone(),
         nodes,
-        &DependencyMaps::build(nodes),
+        &LazyDependencyMaps::new(nodes),
         &eligible,
         IndirectSelection::Eager,
     );

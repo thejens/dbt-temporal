@@ -24,8 +24,7 @@ use std::str::FromStr;
 use dbt_schemas::schemas::Nodes;
 use dbt_schemas::schemas::nodes::InternalDbtNode;
 
-use super::dag::build_dependency_map;
-use super::selectors::reverse_dep_map;
+use super::selectors::DependencyMaps;
 
 /// How aggressively to pull in tests that hang off the selected nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +70,7 @@ impl FromStr for IndirectSelection {
 pub fn expand_indirect_selection(
     selected: Vec<String>,
     nodes: &Nodes,
+    maps: &DependencyMaps,
     eligible: &BTreeSet<String>,
     mode: IndirectSelection,
 ) -> Vec<String> {
@@ -80,23 +80,21 @@ pub fn expand_indirect_selection(
 
     let selected_set: BTreeSet<String> = selected.iter().cloned().collect();
 
-    // Dependencies over *every* node, not just the selection: the tests we are
+    // `maps` spans *every* node, not just the selection: the tests we are
     // looking for are by definition outside it.
-    let all_ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
-    let deps = build_dependency_map(nodes, &all_ids);
-    let reverse = reverse_dep_map(&deps);
+    let DependencyMaps { deps, reverse } = maps;
 
     // `buildable` also accepts parents that the run could have built — anything
     // upstream of the selection — plus sources, which are never "built" but
     // always available.
     let reachable = if mode == IndirectSelection::Buildable {
-        Some(selection_with_ancestors(&selected_set, &deps, nodes))
+        Some(selection_with_ancestors(&selected_set, deps, nodes))
     } else {
         None
     };
 
     let mut added = Vec::new();
-    for candidate in dependents_of(&selected_set, &reverse) {
+    for candidate in dependents_of(&selected_set, reverse) {
         if selected_set.contains(&candidate) || !eligible.contains(&candidate) {
             continue;
         }
@@ -207,17 +205,19 @@ mod tests {
         let nodes = Nodes::default();
         let selected = vec!["model.p.a".to_string()];
         let eligible = BTreeSet::new();
+        let maps = DependencyMaps::default();
         assert_eq!(
             expand_indirect_selection(
                 selected.clone(),
                 &nodes,
+                &maps,
                 &eligible,
                 IndirectSelection::Empty
             ),
             selected
         );
         assert_eq!(
-            expand_indirect_selection(vec![], &nodes, &eligible, IndirectSelection::Eager),
+            expand_indirect_selection(vec![], &nodes, &maps, &eligible, IndirectSelection::Eager),
             Vec::<String>::new()
         );
     }

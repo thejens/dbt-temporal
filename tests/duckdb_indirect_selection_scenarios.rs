@@ -12,7 +12,7 @@ mod common;
 use common::duckdb::Harness;
 use dbt_temporal::activities::indirect::{IndirectSelection, expand_indirect_selection};
 use dbt_temporal::activities::plan::select_command_node_ids;
-use dbt_temporal::activities::selectors::apply_selectors;
+use dbt_temporal::activities::selectors::{DependencyMaps, apply_selectors};
 use dbt_temporal::types::DbtRunInput;
 
 /// A model with a test, plus a second model the shared test also depends on.
@@ -62,8 +62,8 @@ fn selected_for_command(
     let all = select_command_node_ids(harness.state(), &input).unwrap();
     let eligible: std::collections::BTreeSet<String> = all.iter().cloned().collect();
     let nodes = &harness.state().resolver_state.nodes;
-    apply_selectors(all, nodes, Some(select), exclude, None, &|ids| {
-        expand_indirect_selection(ids, nodes, &eligible, mode)
+    apply_selectors(all, nodes, Some(select), exclude, None, &|ids, maps| {
+        expand_indirect_selection(ids, nodes, maps, &eligible, mode)
     })
     .unwrap()
 }
@@ -224,9 +224,11 @@ async fn expanding_a_full_selection_adds_nothing() {
     let all = select_command_node_ids(harness.state(), &input).unwrap();
 
     let eligible: std::collections::BTreeSet<String> = all.iter().cloned().collect();
+    let nodes = &harness.state().resolver_state.nodes;
     let expanded = expand_indirect_selection(
         all.clone(),
-        &harness.state().resolver_state.nodes,
+        nodes,
+        &DependencyMaps::build(nodes),
         &eligible,
         IndirectSelection::Eager,
     );

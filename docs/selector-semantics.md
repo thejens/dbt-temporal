@@ -127,8 +127,26 @@ as a whole path component) when it does.
 | `column:` | **no** | dbt-internal column lineage, not a run selector |
 | `selector:` | **no** | names a `selectors.yml` definition, which is not read |
 
-Graph operators (`+model`, `model+`, `N+model`, `@model`), unions (space),
-intersections (comma) and nested excludes all work with any supported method.
+Graph operators (`+model`, `model+`, `N+model`, `@model`), unions (space) and
+intersections (comma) work with any supported method.
+
+Graph operators expand all nodes the selector matched in one walk per
+direction, so `tag:nightly+` over many matches costs a single traversal. A
+depth limit (`2+model`, `model+3`) applies from the nearest matched node.
+
+`@model` selects the model, all of its descendants, and every ancestor of those
+descendants: everything needed to build the model's whole downstream. It
+applies to whatever the criterion matched, so `@tag:nightly` and
+`@source:raw.orders` take each match's downstream and its ancestry. Where a `+`
+operator is also present (`@+model`) the `+` operator wins and the `@` has no
+effect, as in dbt v2's scheduler.
+
+Whether a run needs a previous manifest for `state:` is decided from the parsed
+selectors, so `tag:my_state:thing` does not trigger it.
+
+An exclude expression nested inside a compound selector exists in dbt only in
+`selectors.yml` definitions. The text a worker receives cannot express one, and
+a selector tree that contains one is rejected rather than read as an include.
 
 A selector may name a resource type the command cannot execute. The command's
 own node-type filter runs first, so `--select exposure:weekly` under `run`

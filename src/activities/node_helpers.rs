@@ -20,7 +20,6 @@ const NO_LISTENERS: &[Rc<dyn RenderingEventListener>] = &[];
 ///
 /// Prefer `MaterializationResolver::find_materialization_macro_by_name()` for production use;
 /// this function is kept for the debug_render example.
-#[allow(dead_code)]
 pub fn find_materialization_template(
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     suffix: &str,

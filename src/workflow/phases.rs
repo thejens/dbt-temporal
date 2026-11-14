@@ -10,7 +10,6 @@
 
 // WorkflowContext uses Rc internally — the run() method already silences
 // this same lint for the same reason.
-#![allow(clippy::future_not_send)]
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;

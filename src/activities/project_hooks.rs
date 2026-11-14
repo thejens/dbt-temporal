@@ -161,7 +161,6 @@ async fn with_prior_segments(
 
 /// The synchronous half of [`run_project_hooks_inner`]: render and run each
 /// hook in order.
-#[allow(clippy::too_many_lines)]
 // Sequential render-then-execute over the phase's hooks.
 fn run_project_hooks_body(
     state: &WorkerState,

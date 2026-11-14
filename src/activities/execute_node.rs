@@ -632,10 +632,6 @@ fn build_test_kwargs_map(
 /// classification. It is also the entry point for integration tests that drive
 /// real nodes against an embedded engine (e.g. the DuckDB scenario harness),
 /// where standing up a Temporal `ActivityContext` would add nothing.
-#[allow(clippy::too_many_lines, clippy::unused_async)]
-// Sequential adapter interaction with setup, execution, and result extraction.
-// Kept async so tokio::select! in execute_node_outer can poll it against
-// ctx.cancelled() and the heartbeat ticker.
 pub async fn execute_node_inner(
     activities: &DbtActivities,
     input: NodeExecutionInput,
@@ -1133,9 +1129,9 @@ fn execute_node_body(
     // Run the freshness check instead of a materialization and return early.
     // A stale node (error_after exceeded) reports `NodeStatus::Error` with its
     // measurement attached, rather than failing the activity — see
-    // `domain_failure_message`. A warning succeeds, because `NodeStatus` has no
-    // warning state; the "warn" survives on the outcome and in the node
-    // message, which is what the run log and run_results.json show.
+    // `domain_failure_message`. A warning (warn_after exceeded) does not fail
+    // the activity either: it reports `NodeStatus::Warn`, with the measurement
+    // on the outcome and the age in the node message.
     if measures_freshness {
         let freshness_node = freshness::as_freshness_node(
             &state.resolver_state.nodes,

@@ -28,9 +28,7 @@ use crate::workflow::DbtRunWorkflow;
 
 // `worker` is `pub mod`, so `pub use` here would leak these out of the
 // crate. The clippy lint mistakenly assumes the parent is private.
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) use self::adapter::build_artifact_store;
-#[allow(clippy::redundant_pub_crate)]
 pub(crate) use self::profile::rebuild_adapter_engines_with_env;
 
 /// Build a fully configured Temporal worker (without starting it).
@@ -38,7 +36,7 @@ pub(crate) use self::profile::rebuild_adapter_engines_with_env;
 /// Returns the worker ready to call `.run()`. Separated from `run_worker`
 /// so integration tests can spawn the worker in a background task.
 ///
-#[allow(clippy::large_futures, clippy::significant_drop_tightening)]
+#[allow(clippy::large_futures)]
 // Large futures from SDK initialization; drop suggestion is a false positive on core_worker.
 pub async fn build_worker(config: &DbtTemporalConfig) -> Result<Worker> {
     build_worker_with_auth(config, None).await
@@ -49,7 +47,7 @@ pub async fn build_worker(config: &DbtTemporalConfig) -> Result<Worker> {
 /// When `auth_override` is `Some`, the adapter engine uses the provided `Auth`
 /// implementation instead of the default one derived from the profile type.
 /// This allows tests to redirect SQL execution to a different backend.
-#[allow(clippy::large_futures, clippy::significant_drop_tightening)]
+#[allow(clippy::large_futures)]
 // Large futures from SDK initialization; drop suggestion is a false positive on core_worker.
 pub async fn build_worker_with_auth(
     config: &DbtTemporalConfig,
@@ -139,7 +137,6 @@ async fn build_project_registry(
 }
 
 /// Connect to Temporal and register workflows/activities on a new worker.
-#[allow(clippy::significant_drop_tightening)] // False positive: core_worker is moved into Arc, not dropped.
 pub async fn connect_and_register(
     config: &DbtTemporalConfig,
     registry: Arc<ProjectRegistry>,
@@ -249,7 +246,6 @@ async fn list_registered_search_attributes(
     }
 }
 
-/// Build and run the Temporal worker.
 /// Startup warning to emit when `NEXUS_ENABLED` is set, or `None`. Extracted so
 /// the gating is unit-testable without starting a worker. The Temporal Rust SDK
 /// can't serve Nexus operation handlers yet, so the flag is currently a no-op —
@@ -277,6 +273,7 @@ fn resolve_health_path(
         .or_else(|| health_port.map(|_| std::path::PathBuf::from("/tmp/health")))
 }
 
+/// Build and run the Temporal worker.
 #[allow(clippy::future_not_send, clippy::large_futures)]
 // future_not_send: Temporal SDK Worker is !Send by design.
 // large_futures: build_worker returns a large future from SDK initialization.
@@ -648,17 +645,18 @@ async fn initialize_project_inner(
     })
 }
 
+/// Compiled, snapshot and generic-test SQL, each keyed by node unique id.
+type SqlCaches = (BTreeMap<String, String>, BTreeMap<String, String>, BTreeMap<String, String>);
+
 /// Capture compiled SQL and snapshot raw SQL from the target directory into memory.
 ///
 /// After the resolve step, dbt-fusion has written compiled SQL to `out_dir/compiled/`
 /// and snapshot SQL to `out_dir/`. We read these into BTreeMaps keyed by the node's
-/// `common_attr.path` so activities can write them into ephemeral temp dirs.
+/// unique id so activities can write them into ephemeral temp dirs.
 ///
 /// The compiled layout nests under package name and varies by resource type, so
 /// it comes from fusion's own `get_node_path_abs` rather than a reconstruction —
 /// a path that only *looks* right yields an empty cache and no error.
-type SqlCaches = (BTreeMap<String, String>, BTreeMap<String, String>, BTreeMap<String, String>);
-
 fn build_sql_caches(
     nodes: &dbt_schemas::schemas::Nodes,
     in_dir: &std::path::Path,

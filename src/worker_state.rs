@@ -110,6 +110,9 @@ pub struct WorkerState {
     /// index cannot go stale while the worker lives, so every run's gate is a
     /// pure read of it.
     pub project_checks: Option<ProjectChecks>,
+    /// The project's manifest body, serialized by the first run that writes
+    /// artifacts and reused by every later one.
+    pub manifest: crate::activities::plan::ManifestCache,
 }
 
 impl std::fmt::Debug for WorkerState {

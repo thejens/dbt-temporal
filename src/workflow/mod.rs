@@ -13,6 +13,8 @@
 mod helpers;
 mod levels;
 mod phases;
+mod ready_queue;
+pub mod scheduler;
 mod search_attributes;
 
 use std::collections::BTreeMap;
@@ -26,21 +28,23 @@ use temporalio_sdk::{
 };
 
 use crate::types::{
-    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatus, RunResumeState,
-    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunOutcome, RunPhase,
+    RunResumeState, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
-    RunClock, RunFacts, build_effective_env, build_freshness_summary_line, build_summary_lines,
-    elapsed_secs, format_final_details, upsert_memo_state,
+    NodeStatusSummary, READY_QUEUE_PATCH, RunClock, RunFacts, SINGLE_TERMINAL_MEMO_PATCH,
+    build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
+    format_final_details, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
-    HookPolicy, RunRecord, build_list_output, load_segment_state, plan_and_announce,
-    resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks, run_pre_run_hooks,
-    run_project_checks, save_segment_state, store_run_artifacts, upsert_terminal_status,
-    write_command_memo,
+    HookPolicy, OnRunEndRecord, RunRecord, build_list_output, load_segment_state,
+    plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks,
+    run_pre_run_hooks, run_project_checks, save_segment_state, store_run_artifacts,
+    upsert_terminal_status, write_command_memo,
 };
+use self::ready_queue::ReadyQueueRun;
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
 #[workflow]
@@ -50,7 +54,8 @@ pub struct DbtRunWorkflow {
     /// and level boundaries.
     status: RunStatusSnapshot,
     /// Mid-run fail-fast override set by the `set_fail_fast` update; the level
-    /// loop consults it at each level boundary.
+    /// loop consults it at each level boundary, the ready queue before each
+    /// scheduling decision.
     fail_fast_override: Option<bool>,
 }
 
@@ -60,7 +65,7 @@ impl DbtRunWorkflow {
     fn new(_ctx: &WorkflowContextView, input: DbtRunInput) -> Self {
         let fail_fast_override = inherited_fail_fast_override(&input);
         let status = RunStatusSnapshot {
-            phase: "initializing".to_string(),
+            phase: RunPhase::Initializing,
             fail_fast: fail_fast_override.unwrap_or(input.fail_fast),
             ..RunStatusSnapshot::default()
         };
@@ -80,9 +85,10 @@ impl DbtRunWorkflow {
         self.status.clone()
     }
 
-    /// Toggle fail-fast mid-run. Takes effect at the next level boundary:
-    /// enabling it after a failure stops scheduling further levels; disabling
-    /// it lets a run configured with fail_fast continue past failures.
+    /// Toggle fail-fast mid-run. Takes effect at the next scheduling decision
+    /// (the next level boundary when scheduling by level): enabling it after a
+    /// failure stops starting further nodes; disabling it lets a run configured
+    /// with fail_fast continue past failures.
     ///
     /// `temporal workflow update execute -w <id> --name set_fail_fast -i true`
     #[update]
@@ -120,7 +126,7 @@ impl DbtRunWorkflow {
             .and_then(|state| state.started_at)
             .map_or(start, |t| Some(std::time::SystemTime::from(t)));
 
-        ctx.state_mut(|s| s.status.phase = "planning".to_string());
+        ctx.state_mut(|s| s.status.phase = RunPhase::Planning);
         // Timeouts come from dbt_temporal.yml, but planning happens before that is
         // resolved — use the built-in default for the plan activity itself.
         let plan = match resumed.as_ref() {
@@ -130,13 +136,13 @@ impl DbtRunWorkflow {
         ctx.state_mut(|s| {
             s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
             s.status.total_levels = plan.levels.len();
-            s.status.phase = "pre_run_hooks".to_string();
+            s.status.phase = RunPhase::PreRunHooks;
         });
 
         // list: return the selected node set without executing any SQL.
         if DbtCommand::parse(&input.command) == Some(DbtCommand::List) {
             let out = build_list_output(&plan, elapsed_secs(start, ctx.workflow_time()));
-            upsert_terminal_status(ctx, &plan, "passed")?;
+            upsert_terminal_status(ctx, &plan, RunOutcome::Passed)?;
             ctx.set_current_details("list".to_string());
             return Ok(out);
         }
@@ -179,7 +185,7 @@ impl DbtRunWorkflow {
             )
             .await?
             {
-                upsert_terminal_status(ctx, &plan, "skipped")?;
+                upsert_terminal_status(ctx, &plan, RunOutcome::Skipped)?;
                 ctx.set_current_details("skipped by pre_run hook".to_string());
                 return Ok(out);
             }
@@ -191,9 +197,9 @@ impl DbtRunWorkflow {
             run_on_run_start(ctx, &input, &plan, &effective_env, hook_policy).await?;
         }
 
-        ctx.state_mut(|s| s.status.phase = "executing".to_string());
+        ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
         let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
-        let mut levels = execute_levels(
+        let mut levels = execute_nodes(
             ctx,
             &input,
             &plan,
@@ -218,15 +224,23 @@ impl DbtRunWorkflow {
             return continue_run_as_new(ctx, &input, &plan, state).await;
         }
         ctx.state_mut(|s| {
-            s.status.phase = "finalizing".to_string();
+            s.status.phase = RunPhase::Finalizing;
+            // `tally` adds to the warned count instead of replacing it, and
+            // both scheduling paths may already have published one.
+            s.status.warned = 0;
             s.status.tally(&levels.node_status);
         });
 
-        // Final memo upsert with all nodes in terminal state.
-        upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
+        // A finished run's memo is written once, after the summary line. Only
+        // the cancelled path returns before that write, so it publishes its
+        // terminal state here. Replays of histories recorded before the patch
+        // keep the unconditional write.
+        if levels.was_cancelled || !ctx.patched(SINGLE_TERMINAL_MEMO_PATCH) {
+            upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
+        }
 
         if levels.was_cancelled {
-            upsert_terminal_status(ctx, &plan, "cancelled")?;
+            upsert_terminal_status(ctx, &plan, RunOutcome::Cancelled)?;
             ctx.set_current_details("cancelled".to_string());
             return Err(WorkflowTermination::cancelled());
         }
@@ -260,7 +274,10 @@ impl DbtRunWorkflow {
             &input,
             &plan,
             &effective_env,
-            &levels.all_results,
+            OnRunEndRecord {
+                results: &levels.all_results,
+                prior_segments: &levels.prior_segments,
+            },
             &mut hook_errors,
             HookPolicy {
                 timeouts: &timeouts,
@@ -269,12 +286,15 @@ impl DbtRunWorkflow {
         )
         .await;
 
+        // Evaluated before `all_results` moves into the output.
+        let node_results_partial = !levels.prior_segments.is_empty();
         let mut output = DbtRunOutput {
             invocation_id: plan.invocation_id.clone(),
             success: !levels.had_failure,
             skipped: false,
             skip_reason: None,
             node_results: levels.all_results,
+            node_results_partial,
             elapsed_time: elapsed_secs(start, ctx.workflow_time()),
             log_path,
             artifacts,
@@ -296,22 +316,26 @@ impl DbtRunWorkflow {
         output.hook_errors = hook_errors;
 
         ctx.set_current_details(format_final_details(
-            &output.node_results,
+            &levels.node_status,
             success,
             output.elapsed_time,
         ));
-        upsert_terminal_status(ctx, &plan, if success { "passed" } else { "failed" })?;
+        upsert_terminal_status(
+            ctx,
+            &plan,
+            if success {
+                RunOutcome::Passed
+            } else {
+                RunOutcome::Failed
+            },
+        )?;
 
         if success {
             Ok(output)
         } else {
             // Fail the workflow so Temporal marks it FAILED (not COMPLETED).
             // Structured output is already persisted in memo for callers to inspect.
-            let error_count = output
-                .node_results
-                .iter()
-                .filter(|r| r.status == NodeStatus::Error)
-                .count();
+            let error_count = NodeStatusSummary::tally(&levels.node_status).error;
             Err(WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
                 anyhow::anyhow!(
                     "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"
@@ -339,6 +363,38 @@ async fn load_resume_state(
         "resuming run after continue-as-new"
     );
     Ok(Some(state))
+}
+
+/// Execute the plan's nodes, by readiness where the run may.
+///
+/// The level loop and the ready queue issue different command sequences. A run
+/// whose history was recorded by the level loop has no patch marker, so
+/// `patched` is false for it on replay and it keeps the level loop; an
+/// execution that starts under this code records the marker and takes the ready
+/// queue. That includes the successor of a run that continued as new from the
+/// level loop: it is a new execution, and the checkpoint's node statuses and
+/// failures are all the ready queue needs to pick up where the level loop
+/// stopped.
+async fn execute_nodes(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    input: &DbtRunInput,
+    plan: &ExecutionPlan,
+    retry_config: &RetryConfig,
+    timeouts: &TimeoutConfig,
+    effective_env: &BTreeMap<String, String>,
+    resume: ResumePoint,
+) -> Result<levels::LevelExecutionOutcome, WorkflowTermination> {
+    if ctx.patched(READY_QUEUE_PATCH) {
+        match ReadyQueueRun::new(plan, input, retry_config, timeouts, effective_env, &resume) {
+            Ok(run) => return run.execute(ctx).await,
+            // The plan's levels are valid by construction; edges that disagree
+            // with them are not something to schedule by.
+            Err(e) => {
+                tracing::warn!(error = %e, "plan edges are not schedulable by readiness — running level by level");
+            }
+        }
+    }
+    execute_levels(ctx, input, plan, retry_config, timeouts, effective_env, resume).await
 }
 
 /// Build the level loop's starting point, fresh or resumed.
@@ -477,20 +533,22 @@ fn build_segment_state(
 ///
 /// A freshness run gets one line more: its three-way grading does not fit the
 /// pass/error/skip tally.
+///
+/// Counted from the status tree, which covers every planned node of every
+/// segment; `all_results` holds only the final segment of a continued run, so
+/// counting it would pair per-segment tallies with a whole-run TOTAL.
 fn append_run_summary(levels: &mut levels::LevelExecutionOutcome, elapsed: f64, command: &str) {
-    let count_status = |s: NodeStatus| levels.all_results.iter().filter(|r| r.status == s).count();
-    let pass = count_status(NodeStatus::Success);
-    let warn = count_status(NodeStatus::Warn);
-    let error = count_status(NodeStatus::Error);
-    let skip = count_status(NodeStatus::Skipped);
+    let tally = NodeStatusSummary::tally(&levels.node_status);
     levels.log_lines.extend(build_summary_lines(
         levels.total_nodes,
         elapsed,
-        pass,
-        warn,
-        error,
-        skip,
+        tally.success,
+        tally.warn,
+        tally.error,
+        tally.skipped,
     ));
+    // A freshness plan is one level, and a run only continues between levels,
+    // so its results never span segments.
     if DbtCommand::parse(command).is_some_and(DbtCommand::is_freshness) {
         levels
             .log_lines
@@ -700,6 +758,40 @@ mod continuation_tests {
         assert_eq!(second.prior_segments, vec!["seg-0.json".to_string()]);
         let point = build_resume_point(&plan(), Some(control_from(second, "seg-1.json")), true);
         assert_eq!(point.prior_segments, vec!["seg-0.json".to_string(), "seg-1.json".to_string()]);
+    }
+
+    /// The shape of a continued run: the final segment holds one result, while
+    /// the tree names every node. The summary's counts and TOTAL come from the
+    /// tree, so they agree.
+    #[test]
+    fn run_summary_counts_the_whole_tree_on_a_continued_run() {
+        let mut level_outcome = outcome();
+        level_outcome.total_nodes = 6;
+        level_outcome.node_status = NodeStatusTree {
+            nodes: [
+                NodeStatus::Success,
+                NodeStatus::Success,
+                NodeStatus::Warn,
+                NodeStatus::Error,
+                NodeStatus::Skipped,
+                NodeStatus::Skipped,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, status)| (format!("model.p.n{i}"), status))
+            .collect(),
+        };
+        level_outcome.log_lines.clear();
+
+        append_run_summary(&mut level_outcome, 2.0, "run");
+
+        assert_eq!(
+            level_outcome.log_lines,
+            vec![
+                "Finished running 6 nodes in 2.00s.".to_string(),
+                "Done. PASS=2 WARN=1 ERROR=1 SKIP=2 TOTAL=6".to_string(),
+            ]
+        );
     }
 
     /// Without an artifact store there is nowhere to spill, so a resumed point

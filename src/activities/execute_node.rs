@@ -363,7 +363,7 @@ fn grade_freshness(
 fn freshness_summary(outcome: &crate::types::FreshnessOutcome) -> String {
     format!(
         "freshness {} (age {:.0}s, max_loaded_at {})",
-        outcome.status.to_uppercase(),
+        outcome.status.as_str().to_uppercase(),
         outcome.max_loaded_at_time_ago_in_s,
         outcome.max_loaded_at
     )

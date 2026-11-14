@@ -2,8 +2,8 @@
 //!
 //! These tests verify that per-workflow `DbtRunInput.env` overrides are correctly
 //! isolated across all layers: SQL rendering, node metadata (schema/relation),
-//! and compiled SQL caches. They serve as regression tests for the issues tracked
-//! in TODO.md under "Cross-workflow env isolation".
+//! and compiled SQL caches. The issues are tracked in TODO.md under
+//! "Cross-workflow env isolation".
 
 use anyhow::{Context, Result};
 

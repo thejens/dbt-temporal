@@ -1,10 +1,11 @@
 //! Per-workflow `--vars` and `--full-refresh` reaching the render context.
 //!
-//! Both were previously accepted on `DbtRunInput`, recorded in the workflow
-//! memo, and then dropped: the Jinja `flags` object and the `var()` function
-//! are built once from `InvocationArgs::default()` when the worker parses the
-//! project. A run asking for a full refresh silently performed an incremental
-//! merge, and `{{ var(...) }}` always resolved to project defaults.
+//! Both are accepted on `DbtRunInput` and recorded in the workflow memo, but the
+//! Jinja `flags` object and the `var()` function are built once from
+//! `InvocationArgs::default()` when the worker parses the project. Unless the
+//! per-run values are applied on top, a run asking for a full refresh silently
+//! performs an incremental merge, and `{{ var(...) }}` always resolves to
+//! project defaults.
 //!
 //! These assert on compiled SQL rather than warehouse state, so a failure
 //! points at the renderer rather than at whatever DuckDB happened to store.

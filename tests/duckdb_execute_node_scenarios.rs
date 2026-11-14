@@ -59,9 +59,10 @@ async fn unresolvable_materialization_name_is_a_compilation_error() {
 }
 
 /// An override of a variable the profile never reads changes nothing about the
-/// connection, so it must not cost a profile re-render and a fresh engine — the
-/// cost every run used to pay, because `build_effective_env` puts the
-/// serialized workflow input in `_` on every one of them.
+/// connection, so it must not cost a profile re-render and a fresh engine.
+/// `build_effective_env` puts the serialized workflow input in `_` on every
+/// run, so the check has to look at what the profile reads, not at whether any
+/// override exists.
 #[tokio::test]
 async fn an_override_the_profile_does_not_read_reuses_the_startup_engine() {
     let profile_yml = "spike:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      \

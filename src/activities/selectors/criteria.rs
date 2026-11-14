@@ -41,11 +41,11 @@ const SUPPORTED_MODIFIED_SUBTYPES: [&str; 1] = ["body"];
 
 /// dbt's other `modified.<sub>` refinements, rejected by name.
 ///
-/// Each names a dimension the manifest comparison here does not look at. They
-/// used to answer with the body comparison, which is not a coarsening but a
-/// narrowing: `state:modified.configs` matched only nodes whose *body* changed,
-/// so a config-only change — the exact thing it was asked about — selected
-/// nothing. A CI build that silently skips the node it was pointed at is worse
+/// Each names a dimension the manifest comparison here does not look at.
+/// Answering with the body comparison would not be a coarsening but a
+/// narrowing: `state:modified.configs` would match only nodes whose *body*
+/// changed, so a config-only change — the exact thing it was asked about —
+/// would select nothing. A CI build that silently skips the node it was pointed at is worse
 /// than one that refuses the selector.
 const UNSUPPORTED_MODIFIED_SUBTYPES: [&str; 5] = [
     "configs",

@@ -230,8 +230,8 @@ mod tests {
     }
 
     /// dbt-fusion writes `--placeholder--` into `raw_code` when it did not load
-    /// a node's body. Two placeholders compare equal, so the body comparison
-    /// used to answer "unmodified" for every such node and never look at the
+    /// a node's body. Two placeholders compare equal, so a body comparison alone
+    /// would answer "unmodified" for every such node and never look at the
     /// checksum that had actually moved — a CI build skipping a changed node.
     #[test]
     fn a_placeholder_body_falls_through_to_the_checksum() {

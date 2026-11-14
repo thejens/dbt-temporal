@@ -650,8 +650,8 @@ mod tests {
         Ok(())
     }
 
-    /// A failed clone used to leave its half-written directory behind under a
-    /// UUID name nothing would ever look at again.
+    /// A failed clone must not leave its half-written directory behind: it
+    /// would sit under a UUID name nothing would ever look at again.
     #[tokio::test]
     async fn a_failed_clone_leaves_nothing_behind() {
         let before = temp_model_dirs();

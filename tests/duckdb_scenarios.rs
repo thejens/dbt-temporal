@@ -614,7 +614,7 @@ async fn transitive_ephemeral_chain_is_inlined() {
 
 // --- re-running a model against an existing relation ---
 
-/// Regression: a worker outlives the run, and dbt-fusion's relation cache is
+/// A worker outlives the run, and dbt-fusion's relation cache is
 /// built for the CLI's one-shot lifetime. The first existence check lists the
 /// schema and marks it complete; nothing writes back when the node then creates
 /// its relation. On the next run `get_relation` reported the relation
@@ -701,7 +701,7 @@ fn function_project() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// The regression this guards: `model.compiled_code` is not a value we can put
+/// `model.compiled_code` is not a value we can put
 /// in the context — the `model` object reads it off disk, from a path that
 /// nests under the package name. Writing compiled SQL anywhere else leaves the
 /// attribute empty, and only the materializations that use it (function DDL,

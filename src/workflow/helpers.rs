@@ -569,6 +569,34 @@ pub const SINGLE_TERMINAL_MEMO_PATCH: &str = "single-terminal-memo-upsert";
 /// bounded one.
 pub const MEMO_CADENCE_PATCH: &str = "bounded-memo-cadence";
 
+/// Patch id for readiness-based scheduling.
+///
+/// The level loop and the ready queue issue different command sequences, so a
+/// run whose history was recorded by the level loop has to keep replaying on
+/// it. Only executions that start after this patch is deployed record the
+/// marker and take the ready queue.
+pub const READY_QUEUE_PATCH: &str = "ready-queue-scheduling";
+
+/// How many running node labels the workflow details line spells out before
+/// summarising the rest, so the line stays short on a wide run.
+const DETAILS_MAX_RUNNING_LABELS: usize = 10;
+
+/// Build the workflow-detail line shown in the Temporal UI while the ready
+/// queue runs, e.g. "4/17 done, 3 running: model:a, model:b, model:c".
+pub fn format_ready_queue_details(done: usize, total: usize, running: &[&str]) -> String {
+    let shown = running.len().min(DETAILS_MAX_RUNNING_LABELS);
+    let mut parts: Vec<String> = running[..shown].iter().map(ToString::to_string).collect();
+    if running.len() > shown {
+        parts.push(format!("+{} more", running.len() - shown));
+    }
+    let head = format!("{done}/{total} done, {} running", running.len());
+    if parts.is_empty() {
+        head
+    } else {
+        format!("{head}: {}", parts.join(", "))
+    }
+}
+
 /// Decide whether to publish the memo *before* scheduling a level.
 ///
 /// The first level always, so a run shows something as soon as it starts, and
@@ -739,6 +767,25 @@ mod tests {
             priority_scheduling: false,
             has_project_checks: false,
         }
+    }
+
+    #[test]
+    fn ready_queue_details_list_running_labels() {
+        assert_eq!(
+            format_ready_queue_details(4, 17, &["model:a", "model:b"]),
+            "4/17 done, 2 running: model:a, model:b"
+        );
+        assert_eq!(format_ready_queue_details(17, 17, &[]), "17/17 done, 0 running");
+    }
+
+    #[test]
+    fn ready_queue_details_cap_the_labels_on_a_wide_run() {
+        let labels: Vec<String> = (0..25).map(|i| format!("m{i}")).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let line = format_ready_queue_details(0, 100, &refs);
+        assert!(line.starts_with("0/100 done, 25 running: m0, m1,"), "{line}");
+        assert!(line.contains("m9, +15 more"), "{line}");
+        assert!(!line.contains("m10"), "{line}");
     }
 
     #[test]

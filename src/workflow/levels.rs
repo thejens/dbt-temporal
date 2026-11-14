@@ -200,7 +200,7 @@ impl ResumePoint {
 /// index. A resumed segment starts at a non-zero index, and gating on that
 /// index would let a run that is already over the threshold on arrival continue
 /// forever without ever executing anything.
-const fn should_continue_as_new(
+pub(super) const fn should_continue_as_new(
     levels_done_this_segment: usize,
     can_continue: bool,
     suggested: bool,
@@ -215,7 +215,7 @@ const fn should_continue_as_new(
 /// limits on incomplete activities and on the size of one workflow task's
 /// command batch. A DAG level's width is a property of the project, not of any
 /// of that, so it has to be bounded here.
-const MAX_ACTIVITIES_IN_FLIGHT: usize = 500;
+pub(super) const MAX_ACTIVITIES_IN_FLIGHT: usize = 500;
 
 /// Take the nodes that may start now, given how many are already outstanding.
 ///
@@ -320,19 +320,8 @@ async fn execute_one_level(
 
         set_node_status(state.node_status, unique_id, NodeStatus::Running);
 
-        let node_input = NodeExecutionInput {
-            unique_id: unique_id.clone(),
-            invocation_id: state.plan.invocation_id.clone(),
-            project: state.plan.project.clone(),
-            env: state.effective_env.clone(),
-            target: state.input.target.clone(),
-            command: state.input.command.clone(),
-            defer_manifest_ref: state.input.defer_manifest_ref.clone(),
-            event_time_start: state.input.event_time_start.clone(),
-            event_time_end: state.input.event_time_end.clone(),
-            vars: state.input.vars.clone(),
-            full_refresh: state.input.full_refresh,
-        };
+        let node_input =
+            node_execution_input(state.plan, state.input, state.effective_env, unique_id);
 
         // Per-node labelling in Temporal UI: activity_id for event details,
         // summary for the Gantt chart display.
@@ -386,35 +375,16 @@ async fn execute_one_level(
         |pending: &mut std::collections::VecDeque<(String, NodeExecutionInput, Option<String>)>,
          futures: &mut std::collections::VecDeque<_>| {
             for (unique_id, node_input, activity_label) in take_startable(pending, futures.len()) {
-                // Priority/fairness keys (server >= 1.31; older servers ignore them):
-                // priority_key orders nodes within a run by critical-path depth,
-                // fairness_key gives concurrent runs proportional dispatch on a
-                // shared queue instead of FIFO starvation.
-                let priority = if state.plan.priority_scheduling {
-                    Some(
-                        temporalio_common::Priority::builder()
-                            .maybe_priority_key(
-                                state.plan.nodes.get(&unique_id).and_then(|n| n.priority),
-                            )
-                            .fairness_key(truncate_fairness_key(&state.plan.invocation_id))
-                            .build(),
-                    )
-                } else {
-                    None
-                };
                 let future = ctx.execute_activity(
                     DbtActivities::execute_node,
                     node_input,
-                    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(
-                        state.timeouts.node_secs,
-                    ))
-                    .heartbeat_timeout(Duration::from_secs(state.timeouts.node_heartbeat_secs))
-                    .maybe_activity_id(activity_label.clone())
-                    .maybe_summary(activity_label)
-                    .cancellation_type(ActivityCancellationType::TryCancel)
-                    .retry_policy(build_retry_policy(state.retry_config))
-                    .maybe_priority(priority)
-                    .build(),
+                    node_activity_options(
+                        state.plan,
+                        state.timeouts,
+                        state.retry_config,
+                        &unique_id,
+                        activity_label,
+                    ),
                 );
                 futures.push_back((unique_id, future));
             }
@@ -502,6 +472,64 @@ async fn execute_one_level(
     });
 
     Ok(())
+}
+
+/// The activity input for one node.
+///
+/// Shared by every scheduling path so a node runs with the same inputs
+/// whichever order it was started in.
+pub(super) fn node_execution_input(
+    plan: &ExecutionPlan,
+    input: &DbtRunInput,
+    effective_env: &BTreeMap<String, String>,
+    unique_id: &str,
+) -> NodeExecutionInput {
+    NodeExecutionInput {
+        unique_id: unique_id.to_string(),
+        invocation_id: plan.invocation_id.clone(),
+        project: plan.project.clone(),
+        env: effective_env.clone(),
+        target: input.target.clone(),
+        command: input.command.clone(),
+        defer_manifest_ref: input.defer_manifest_ref.clone(),
+        event_time_start: input.event_time_start.clone(),
+        event_time_end: input.event_time_end.clone(),
+        vars: input.vars.clone(),
+        full_refresh: input.full_refresh,
+    }
+}
+
+/// Temporal options for one node's activity: timeouts, heartbeat, retry policy,
+/// the label shown in the UI, and priority/fairness keys.
+pub(super) fn node_activity_options(
+    plan: &ExecutionPlan,
+    timeouts: &TimeoutConfig,
+    retry_config: &RetryConfig,
+    unique_id: &str,
+    activity_label: Option<String>,
+) -> ActivityOptions {
+    // Priority/fairness keys (server >= 1.31; older servers ignore them):
+    // priority_key orders nodes within a run by critical-path depth,
+    // fairness_key gives concurrent runs proportional dispatch on a
+    // shared queue instead of FIFO starvation.
+    let priority = if plan.priority_scheduling {
+        Some(
+            temporalio_common::Priority::builder()
+                .maybe_priority_key(plan.nodes.get(unique_id).and_then(|n| n.priority))
+                .fairness_key(truncate_fairness_key(&plan.invocation_id))
+                .build(),
+        )
+    } else {
+        None
+    };
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.node_secs))
+        .heartbeat_timeout(Duration::from_secs(timeouts.node_heartbeat_secs))
+        .maybe_activity_id(activity_label.clone())
+        .maybe_summary(activity_label)
+        .cancellation_type(ActivityCancellationType::TryCancel)
+        .retry_policy(build_retry_policy(retry_config))
+        .maybe_priority(priority)
+        .build()
 }
 
 /// Fairness keys are limited to 64 bytes server-side; truncate on a char

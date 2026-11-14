@@ -13,6 +13,7 @@
 mod helpers;
 mod levels;
 mod phases;
+mod ready_queue;
 pub mod scheduler;
 mod search_attributes;
 
@@ -27,14 +28,14 @@ use temporalio_sdk::{
 };
 
 use crate::types::{
-    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RunOutcome, RunPhase, RunResumeState,
-    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunOutcome, RunPhase,
+    RunResumeState, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
-    NodeStatusSummary, RunClock, RunFacts, SINGLE_TERMINAL_MEMO_PATCH, build_effective_env,
-    build_freshness_summary_line, build_summary_lines, elapsed_secs, format_final_details,
-    upsert_memo_state,
+    NodeStatusSummary, READY_QUEUE_PATCH, RunClock, RunFacts, SINGLE_TERMINAL_MEMO_PATCH,
+    build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
+    format_final_details, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
@@ -43,6 +44,7 @@ use self::phases::{
     run_pre_run_hooks, run_project_checks, save_segment_state, store_run_artifacts,
     upsert_terminal_status, write_command_memo,
 };
+use self::ready_queue::ReadyQueueRun;
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.
 #[workflow]
@@ -52,7 +54,8 @@ pub struct DbtRunWorkflow {
     /// and level boundaries.
     status: RunStatusSnapshot,
     /// Mid-run fail-fast override set by the `set_fail_fast` update; the level
-    /// loop consults it at each level boundary.
+    /// loop consults it at each level boundary, the ready queue before each
+    /// scheduling decision.
     fail_fast_override: Option<bool>,
 }
 
@@ -82,9 +85,10 @@ impl DbtRunWorkflow {
         self.status.clone()
     }
 
-    /// Toggle fail-fast mid-run. Takes effect at the next level boundary:
-    /// enabling it after a failure stops scheduling further levels; disabling
-    /// it lets a run configured with fail_fast continue past failures.
+    /// Toggle fail-fast mid-run. Takes effect at the next scheduling decision
+    /// (the next level boundary when scheduling by level): enabling it after a
+    /// failure stops starting further nodes; disabling it lets a run configured
+    /// with fail_fast continue past failures.
     ///
     /// `temporal workflow update execute -w <id> --name set_fail_fast -i true`
     #[update]
@@ -195,7 +199,7 @@ impl DbtRunWorkflow {
 
         ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
         let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
-        let mut levels = execute_levels(
+        let mut levels = execute_nodes(
             ctx,
             &input,
             &plan,
@@ -221,6 +225,9 @@ impl DbtRunWorkflow {
         }
         ctx.state_mut(|s| {
             s.status.phase = RunPhase::Finalizing;
+            // `tally` adds to the warned count instead of replacing it, and
+            // both scheduling paths may already have published one.
+            s.status.warned = 0;
             s.status.tally(&levels.node_status);
         });
 
@@ -356,6 +363,38 @@ async fn load_resume_state(
         "resuming run after continue-as-new"
     );
     Ok(Some(state))
+}
+
+/// Execute the plan's nodes, by readiness where the run may.
+///
+/// The level loop and the ready queue issue different command sequences. A run
+/// whose history was recorded by the level loop has no patch marker, so
+/// `patched` is false for it on replay and it keeps the level loop; an
+/// execution that starts under this code records the marker and takes the ready
+/// queue. That includes the successor of a run that continued as new from the
+/// level loop: it is a new execution, and the checkpoint's node statuses and
+/// failures are all the ready queue needs to pick up where the level loop
+/// stopped.
+async fn execute_nodes(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    input: &DbtRunInput,
+    plan: &ExecutionPlan,
+    retry_config: &RetryConfig,
+    timeouts: &TimeoutConfig,
+    effective_env: &BTreeMap<String, String>,
+    resume: ResumePoint,
+) -> Result<levels::LevelExecutionOutcome, WorkflowTermination> {
+    if ctx.patched(READY_QUEUE_PATCH) {
+        match ReadyQueueRun::new(plan, input, retry_config, timeouts, effective_env, &resume) {
+            Ok(run) => return run.execute(ctx).await,
+            // The plan's levels are valid by construction; edges that disagree
+            // with them are not something to schedule by.
+            Err(e) => {
+                tracing::warn!(error = %e, "plan edges are not schedulable by readiness — running level by level");
+            }
+        }
+    }
+    execute_levels(ctx, input, plan, retry_config, timeouts, effective_env, resume).await
 }
 
 /// Build the level loop's starting point, fresh or resumed.

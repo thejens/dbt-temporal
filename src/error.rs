@@ -64,12 +64,39 @@ pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 }
 
 impl DbtTemporalError {
-    /// Whether this error is retryable by Temporal.
+    /// `type_name` of every variant for which `is_retryable` is false.
     ///
-    /// Keep `workflow::helpers::build_retry_policy`'s `non_retryable_error_types`
-    /// in sync with this.
+    /// Single source of truth for the activity retry policy's
+    /// `non_retryable_error_types`: Temporal matches that list against the
+    /// failure type that `type_name` stamps onto every activity failure. A test
+    /// asserts the list agrees with `is_retryable` for every variant.
+    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 6] = [
+        "DbtTemporalError::Compilation",
+        "DbtTemporalError::Configuration",
+        "DbtTemporalError::ProjectNotFound",
+        "DbtTemporalError::TestFailure",
+        "DbtTemporalError::UnitTestFailure",
+        "DbtTemporalError::StaleSource",
+    ];
+
+    /// Whether this error is retryable by Temporal.
     pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::Adapter(_) | Self::ArtifactStore(_))
+    }
+
+    /// Stable failure type reported to Temporal for this variant, so operators
+    /// can filter failures by type and the retry policy can match on it.
+    pub const fn type_name(&self) -> &'static str {
+        match self {
+            Self::Compilation(_) => "DbtTemporalError::Compilation",
+            Self::Configuration(_) => "DbtTemporalError::Configuration",
+            Self::Adapter(_) => "DbtTemporalError::Adapter",
+            Self::ArtifactStore(_) => "DbtTemporalError::ArtifactStore",
+            Self::ProjectNotFound(_) => "DbtTemporalError::ProjectNotFound",
+            Self::TestFailure { .. } => "DbtTemporalError::TestFailure",
+            Self::UnitTestFailure { .. } => "DbtTemporalError::UnitTestFailure",
+            Self::StaleSource { .. } => "DbtTemporalError::StaleSource",
+        }
     }
 }
 
@@ -120,12 +147,6 @@ impl std::error::Error for DbtTemporalError {
             | Self::UnitTestFailure { .. }
             | Self::StaleSource { .. } => None,
         }
-    }
-}
-
-impl From<anyhow::Error> for DbtTemporalError {
-    fn from(err: anyhow::Error) -> Self {
-        Self::Adapter(err)
     }
 }
 
@@ -403,11 +424,68 @@ mod tests {
         assert!(adapter.to_string().contains("connection refused"));
     }
 
+    /// One value of every variant. The exhaustive match makes adding a variant
+    /// without extending this list a compile error.
+    fn one_of_each_variant() -> Vec<DbtTemporalError> {
+        let probe = DbtTemporalError::Compilation(String::new());
+        match probe {
+            DbtTemporalError::Compilation(_)
+            | DbtTemporalError::Configuration(_)
+            | DbtTemporalError::Adapter(_)
+            | DbtTemporalError::ArtifactStore(_)
+            | DbtTemporalError::ProjectNotFound(_)
+            | DbtTemporalError::TestFailure { .. }
+            | DbtTemporalError::UnitTestFailure { .. }
+            | DbtTemporalError::StaleSource { .. } => {}
+        }
+        vec![
+            DbtTemporalError::Compilation("c".into()),
+            DbtTemporalError::Configuration("c".into()),
+            DbtTemporalError::Adapter(anyhow::anyhow!("a")),
+            DbtTemporalError::ArtifactStore(anyhow::anyhow!("a")),
+            DbtTemporalError::ProjectNotFound("p".into()),
+            DbtTemporalError::TestFailure {
+                unique_id: "t".into(),
+                failures: 1,
+            },
+            DbtTemporalError::UnitTestFailure {
+                unique_id: "u".into(),
+                failures: 1,
+                diff: String::new(),
+            },
+            DbtTemporalError::StaleSource {
+                unique_id: "s".into(),
+                node_kind: "source",
+                max_loaded_at: "x".into(),
+                age_secs: 1.0,
+                max_allowed_secs: 1,
+            },
+        ]
+    }
+
     #[test]
-    fn from_anyhow_produces_adapter() {
-        let err: DbtTemporalError = anyhow::anyhow!("something broke").into();
-        assert!(err.is_retryable());
-        assert!(err.to_string().contains("adapter error"));
+    fn non_retryable_type_names_match_is_retryable_for_every_variant() {
+        let variants = one_of_each_variant();
+        for err in &variants {
+            let listed = DbtTemporalError::NON_RETRYABLE_TYPE_NAMES.contains(&err.type_name());
+            assert_eq!(
+                listed,
+                !err.is_retryable(),
+                "{} must be in NON_RETRYABLE_TYPE_NAMES exactly when it is not retryable",
+                err.type_name()
+            );
+        }
+        let non_retryable = variants.iter().filter(|e| !e.is_retryable()).count();
+        assert_eq!(non_retryable, DbtTemporalError::NON_RETRYABLE_TYPE_NAMES.len());
+    }
+
+    #[test]
+    fn type_names_are_unique() {
+        let names: std::collections::BTreeSet<_> = one_of_each_variant()
+            .iter()
+            .map(DbtTemporalError::type_name)
+            .collect();
+        assert_eq!(names.len(), one_of_each_variant().len());
     }
 
     #[test]

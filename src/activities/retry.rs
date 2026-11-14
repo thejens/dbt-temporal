@@ -21,7 +21,7 @@ use crate::error::DbtTemporalError;
 use crate::project_registry::ProjectRegistry;
 
 /// Whether to surface an error to Temporal as retryable or not.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDecision {
     /// Retry within the activity's retry policy.
     Retry,
@@ -79,18 +79,29 @@ pub fn downcast_or_default(err: anyhow::Error, unclassified: Unclassified) -> Db
     }
 }
 
+/// Build the `ActivityError` for a typed error under an already-made retry
+/// decision.
+///
+/// The one place an activity failure is constructed from a `DbtTemporalError`:
+/// it stamps the variant's `type_name` (what the retry policy's
+/// `non_retryable_error_types` and operators filter on) and the non-retryable
+/// flag. The flag follows `decision`, not the variant alone, because a
+/// retryable variant can be demoted by a user pattern or a hook's opt-out.
+pub fn failure_for(dbt_err: &DbtTemporalError, decision: RetryDecision) -> ActivityError {
+    ActivityError::application(
+        ApplicationFailure::builder(anyhow::anyhow!("{dbt_err}"))
+            .type_name(dbt_err.type_name().to_owned())
+            .non_retryable(decision == RetryDecision::NoRetry)
+            .build(),
+    )
+}
+
 /// Turn a typed error into an `ActivityError` with the right retry flag.
 pub fn to_activity_error(
     dbt_err: &DbtTemporalError,
     non_retryable_patterns: &[regex::Regex],
 ) -> ActivityError {
-    let source = anyhow::anyhow!("{dbt_err}");
-    match decide_retry(dbt_err, non_retryable_patterns) {
-        RetryDecision::Retry => ActivityError::application(ApplicationFailure::new(source)),
-        RetryDecision::NoRetry => {
-            ActivityError::application(ApplicationFailure::non_retryable(source))
-        }
-    }
+    failure_for(dbt_err, decide_retry(dbt_err, non_retryable_patterns))
 }
 
 /// One-shot boundary conversion: `anyhow::Error` → classified `ActivityError`.
@@ -180,5 +191,48 @@ mod tests {
         // Patterns can only demote — a permanent variant never becomes retryable.
         let permanent = DbtTemporalError::Compilation("bad sql".to_string());
         assert_eq!(decide_retry(&permanent, &[]), RetryDecision::NoRetry);
+    }
+
+    fn application_failure(err: &ActivityError) -> &ApplicationFailure {
+        match err {
+            ActivityError::Application(failure) => failure,
+            other => panic!("expected an application failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failure_carries_type_and_non_retryable_flag_for_permanent_variants() {
+        let err = DbtTemporalError::Compilation("bad ref".to_string());
+        let activity_err = to_activity_error(&err, &[]);
+        let failure = application_failure(&activity_err);
+        assert_eq!(failure.type_name(), Some("DbtTemporalError::Compilation"));
+        assert!(failure.is_non_retryable());
+        assert_eq!(failure.source_error().to_string(), err.to_string());
+    }
+
+    #[test]
+    fn failure_carries_type_and_stays_retryable_for_transient_variants() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("connection reset"));
+        let activity_err = to_activity_error(&err, &[]);
+        let failure = application_failure(&activity_err);
+        assert_eq!(failure.type_name(), Some("DbtTemporalError::Adapter"));
+        assert!(!failure.is_non_retryable());
+    }
+
+    #[test]
+    fn user_pattern_demotes_to_non_retryable_but_keeps_the_type() {
+        let patterns = crate::error::compile_error_patterns(&["quota exceeded".to_string()]);
+        let err = DbtTemporalError::ArtifactStore(anyhow::anyhow!("quota exceeded"));
+        let activity_err = to_activity_error(&err, &patterns);
+        let failure = application_failure(&activity_err);
+        assert_eq!(failure.type_name(), Some("DbtTemporalError::ArtifactStore"));
+        assert!(failure.is_non_retryable());
+    }
+
+    #[test]
+    fn failure_for_honours_the_decision_over_the_variant() {
+        let err = DbtTemporalError::Adapter(anyhow::anyhow!("timeout"));
+        let activity_err = failure_for(&err, RetryDecision::NoRetry);
+        assert!(application_failure(&activity_err).is_non_retryable());
     }
 }

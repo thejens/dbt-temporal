@@ -12,7 +12,7 @@ use dbt_schemas::schemas::common::{FreshnessDefinition, FreshnessPeriod, Freshne
 use dbt_schemas::schemas::freshness_node::FreshnessNodeRef;
 
 use crate::error::DbtTemporalError;
-use crate::types::FreshnessOutcome;
+use crate::types::{FreshnessGrade, FreshnessOutcome};
 
 use super::FreshnessVerdict;
 
@@ -113,11 +113,11 @@ pub fn evaluate(
 ) -> FreshnessVerdict {
     let age_secs = (snapshotted_at - max_loaded_at).as_seconds_f64();
 
-    let outcome = |status: &str| FreshnessOutcome {
+    let outcome = |status: FreshnessGrade| FreshnessOutcome {
         max_loaded_at: max_loaded_at.to_rfc3339(),
         snapshotted_at: snapshotted_at.to_rfc3339(),
         max_loaded_at_time_ago_in_s: age_secs,
-        status: status.to_string(),
+        status,
         resource_type: resource_type.to_string(),
         criteria: criteria.clone(),
     };
@@ -134,16 +134,16 @@ pub fn evaluate(
         && exceeded(error_secs)
     {
         return FreshnessVerdict::Stale {
-            outcome: outcome("error"),
+            outcome: outcome(FreshnessGrade::Error),
             max_allowed_secs: error_secs,
         };
     }
     if let Some(warn_secs) = threshold_secs(criteria.warn_after.as_ref())
         && exceeded(warn_secs)
     {
-        return FreshnessVerdict::Warning(outcome("warn"));
+        return FreshnessVerdict::Warning(outcome(FreshnessGrade::Warn));
     }
-    FreshnessVerdict::Fresh(outcome("pass"))
+    FreshnessVerdict::Fresh(outcome(FreshnessGrade::Pass))
 }
 
 /// A rule's threshold in seconds; `None` for an absent or half-filled rule,
@@ -185,7 +185,7 @@ mod tests {
             evaluate(&criteria, "source", ts("2026-06-12T11:30:00Z"), ts("2026-06-12T12:00:00Z"));
         assert!(
             matches!(verdict, FreshnessVerdict::Fresh(ref o)
-                if o.status == "pass" && o.resource_type == "source"
+                if o.status == FreshnessGrade::Pass && o.resource_type == "source"
                     && (o.max_loaded_at_time_ago_in_s - 1800.0).abs() < f64::EPSILON),
             "expected fresh: {verdict:?}"
         );
@@ -201,7 +201,7 @@ mod tests {
         let verdict =
             evaluate(&criteria, "model", ts("2026-06-12T06:00:00Z"), ts("2026-06-12T12:00:00Z"));
         assert!(matches!(verdict, FreshnessVerdict::Warning(ref o)
-                if o.status == "warn" && o.resource_type == "model"));
+                if o.status == FreshnessGrade::Warn && o.resource_type == "model"));
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
                 if max_allowed_secs == 86_400
                     && outcome.max_loaded_at_time_ago_in_s > 86_400.0
                     && outcome.max_loaded_at.starts_with("2026-06-01")
-                    && outcome.status == "error"),
+                    && outcome.status == FreshnessGrade::Error),
             "expected stale: {verdict:?}"
         );
     }
@@ -260,7 +260,7 @@ mod tests {
         let verdict =
             evaluate(&criteria, "source", ts("2026-06-12T11:59:00Z"), ts("2026-06-12T12:00:00Z"));
         assert!(
-            matches!(verdict, FreshnessVerdict::Warning(ref o) if o.status == "warn"),
+            matches!(verdict, FreshnessVerdict::Warning(ref o) if o.status == FreshnessGrade::Warn),
             "expected warn: {verdict:?}"
         );
     }

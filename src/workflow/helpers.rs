@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use dbt_schemas::schemas::common::OnError;
+use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_client::RetryPolicy;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{MemoValue, WorkflowTermination};
 
 use crate::error::DbtTemporalError;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
+    DbtRunInput, ExecutionPlan, FreshnessGrade, NodeExecutionResult, NodeStatus, NodeStatusTree,
+    RetryConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -296,9 +299,11 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
     let mut log_lines = Vec::with_capacity(3);
     log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
 
-    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
     for info in plan.nodes.values() {
-        *type_counts.entry(info.resource_type.as_str()).or_default() += 1;
+        *type_counts
+            .entry(resource_type_label(info.resource_type))
+            .or_default() += 1;
     }
     let parts: Vec<String> = type_counts
         .iter()
@@ -357,14 +362,14 @@ pub fn build_summary_lines(
 /// grading dbt gives each *measurement* (`pass` / `warn` / `error`) from the
 /// `FreshnessOutcome`, which is the number an SLA run exists to show.
 pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
-    let with_status = |status: &str| {
+    let with_status = |status: FreshnessGrade| {
         results
             .iter()
             .filter(|r| r.freshness.as_ref().is_some_and(|f| f.status == status))
             .count()
     };
-    let pass = with_status("pass");
-    let warn = with_status("warn");
+    let pass = with_status(FreshnessGrade::Pass);
+    let warn = with_status(FreshnessGrade::Warn);
     // A node past error_after fails its activity and produces no outcome, so
     // the error count comes from the node status rather than from the outcomes.
     let error = results
@@ -444,14 +449,18 @@ pub fn mark_remaining_level_as_cancelled(
 /// `NODE_TYPE_MODEL` → `model`. Returns `None` when the id isn't in the plan,
 /// matching the behaviour of `execute_activity` (no label).
 pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<String> {
-    plan.nodes.get(unique_id).map(|info| {
-        let rt = info
-            .resource_type
-            .strip_prefix("NODE_TYPE_")
-            .unwrap_or(&info.resource_type)
-            .to_ascii_lowercase();
-        format!("{rt}:{}", info.name)
-    })
+    plan.nodes
+        .get(unique_id)
+        .map(|info| format!("{}:{}", resource_type_label(info.resource_type), info.name))
+}
+
+/// The lower-case resource type as dbt's CLI spells it (`model`, `unit_test`):
+/// the protobuf enum name without its `NODE_TYPE_` prefix.
+fn resource_type_label(resource_type: NodeType) -> String {
+    let name = resource_type.as_str_name();
+    name.strip_prefix("NODE_TYPE_")
+        .unwrap_or(name)
+        .to_ascii_lowercase()
 }
 
 /// True if `unique_id` has any upstream dependency in `failed_nodes` whose
@@ -482,7 +491,7 @@ pub fn is_blocked_by_failed_upstream(
 /// model configured with `on_error: continue`.
 fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
     plan.nodes.get(dep_unique_id).is_some_and(|info| {
-        info.resource_type == "NODE_TYPE_MODEL" && info.on_error.as_deref() == Some("continue")
+        info.resource_type == NodeType::Model && info.on_error == Some(OnError::Continue)
     })
 }
 
@@ -492,13 +501,19 @@ fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
 /// internally but we're only interested in the success/error/skip trichotomy.
 pub const fn classify_result_status(status: NodeStatus) -> NodeStatus {
     match status {
-        NodeStatus::Error => NodeStatus::Error,
+        // Pending / Running: a finished activity cannot report itself as not
+        // yet finished. Counting it as a failure surfaces the defect instead
+        // of letting it pass.
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => NodeStatus::Error,
         NodeStatus::Skipped => NodeStatus::Skipped,
         // A warned node completed. It is not a failure and must not gate the
         // run — it is kept apart from `Success` only so the run can say it
         // found something.
         NodeStatus::Warn => NodeStatus::Warn,
-        _ => NodeStatus::Success,
+        // A cancelled activity reaches the scheduler as an `Err`, never as a
+        // result, so `Cancelled` is unreachable here in practice; it keeps the
+        // success class rather than inventing a fourth one for the trichotomy.
+        NodeStatus::Success | NodeStatus::Cancelled => NodeStatus::Success,
     }
 }
 
@@ -514,15 +529,15 @@ pub fn format_result_tag(status: NodeStatus, message: Option<&str>, execution_ti
             let detail = message.unwrap_or("warning");
             format!("WARN {detail} in {execution_time:.2}s")
         }
-        NodeStatus::Error => {
+        // Pending / Running are tagged like the error they are classified as
+        // (see `classify_result_status`).
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => {
             let msg = message.unwrap_or("error");
             format!("ERROR {msg}")
         }
         NodeStatus::Skipped => "SKIP".to_string(),
-        // Pending / Running / Cancelled never appear on the result-tag path
-        // (results are only built from completed activities), so the Debug
-        // form is just a defensive default.
-        _ => format!("{status:?}"),
+        // Spelled as the scheduler's own line for a cancelled node.
+        NodeStatus::Cancelled => "CANCELLED".to_string(),
     }
 }
 
@@ -592,11 +607,7 @@ pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     plan.nodes.get(unique_id).map_or_else(
         || unique_id.to_string(),
         |info| {
-            let rt = info
-                .resource_type
-                .strip_prefix("NODE_TYPE_")
-                .unwrap_or(&info.resource_type)
-                .to_ascii_lowercase();
+            let rt = resource_type_label(info.resource_type);
             let mat = info
                 .materialization
                 .as_deref()
@@ -696,7 +707,7 @@ mod tests {
                 NodeInfo {
                     unique_id: uid,
                     name: name.to_string(),
-                    resource_type: "model".to_string(),
+                    resource_type: NodeType::Model,
                     materialization: mat.map(ToString::to_string),
                     package_name: "waffle".to_string(),
                     depends_on: deps.iter().map(|d| format!("model.waffle.{d}")).collect(),
@@ -1147,9 +1158,8 @@ mod tests {
         let header = build_log_header(&plan);
         assert_eq!(header.len(), 3);
         assert!(header[0].starts_with("Running with dbt-temporal="));
-        // Resource types come from NodeInfo.resource_type which is "model" for everything
-        // built by `test_plan` — confirms plural-pluralisation works through the helper.
-        assert!(header[1].contains("3 model"));
+        // `test_plan` builds only models; the tally is pluralised through the helper.
+        assert_eq!(header[1], "Found 3 models");
         assert_eq!(header[2], "Concurrency: 2 parallel levels");
     }
 
@@ -1157,8 +1167,7 @@ mod tests {
     fn build_log_header_singular_for_single_level_and_node_type() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
         let header = build_log_header(&plan);
-        assert!(header[1].contains("1 model"), "got: {}", header[1]);
-        assert!(!header[1].contains("models"));
+        assert_eq!(header[1], "Found 1 model");
         assert_eq!(header[2], "Concurrency: 1 parallel level");
     }
 
@@ -1263,22 +1272,22 @@ mod tests {
 
     #[test]
     fn freshness_summary_separates_warn_from_pass() {
-        let measured = |unique_id: &str, status: &str| {
+        let measured = |unique_id: &str, status: FreshnessGrade| {
             let mut result = skipped_result(unique_id, "");
             result.status = NodeStatus::Success;
             result.freshness = Some(crate::types::FreshnessOutcome {
                 max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
                 snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
                 max_loaded_at_time_ago_in_s: 3600.0,
-                status: status.into(),
+                status,
                 resource_type: "source".into(),
                 criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
             });
             result
         };
         let results = vec![
-            measured("source.p.s.a", "pass"),
-            measured("source.p.s.b", "warn"),
+            measured("source.p.s.a", FreshnessGrade::Pass),
+            measured("source.p.s.b", FreshnessGrade::Warn),
             // A stale node fails its activity and carries no outcome.
             error_result("model.p.c", "stale"),
         ];
@@ -1409,22 +1418,25 @@ mod tests {
     #[test]
     fn format_activity_label_strips_node_type_prefix_and_lowercases() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
-        // test_plan sets resource_type to "model"; format_activity_label expects
-        // raw proto strings ("NODE_TYPE_MODEL"). Patch the entry to mirror the
-        // shape that the planner produces.
-        let mut plan = plan;
-        plan.nodes.get_mut("model.waffle.m1").unwrap().resource_type =
-            "NODE_TYPE_MODEL".to_string();
         assert_eq!(format_activity_label(&plan, "model.waffle.m1"), Some("model:m1".to_string()));
     }
 
     #[test]
-    fn format_activity_label_passes_unknown_types_through_lowercase() {
-        let plan = test_plan(vec![vec!["t1"]], &[("t1", None, vec![])]);
-        let mut plan = plan;
-        plan.nodes.get_mut("model.waffle.t1").unwrap().resource_type = "Test".to_string();
-        // No NODE_TYPE_ prefix — the raw value is just lowercased.
-        assert_eq!(format_activity_label(&plan, "model.waffle.t1"), Some("test:t1".to_string()));
+    fn format_activity_label_spells_multi_word_types_with_underscores() {
+        let mut plan = test_plan(vec![vec!["t1"]], &[("t1", None, vec![])]);
+        plan.nodes.get_mut("model.waffle.t1").unwrap().resource_type = NodeType::UnitTest;
+        assert_eq!(
+            format_activity_label(&plan, "model.waffle.t1"),
+            Some("unit_test:t1".to_string())
+        );
+    }
+
+    #[test]
+    fn node_label_prefixes_materialization_and_lowercases_the_type() {
+        let mut plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
+        assert_eq!(node_label(&plan, "model.waffle.m1"), "table model waffle.m1");
+        plan.nodes.get_mut("model.waffle.m1").unwrap().resource_type = NodeType::Seed;
+        assert_eq!(node_label(&plan, "model.waffle.m1"), "table seed waffle.m1");
     }
 
     #[test]
@@ -1466,19 +1478,19 @@ mod tests {
     fn set_on_error(
         plan: &mut ExecutionPlan,
         unique_id: &str,
-        resource_type: &str,
-        on_error: Option<&str>,
+        resource_type: NodeType,
+        on_error: Option<OnError>,
     ) {
         let info = plan.nodes.get_mut(unique_id).unwrap();
-        info.resource_type = resource_type.to_string();
-        info.on_error = on_error.map(ToString::to_string);
+        info.resource_type = resource_type;
+        info.on_error = on_error;
     }
 
     #[test]
     fn is_blocked_by_failed_upstream_false_when_failed_dep_continues_on_error() {
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1494,7 +1506,7 @@ mod tests {
                 ("c", None, vec!["a", "b"]),
             ],
         );
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         // b has no on_error override — its failure should still block c.
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
@@ -1508,7 +1520,7 @@ mod tests {
         // by our scheduler (dbt-core itself only wires up `continue` today).
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("skip_children"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::SkipChildren));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1520,7 +1532,7 @@ mod tests {
         // (e.g. a seed) always blocks, even if on_error happened to be set.
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_SEED", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Seed, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1529,15 +1541,18 @@ mod tests {
     // --- classify_result_status ---
 
     #[test]
-    fn classify_result_status_collapses_to_three_terminals() {
-        assert_eq!(classify_result_status(NodeStatus::Error), NodeStatus::Error);
-        assert_eq!(classify_result_status(NodeStatus::Skipped), NodeStatus::Skipped);
-        // All other variants — including Pending/Running/Cancelled/Success —
-        // collapse to Success on the result-collection path.
-        assert_eq!(classify_result_status(NodeStatus::Success), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Pending), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Running), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Cancelled), NodeStatus::Success);
+    fn classify_result_status_maps_every_status() {
+        for (status, expected) in [
+            (NodeStatus::Success, NodeStatus::Success),
+            (NodeStatus::Warn, NodeStatus::Warn),
+            (NodeStatus::Error, NodeStatus::Error),
+            (NodeStatus::Skipped, NodeStatus::Skipped),
+            (NodeStatus::Cancelled, NodeStatus::Success),
+            (NodeStatus::Pending, NodeStatus::Error),
+            (NodeStatus::Running, NodeStatus::Error),
+        ] {
+            assert_eq!(classify_result_status(status), expected, "{status}");
+        }
     }
 
     // --- format_result_tag ---
@@ -1566,15 +1581,19 @@ mod tests {
     }
 
     #[test]
-    fn format_result_tag_non_terminal_falls_back_to_debug() {
-        // Pending/Running/Cancelled never reach the result-tag path in practice,
-        // but the defensive `_` arm must still yield the Debug form.
-        for status in [
-            NodeStatus::Pending,
-            NodeStatus::Running,
-            NodeStatus::Cancelled,
+    fn format_result_tag_covers_every_status() {
+        for (status, message, expected) in [
+            (NodeStatus::Success, None, "OK in 2.50s"),
+            (NodeStatus::Warn, None, "WARN warning in 2.50s"),
+            (NodeStatus::Warn, Some("2 rows"), "WARN 2 rows in 2.50s"),
+            (NodeStatus::Error, None, "ERROR error"),
+            (NodeStatus::Skipped, Some("ignored"), "SKIP"),
+            (NodeStatus::Cancelled, None, "CANCELLED"),
+            // Tagged as the error `classify_result_status` makes of them.
+            (NodeStatus::Pending, None, "ERROR error"),
+            (NodeStatus::Running, Some("still going"), "ERROR still going"),
         ] {
-            assert_eq!(format_result_tag(status, None, 0.0), format!("{status:?}"));
+            assert_eq!(format_result_tag(status, message, 2.5), expected, "{status}");
         }
     }
 

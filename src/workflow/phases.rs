@@ -28,7 +28,7 @@ use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
     HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus, ProjectChecksInput,
     ProjectChecksOutput, ProjectHookPhase, ProjectHooksInput, ResolveConfigInput,
-    ResolvedProjectConfig, RetryConfig, RunSegmentState, SaveSegmentStateInput,
+    ResolvedProjectConfig, RetryConfig, RunOutcome, RunSegmentState, SaveSegmentStateInput,
     StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
 };
 
@@ -330,14 +330,14 @@ pub fn apply_post_run_outcome(
 /// `WorkflowContext`.
 fn terminal_status_updates(
     plan: &ExecutionPlan,
-    status: &str,
+    status: RunOutcome,
 ) -> Option<Result<Vec<SearchAttributeUpdate>, WorkflowTermination>> {
     if !plan.search_attributes.contains_key("DbtStatus") {
         return None;
     }
     Some(build_search_attribute_updates(&BTreeMap::from([(
         "DbtStatus".to_string(),
-        status.to_string(),
+        status.as_str().to_string(),
     )])))
 }
 
@@ -348,7 +348,7 @@ fn terminal_status_updates(
 pub fn upsert_terminal_status(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
-    status: &str,
+    status: RunOutcome,
 ) -> Result<(), WorkflowTermination> {
     if let Some(updates) = terminal_status_updates(plan, status) {
         ctx.upsert_search_attributes(updates?);
@@ -712,6 +712,7 @@ mod tests {
     }
 
     use crate::types::HookConfig;
+    use dbt_schemas::schemas::telemetry::NodeType;
 
     fn empty_plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -734,7 +735,7 @@ mod tests {
         crate::types::NodeInfo {
             unique_id: format!("model.shop.{name}"),
             name: name.to_string(),
-            resource_type: "model".to_string(),
+            resource_type: NodeType::Model,
             materialization: Some("table".to_string()),
             package_name: "shop".to_string(),
             depends_on: vec![],
@@ -811,7 +812,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.customers".to_string(),
                         name: "customers".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec![],
@@ -824,7 +825,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.orders".to_string(),
                         name: "orders".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec!["model.shop.customers".to_string()],
@@ -1275,7 +1276,7 @@ mod tests {
         // empty_plan has no search attributes → DbtStatus is unregistered, so
         // the terminal upsert must be skipped (upserting it would fail the task).
         let plan = empty_plan();
-        assert!(terminal_status_updates(&plan, "passed").is_none());
+        assert!(terminal_status_updates(&plan, RunOutcome::Passed).is_none());
     }
 
     #[test]
@@ -1285,7 +1286,7 @@ mod tests {
         let mut plan = empty_plan();
         plan.search_attributes
             .insert("DbtStatus".to_string(), "running".to_string());
-        let updates = terminal_status_updates(&plan, "failed")
+        let updates = terminal_status_updates(&plan, RunOutcome::Failed)
             .expect("registered → Some")
             .expect("update builds");
         assert_eq!(updates.len(), 1);

@@ -35,7 +35,7 @@ source
 
 **dbt-temporal** (workflow plan log):
 ```
-Found 2 NODE_TYPE_MODELs        ← consumer + source (eph inlined)
+Found 2 models                 ← consumer + source (eph inlined)
 1 of 2 START table model … source
 2 of 2 START table model … consumer
 ```

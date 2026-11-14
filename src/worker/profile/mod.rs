@@ -5,10 +5,13 @@ pub mod render;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 pub use render::{RenderedTarget, render_profile_with_env};
+
+use crate::worker::single_flight::SingleFlightCache;
 
 use crate::worker::engines::AdapterEngines;
 use crate::worker_state::WorkerState;
@@ -131,6 +134,98 @@ pub fn rebuild_adapter_engines_with_env(
     })
 }
 
+/// How many distinct rebuilds a worker keeps.
+///
+/// Each entry is a set of engines with their connection pools, so the bound is
+/// what keeps a worker that serves ever-changing overrides (a credential per
+/// run, say) from accumulating idle warehouse connections. Least recently used
+/// goes first; a miss costs one profile render and one engine build.
+const MAX_CACHED_REBUILDS: usize = 16;
+
+/// Everything that decides what [`rebuild_adapter_engines_with_env`] produces:
+/// the target, and the env overrides the profile can actually read.
+///
+/// The values are the full strings, compared in full. They can hold
+/// credentials, so [`Debug`](std::fmt::Debug) names the keys and never prints a
+/// value.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RebuildKey {
+    target: String,
+    env: BTreeMap<String, String>,
+}
+
+impl RebuildKey {
+    /// `target` is the name the rebuild resolves, after the worker's default
+    /// has been applied: an override naming the default target and no override
+    /// at all build the same engines and must share an entry.
+    pub fn new(
+        target: &str,
+        profile_env_vars: &ProfileEnvVars,
+        env_overrides: &BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            target: target.to_string(),
+            env: profile_env_vars.relevant(env_overrides),
+        }
+    }
+}
+
+impl std::fmt::Debug for RebuildKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RebuildKey")
+            .field("target", &self.target)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Rebuilt engines, shared by every activity that resolves to the same
+/// [`RebuildKey`].
+pub struct RebuildCache(SingleFlightCache<RebuildKey, RebuildResult>);
+
+impl Default for RebuildCache {
+    fn default() -> Self {
+        Self(SingleFlightCache::new(MAX_CACHED_REBUILDS))
+    }
+}
+
+impl std::fmt::Debug for RebuildCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RebuildCache").finish_non_exhaustive()
+    }
+}
+
+/// [`rebuild_adapter_engines_with_env`], built once per distinct
+/// [`RebuildKey`] and shared.
+///
+/// A run's nodes all resolve to one key, so a run builds its engines once
+/// rather than once per node; so do later runs with the same overrides. The
+/// engines hold no per-activity state — the cancellation token travels with the
+/// `Adapter` each activity wraps around its engine, never with the engine — so
+/// sharing them is as safe as sharing the worker's startup engines.
+///
+/// Blocking: the first caller builds on the calling thread and the rest wait for
+/// it, so this must be called from the dbt pool like the build itself.
+pub fn rebuild_adapter_engines_shared(
+    state: &WorkerState,
+    target_override: Option<&str>,
+    env_overrides: &BTreeMap<String, String>,
+) -> Result<Arc<RebuildResult>> {
+    let key = RebuildKey::new(
+        target_override.unwrap_or(&state.default_target),
+        &state.profile_env_vars,
+        env_overrides,
+    );
+    // Build from the key's own env, not the caller's: the key is exactly the
+    // inputs the profile can read, and overrides it ignores must not be able to
+    // make two callers of one key build different things.
+    let build_env = key.env.clone();
+    state
+        .rebuilt_engines
+        .0
+        .get_or_build(key, || rebuild_adapter_engines_with_env(state, target_override, &build_env))
+}
+
 /// Which environment variables a `profiles.yml` reads.
 ///
 /// Deliberately textual rather than a YAML walk. The cost of naming one key too
@@ -165,6 +260,24 @@ impl ProfileEnvVars {
     }
 }
 
+impl ProfileEnvVars {
+    /// The overrides that can influence what the profile resolves to.
+    ///
+    /// For a profile naming its keys that is only those; every other override
+    /// is invisible to it. When keys cannot be named, any of them might be read,
+    /// so all are kept.
+    pub fn relevant(&self, overrides: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        match self {
+            Self::Keys(keys) => overrides
+                .iter()
+                .filter(|(key, _)| keys.contains(*key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            Self::Unknown => overrides.clone(),
+        }
+    }
+}
+
 /// Read the env vars a `profiles.yml` refers to.
 ///
 /// A file that cannot be read says nothing about what it contains, so it counts
@@ -178,25 +291,27 @@ pub fn profile_env_vars(profiles_path: &Path) -> ProfileEnvVars {
 /// Pull the literal keys out of every `env_var(...)` call in the text.
 ///
 /// Whitespace before the paren counts, because Jinja accepts `env_var ('KEY')`.
-/// A call whose key is not a quoted literal makes the whole answer `Unknown`:
-/// its key is only known at render time, so nothing here can rule an override
-/// out.
+/// A call whose key is not a lone quoted literal — a variable, or an expression
+/// such as `'A' ~ suffix` — makes the whole answer `Unknown`: its key is only
+/// known at render time, so nothing here can rule an override out.
 fn parse_env_var_keys(content: &str) -> ProfileEnvVars {
     #[allow(clippy::expect_used)]
     static CALL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"\benv_var\s*\(\s*(?:'([^']*)'|"([^"]*)")?"#)
+        regex::Regex::new(r#"\benv_var\s*\(\s*(?:'([^']*)'|"([^"]*)")?(\s*[,)])?"#)
             .expect("env_var call regex")
     });
 
     let mut keys = std::collections::BTreeSet::new();
     for call in CALL.captures_iter(content) {
-        match call.get(1).or_else(|| call.get(2)) {
-            Some(key) => {
+        match (call.get(1).or_else(|| call.get(2)), call.get(3)) {
+            // The literal is the whole first argument: it ends at a comma
+            // (a default follows) or the closing paren.
+            (Some(key), Some(_)) => {
                 keys.insert(key.as_str().to_string());
             }
-            // A call with no quoted literal after the paren — the key is an
-            // expression, and only rendering can say what it is.
-            None => return ProfileEnvVars::Unknown,
+            // No quoted literal after the paren, or one that continues into an
+            // expression — only rendering can say what the key is.
+            _ => return ProfileEnvVars::Unknown,
         }
     }
     ProfileEnvVars::Keys(keys)
@@ -327,6 +442,81 @@ mod tests {
             !reads_db_host.affected_by(unrelated.iter()),
             "an override the profile never reads changes nothing about the connection"
         );
+    }
+
+    /// `'A' ~ suffix` starts with a literal but names a different key; reading
+    /// it as `A` would let an override of the real key go unnoticed.
+    #[test]
+    fn profile_env_vars_is_unknown_for_a_key_built_by_concatenation() -> Result<()> {
+        let path = write_temp_profiles(
+            r#"my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DB_' ~ region ~ '_HOST') }}"
+"#,
+        )?;
+        assert!(matches!(profile_env_vars(&path), ProfileEnvVars::Unknown));
+        std::fs::remove_dir_all(path.parent().context("no parent")?).ok();
+        Ok(())
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn reads_db_host() -> ProfileEnvVars {
+        ProfileEnvVars::Keys(std::iter::once("DB_HOST".to_string()).collect())
+    }
+
+    /// Runs differ in the serialized input they carry as `_`; a profile that
+    /// never reads it must not get an engine set per run because of it.
+    #[test]
+    fn rebuild_key_ignores_overrides_the_profile_does_not_read() {
+        let profile = reads_db_host();
+        let a = RebuildKey::new("dev", &profile, &env(&[("DB_HOST", "h"), ("_", "run-1")]));
+        let b = RebuildKey::new("dev", &profile, &env(&[("DB_HOST", "h"), ("_", "run-2")]));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rebuild_key_separates_different_values_of_a_key_the_profile_reads() {
+        let profile = reads_db_host();
+        let a = RebuildKey::new("dev", &profile, &env(&[("DB_HOST", "one")]));
+        let b = RebuildKey::new("dev", &profile, &env(&[("DB_HOST", "two")]));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rebuild_key_separates_targets() {
+        let profile = reads_db_host();
+        let overrides = env(&[("DB_HOST", "h")]);
+        assert_ne!(
+            RebuildKey::new("dev", &profile, &overrides),
+            RebuildKey::new("prod", &profile, &overrides)
+        );
+    }
+
+    /// With an unnameable key set, any override may reach the profile, so the
+    /// whole map is the identity.
+    #[test]
+    fn rebuild_key_covers_every_override_when_the_profile_keys_are_unknown() {
+        let a = RebuildKey::new("dev", &ProfileEnvVars::Unknown, &env(&[("_", "run-1")]));
+        let b = RebuildKey::new("dev", &ProfileEnvVars::Unknown, &env(&[("_", "run-2")]));
+        assert_ne!(a, b);
+    }
+
+    /// Env values can be credentials; a key must never print them.
+    #[test]
+    fn rebuild_key_debug_names_keys_and_never_prints_values() {
+        let key = RebuildKey::new("dev", &reads_db_host(), &env(&[("DB_HOST", "hunter2-secret")]));
+        let rendered = format!("{key:?}");
+        assert!(rendered.contains("DB_HOST"), "{rendered}");
+        assert!(!rendered.contains("hunter2-secret"), "{rendered}");
     }
 
     /// When the keys cannot be named, any override is assumed relevant.

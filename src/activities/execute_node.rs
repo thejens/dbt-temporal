@@ -811,7 +811,7 @@ fn execute_node_body(
 
     // Private Jinja env + adapter for this activity, with the workflow's env
     // vars, --vars and --full-refresh applied. `render_env` must stay alive for
-    // the whole activity: it owns the rebuilt engine's cancellation source.
+    // the whole activity: it owns the adapter bound to this activity's token.
     // `base.adapter` is the node's `+adapter` selection when it made one and the
     // run's default otherwise, so routing on it needs no fallback of its own —
     // and an adapter the target does not declare fails here rather than running

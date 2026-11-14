@@ -100,8 +100,12 @@ pub struct WorkerState {
     /// of a run. Loading one per node meant every activity downloaded and
     /// deserialized the same artifact.
     pub defer_manifests: crate::worker::defer_cache::DeferManifestCache,
+    /// Engines rebuilt for per-workflow overrides, shared by every activity
+    /// that resolves to the same target and profile-visible env. A run with
+    /// overrides otherwise rebuilt the full engine set once per node.
+    pub rebuilt_engines: crate::worker::profile::RebuildCache,
     /// Optional auth override for the adapter engine.
-    /// When set, `rebuild_adapter_engines_with_env` uses this instead of the default auth.
+    /// When set, `rebuild_adapter_engines_shared` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,
     /// The project's enabled checks and the metadata index they query, or
     /// `None` when the project declares no enabled checks.

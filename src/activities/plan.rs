@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use bytes::Bytes;
 use dbt_common::io_args::ClapResourceType;
-use dbt_schemas::schemas::common::OnError;
+use dbt_schemas::schemas::common::{DbtMaterialization, OnError};
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
@@ -58,12 +58,7 @@ pub fn select_command_node_ids(
         .iter()
         .filter(|(id, node)| {
             let rt = node.resource_type();
-            let is_ephemeral = node
-                .base()
-                .materialized
-                .to_string()
-                .eq_ignore_ascii_case("ephemeral");
-            if is_ephemeral {
+            if node.base().materialized == DbtMaterialization::Ephemeral {
                 return false;
             }
             if !command_includes_node_type(command, rt) {

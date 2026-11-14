@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::{info, warn};
 
@@ -110,7 +111,7 @@ pub async fn store_artifacts_inner(
     // A run that continued as new left each earlier segment's results and log
     // in that segment's own checkpoint rather than dragging them through every
     // history since. Collect them so the artifacts describe the whole run.
-    let input = collect_prior_segments(store.as_ref(), input).await?;
+    let mut input = collect_prior_segments(store.as_ref(), input).await?;
 
     // The nodes wrote their compiled SQL to the store instead of carrying it
     // through the workflow; read it back for the one artifact that reports it.
@@ -127,13 +128,9 @@ pub async fn store_artifacts_inner(
     info!(path = %run_results_path, "stored run_results.json");
 
     // Store manifest (if inline) or note existing ref.
-    let manifest_path = if let Some(manifest_json) = &input.manifest_json {
+    let manifest_path = if let Some(manifest_json) = input.manifest_json.take() {
         store
-            .store(
-                &input.invocation_id,
-                "manifest.json",
-                Bytes::copy_from_slice(manifest_json.as_bytes()),
-            )
+            .store(&input.invocation_id, "manifest.json", Bytes::from(manifest_json))
             .await
             .map_err(|e| store_io_error("storing manifest.json", e))?
     } else if let Some(manifest_ref) = &input.manifest_ref {
@@ -146,17 +143,15 @@ pub async fn store_artifacts_inner(
     info!(path = %manifest_path, "manifest.json available");
 
     // Store run log if enabled and provided.
-    let log_path = if let Some(run_log) = &input.run_log {
-        if activities.write_run_log.0 {
-            let path = store
-                .store(&input.invocation_id, "log.txt", Bytes::copy_from_slice(run_log.as_bytes()))
-                .await
-                .map_err(|e| store_io_error("storing log.txt", e))?;
-            info!(path = %path, "stored log.txt");
-            Some(path)
-        } else {
-            None
-        }
+    let log_path = if activities.write_run_log.0
+        && let Some(run_log) = input.run_log.take()
+    {
+        let path = store
+            .store(&input.invocation_id, "log.txt", Bytes::from(run_log))
+            .await
+            .map_err(|e| store_io_error("storing log.txt", e))?;
+        info!(path = %path, "stored log.txt");
+        Some(path)
     } else {
         None
     };
@@ -262,6 +257,14 @@ async fn generate_and_store_catalog(
         .context("storing catalog.json")
 }
 
+/// How many compiled-SQL objects are fetched at once.
+///
+/// A run can have thousands of nodes, each with its own small object, so one
+/// round trip at a time makes this step scale with node count times store
+/// latency. Unbounded fan-out would instead open a connection per node against
+/// the store and its rate limits; 16 hides the latency without that.
+const COMPILED_SQL_FETCH_CONCURRENCY: usize = 16;
+
 /// Fetch each node's compiled SQL back from the store, keyed by unique id.
 ///
 /// A node that failed to store its SQL, or one from a run without artifact
@@ -269,35 +272,64 @@ async fn generate_and_store_catalog(
 /// failure to read one is logged rather than fatal: `run_results.json` without
 /// one node's compiled SQL is worth far more than no artifact at all, and this
 /// runs after every node has already finished.
+///
+/// Fetches overlap, but `buffered` yields in input order, so the map is built
+/// exactly as a sequential walk would build it.
 async fn load_compiled_sql(
     store: &dyn ArtifactStore,
     results: &[crate::types::NodeExecutionResult],
 ) -> BTreeMap<String, String> {
-    let mut compiled = BTreeMap::new();
-    for result in results {
-        let Some(reference) = result.compiled_code_ref.as_deref() else {
-            continue;
-        };
-        match store.retrieve(reference).await {
-            Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
-                Ok(sql) => {
-                    compiled.insert(result.unique_id.clone(), sql);
-                }
-                Err(e) => tracing::warn!(
+    // Futures are built eagerly (they do nothing until polled) and handed to
+    // `buffered` as plain items; a closure over borrowed items inside the
+    // stream combinators defeats the `Send` inference the activity macro needs.
+    let pending: Vec<_> = results
+        .iter()
+        .filter_map(|result| {
+            let reference = result.compiled_code_ref.as_deref()?;
+            Some(async move {
+                (result.unique_id.as_str(), fetch_compiled_sql(store, result, reference).await)
+            })
+        })
+        .collect();
+    let fetched: Vec<(&str, Option<String>)> = futures::stream::iter(pending)
+        .buffered(COMPILED_SQL_FETCH_CONCURRENCY)
+        .collect()
+        .await;
+
+    fetched
+        .into_iter()
+        .filter_map(|(unique_id, sql)| Some((unique_id.to_owned(), sql?)))
+        .collect()
+}
+
+/// Read one node's spilled SQL, logging and returning `None` if it cannot be had.
+async fn fetch_compiled_sql(
+    store: &dyn ArtifactStore,
+    result: &crate::types::NodeExecutionResult,
+    reference: &str,
+) -> Option<String> {
+    match store.retrieve(reference).await {
+        Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
+            Ok(sql) => Some(sql),
+            Err(e) => {
+                tracing::warn!(
                     node = %result.unique_id,
                     error = %e,
                     "compiled SQL is not UTF-8; omitting it from run_results.json"
-                ),
-            },
-            Err(e) => tracing::warn!(
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
                 node = %result.unique_id,
                 reference,
                 error = %format!("{e:#}"),
                 "could not read back compiled SQL; omitting it from run_results.json"
-            ),
+            );
+            None
         }
     }
-    compiled
 }
 
 /// dbt version stamped into artifact metadata.
@@ -308,7 +340,7 @@ async fn load_compiled_sql(
 /// pinned crates exports its version as a constant (each stamps its own
 /// `CARGO_PKG_VERSION` where it needs one), so it is written here and moves
 /// with the pin; `dbt_version_matches_the_pinned_crates` fails if it drifts.
-const DBT_VERSION: &str = "2.0.11";
+pub(super) const DBT_VERSION: &str = "2.0.11";
 
 /// Schema the artifact claims to follow. dbt-fusion writes v6.
 const RUN_RESULTS_SCHEMA: &str = "https://schemas.getdbt.com/dbt/run-results/v6.json";
@@ -661,6 +693,62 @@ mod tests {
             serde_json::from_str(&build_run_results_json(&input, &compiled)?)?;
         assert_eq!(parsed["results"][0]["unique_id"], "model.p.m", "the row survives: {parsed}");
         Ok(())
+    }
+
+    /// Answers every read with its own path after a pause, recording how many
+    /// reads were in flight at once.
+    struct SlowEchoStore {
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ArtifactStore for SlowEchoStore {
+        async fn store(&self, _: &str, _: &str, _: Bytes) -> anyhow::Result<String> {
+            anyhow::bail!("read-only")
+        }
+
+        async fn retrieve(&self, path: &str) -> anyhow::Result<Bytes> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            Ok(Bytes::from(format!("select '{path}'")))
+        }
+    }
+
+    #[tokio::test]
+    async fn compiled_sql_reads_overlap_within_the_bound_and_land_on_their_nodes() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = SlowEchoStore {
+            in_flight: 0.into(),
+            max_in_flight: 0.into(),
+        };
+        let node_count = COMPILED_SQL_FETCH_CONCURRENCY * 3;
+        let results: Vec<NodeExecutionResult> = (0..node_count)
+            .map(|i| {
+                let mut r = sample_result(&format!("model.p.m{i}"), NodeStatus::Success, 1.0);
+                // Every third node carries its SQL inline and has nothing to fetch.
+                if i % 3 != 0 {
+                    r.compiled_code_ref = Some(format!("ref-{i}"));
+                }
+                r
+            })
+            .collect();
+
+        let compiled = load_compiled_sql(&store, &results).await;
+
+        let max = store.max_in_flight.load(SeqCst);
+        assert!(max > 1, "reads ran one at a time");
+        assert!(max <= COMPILED_SQL_FETCH_CONCURRENCY, "{max} reads in flight exceeds the bound");
+        assert_eq!(compiled.len(), (0..node_count).filter(|i| i % 3 != 0).count());
+        for i in (0..node_count).filter(|i| i % 3 != 0) {
+            assert_eq!(
+                compiled.get(&format!("model.p.m{i}")).map(String::as_str),
+                Some(format!("select 'ref-{i}'").as_str()),
+            );
+        }
     }
 
     /// A stale source is the one measurement anybody reads a freshness artifact

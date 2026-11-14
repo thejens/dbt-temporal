@@ -10,6 +10,9 @@
 
 use std::sync::Arc;
 
+use dbt_schemas::schemas::common::DbtMaterialization;
+
+use super::store_artifacts::DBT_VERSION;
 use crate::types::{NodeExecutionResult, NodeStatus};
 use crate::worker_state::WorkerState;
 
@@ -95,8 +98,8 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
             continue;
         };
         let base = node.base();
-        let materialized = base.materialized.to_string();
-        if materialized.eq_ignore_ascii_case("ephemeral") {
+        // Ephemeral models are inlined as CTEs and never exist in the warehouse.
+        if base.materialized == DbtMaterialization::Ephemeral {
             continue;
         }
         // The relation the node actually wrote, when it recorded one. Startup
@@ -112,7 +115,7 @@ fn collect_targets(state: &WorkerState, node_results: &[NodeExecutionResult]) ->
             schema,
             identifier,
             quoting: base.quoting,
-            table_type: table_type_label(&materialized),
+            table_type: table_type_label(&base.materialized.to_string()),
             is_source: false,
             adapter: base.adapter,
         });
@@ -312,7 +315,7 @@ fn assemble_catalog(entries: &[CatalogEntry<'_>], invocation_id: &str) -> serde_
     serde_json::json!({
         "metadata": {
             "dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json",
-            "dbt_version": env!("CARGO_PKG_VERSION"),
+            "dbt_version": DBT_VERSION,
             "generated_at": chrono::Utc::now().to_rfc3339(),
             "invocation_id": invocation_id,
             "env": {},
@@ -422,5 +425,14 @@ mod tests {
             artifact["metadata"]["dbt_schema_version"],
             "https://schemas.getdbt.com/dbt/catalog/v1.json"
         );
+    }
+
+    /// The catalog describes a dbt run, so it reports dbt's version like the
+    /// other artifacts do, not this orchestrator's.
+    #[test]
+    fn assemble_catalog_reports_the_dbt_version() {
+        let artifact = assemble_catalog(&[], "inv-1");
+        assert_eq!(artifact["metadata"]["dbt_version"], DBT_VERSION);
+        assert_ne!(artifact["metadata"]["dbt_version"], env!("CARGO_PKG_VERSION"));
     }
 }

@@ -18,6 +18,10 @@
 //! attributes. A project is entitled to send two models that share a startup
 //! schema to different ones, and a schema-to-schema map cannot express that; a
 //! map from each startup relation to where it moved can.
+//!
+//! With custom macros, what a node resolves to is remembered for the rest of its
+//! run (see `worker::relation_cache`): an ancestor shared by many nodes is
+//! rendered once, not once per descendant.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -27,15 +31,10 @@ use dbt_schemas::schemas::nodes::NodeBaseAttributes;
 use dbt_schemas::schemas::telemetry::NodeType;
 
 use super::sql_rewrite::{RelationMove, RelationRewrite};
+use crate::activities::render_env::RenderOverrides;
 use crate::error::DbtTemporalError;
+use crate::worker::relation_cache::{NamingMacro, NodeRelation, RunRelations, RunScope};
 use crate::worker_state::WorkerState;
-
-/// Where one node's relation lives for this workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeRelation {
-    pub database: String,
-    pub schema: String,
-}
 
 /// Everything the executing node needs to name relations correctly: where its
 /// own output goes, and where every relation its compiled SQL can mention has
@@ -56,9 +55,14 @@ pub struct ResolvedRelations {
 /// through the SQL of the model under test. Resolving the whole project would
 /// mean a macro render per project node per activity to answer questions
 /// nobody asked.
+///
+/// `invocation_id` and `overrides` identify the run whose earlier answers may be
+/// reused; `jinja_env` must be the environment those overrides were applied to.
 pub fn resolve_relations(
     state: &WorkerState,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    invocation_id: &str,
+    overrides: &RenderOverrides<'_>,
     unique_id: &str,
     env_schema: Option<&str>,
     env_database: Option<&str>,
@@ -68,6 +72,20 @@ pub fn resolve_relations(
         return Ok(resolved);
     }
 
+    // Only the macros' renders are worth remembering; the default pattern is
+    // string arithmetic.
+    let run =
+        (state.has_custom_schema_name_macro || state.has_custom_database_name_macro).then(|| {
+            state.naming.run(RunScope::new(
+                invocation_id,
+                overrides.target,
+                overrides.env,
+                overrides.vars,
+                env_schema,
+                env_database,
+            ))
+        });
+
     for id in rewrite_scope(&state.resolver_state.nodes, unique_id) {
         let Some(node) = state.resolver_state.nodes.get_node(&id) else {
             continue;
@@ -76,7 +94,11 @@ pub fn resolve_relations(
             continue;
         }
         let base = node.base();
-        let moved = resolve_one(state, jinja_env, node, env_schema, env_database)?;
+        let resolve = || resolve_one(state, jinja_env, node, env_schema, env_database);
+        let moved = match run.as_deref() {
+            Some(run) => RunRelations::resolve(run, &id, resolve)?,
+            None => resolve()?,
+        };
         if moved.schema == base.schema && moved.database == base.database {
             continue;
         }
@@ -135,7 +157,7 @@ fn resolve_one(
         // resolved value rather than writing to a schema with no name.
         let rendered = render_naming_macro(
             jinja_env,
-            &state.project_name,
+            naming_template(state, jinja_env, NamingMacro::Schema)?,
             "generate_schema_name",
             unrendered(node, "schema").as_deref(),
             &node_value,
@@ -157,7 +179,7 @@ fn resolve_one(
     let database = if state.has_custom_database_name_macro {
         let rendered = render_naming_macro(
             jinja_env,
-            &state.project_name,
+            naming_template(state, jinja_env, NamingMacro::Database)?,
             "generate_database_name",
             unrendered(node, "database").as_deref(),
             &node_value,
@@ -270,16 +292,14 @@ fn compute_patched_relation_inner(
 /// looked up and invoked the same way a materialization is.
 fn render_naming_macro(
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
-    project_name: &str,
+    template_name: &str,
     macro_name: &str,
     custom_name: Option<&str>,
     node: &minijinja::Value,
 ) -> Result<String, anyhow::Error> {
-    let template_name = naming_macro_template(jinja_env, project_name, macro_name)
-        .ok_or_else(|| anyhow::anyhow!("no template defines {macro_name}"))?;
     let template = jinja_env
         .env
-        .get_template(&template_name)
+        .get_template(template_name)
         .map_err(|e| anyhow::anyhow!("template {template_name} not found: {e}"))?;
     let state = template
         .eval_to_state(BTreeMap::<String, minijinja::Value>::new(), &[])
@@ -293,6 +313,25 @@ fn render_naming_macro(
         .call(&state, &[custom, node.clone()], &[])
         .map_err(|e| anyhow::anyhow!("calling {macro_name}: {e}"))?;
     Ok(out.as_str().unwrap_or_default().trim().to_string())
+}
+
+/// The template defining a naming macro, looked up once per worker.
+///
+/// The error names the macro and surfaces as a compilation failure at the
+/// call site, as a failed render does.
+fn naming_template<'a>(
+    state: &'a WorkerState,
+    jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+    which: NamingMacro,
+) -> Result<&'a str, DbtTemporalError> {
+    let macro_name = match which {
+        NamingMacro::Schema => "generate_schema_name",
+        NamingMacro::Database => "generate_database_name",
+    };
+    state
+        .naming
+        .template(which, || naming_macro_template(jinja_env, &state.project_name, macro_name))
+        .ok_or_else(|| DbtTemporalError::Compilation(format!("no template defines {macro_name}")))
 }
 
 /// The template that defines a naming macro, preferring the root project's own
@@ -536,6 +575,18 @@ mod tests {
         dbt_jinja_utils::jinja_environment::JinjaEnv::new(env)
     }
 
+    /// What the activity does on a cold worker: find the template, then render.
+    fn render_via_lookup(
+        env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+        macro_name: &str,
+        custom_name: Option<&str>,
+        node: &minijinja::Value,
+    ) -> Result<String, anyhow::Error> {
+        let template = naming_macro_template(env, "spike", macro_name)
+            .ok_or_else(|| anyhow::anyhow!("no template defines {macro_name}"))?;
+        render_naming_macro(env, &template, macro_name, custom_name, node)
+    }
+
     const SCHEMA_MACRO: &str = "{% macro generate_schema_name(custom, node) %}\
         {%- if custom is none -%}default_{{ node.name }}\
         {%- else -%}custom_{{ custom }}_{{ node.name }}{%- endif -%}\
@@ -544,23 +595,16 @@ mod tests {
     #[test]
     fn render_naming_macro_passes_none_when_the_node_sets_no_override() {
         let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
-        let result = render_naming_macro(
-            &env,
-            "spike",
-            "generate_schema_name",
-            None,
-            &node_named("my_model"),
-        )
-        .unwrap();
+        let result =
+            render_via_lookup(&env, "generate_schema_name", None, &node_named("my_model")).unwrap();
         assert_eq!(result, "default_my_model");
     }
 
     #[test]
     fn render_naming_macro_passes_the_custom_name_through() {
         let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
-        let result = render_naming_macro(
+        let result = render_via_lookup(
             &env,
-            "spike",
             "generate_schema_name",
             Some("marketing"),
             &node_named("my_model"),
@@ -577,14 +621,9 @@ mod tests {
             "spike.generate_database_name",
             "{% macro generate_database_name(custom, node) %}db_{{ node.name }}{% endmacro %}",
         );
-        let result = render_naming_macro(
-            &env,
-            "spike",
-            "generate_database_name",
-            None,
-            &node_named("my_model"),
-        )
-        .unwrap();
+        let result =
+            render_via_lookup(&env, "generate_database_name", None, &node_named("my_model"))
+                .unwrap();
         assert_eq!(result, "db_my_model");
     }
 
@@ -606,8 +645,7 @@ mod tests {
         .expect("add template");
         let env = dbt_jinja_utils::jinja_environment::JinjaEnv::new(env);
         let result =
-            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
-                .unwrap();
+            render_via_lookup(&env, "generate_schema_name", None, &node_named("m")).unwrap();
         assert_eq!(result, "root");
     }
 
@@ -620,17 +658,15 @@ mod tests {
             "{% macro generate_schema_name(custom, node) %}package_{{ node.name }}{% endmacro %}",
         );
         let result =
-            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
-                .unwrap();
+            render_via_lookup(&env, "generate_schema_name", None, &node_named("m")).unwrap();
         assert_eq!(result, "package_m");
     }
 
     #[test]
     fn render_naming_macro_reports_a_macro_it_cannot_find() {
         let env = env_with_macro("spike.other", "{% macro other() %}x{% endmacro %}");
-        let err =
-            render_naming_macro(&env, "spike", "generate_schema_name", None, &node_named("m"))
-                .expect_err("a missing macro must be reported");
+        let err = render_via_lookup(&env, "generate_schema_name", None, &node_named("m"))
+            .expect_err("a missing macro must be reported");
         assert!(err.to_string().contains("generate_schema_name"), "should name the macro: {err}");
     }
 
@@ -639,14 +675,78 @@ mod tests {
     #[test]
     fn render_naming_macro_passes_a_quoted_custom_name_through() {
         let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
-        let result = render_naming_macro(
-            &env,
-            "spike",
-            "generate_schema_name",
-            Some("it's"),
-            &node_named("m"),
-        )
-        .unwrap();
+        let result =
+            render_via_lookup(&env, "generate_schema_name", Some("it's"), &node_named("m"))
+                .unwrap();
         assert_eq!(result, "custom_it's_m");
+    }
+
+    // --- per-run memoization ---
+
+    /// The resolution the activity runs per node under custom macros: schema
+    /// from the macro, database left at the node's own.
+    fn macro_relation(
+        env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
+        name: &str,
+        custom: Option<&str>,
+    ) -> Result<NodeRelation, anyhow::Error> {
+        Ok(NodeRelation {
+            database: "warehouse".to_string(),
+            schema: render_via_lookup(env, "generate_schema_name", custom, &node_named(name))?,
+        })
+    }
+
+    const NODES: [(&str, Option<&str>); 4] = [
+        ("customers", None),
+        ("orders", Some("marketing")),
+        ("payments", Some("finance")),
+        ("stg_customers", None),
+    ];
+
+    /// Memoizing must not change any answer, whatever order or how often nodes
+    /// are asked for.
+    #[test]
+    fn memoized_relations_equal_the_uncached_ones() {
+        let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
+        let run = RunRelations::default();
+
+        // Three passes, the later ones in a different order, as overlapping
+        // ancestor sets of different nodes ask for them.
+        for pass in [
+            NODES.to_vec(),
+            NODES.iter().rev().copied().collect(),
+            NODES.to_vec(),
+        ] {
+            for (name, custom) in pass {
+                let memoized = run
+                    .resolve(name, || macro_relation(&env, name, custom))
+                    .unwrap();
+                let uncached = macro_relation(&env, name, custom).unwrap();
+                assert_eq!(memoized, uncached, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_node_already_resolved_in_the_run_is_not_rendered_again() {
+        let env = env_with_macro("spike.generate_schema_name", SCHEMA_MACRO);
+        let run = RunRelations::default();
+        let renders = std::cell::Cell::new(0);
+        let lookup = |name: &str, custom: Option<&str>| {
+            run.resolve(name, || {
+                renders.set(renders.get() + 1);
+                macro_relation(&env, name, custom)
+            })
+            .unwrap()
+        };
+
+        for (name, custom) in NODES {
+            lookup(name, custom);
+        }
+        assert_eq!(renders.get(), NODES.len());
+        for (name, custom) in NODES {
+            lookup(name, custom);
+        }
+        assert_eq!(renders.get(), NODES.len(), "the second lookups rendered nothing");
     }
 }

@@ -7,8 +7,10 @@
 //! per-workflow credentials. They used to build it separately and had already
 //! drifted (only the hooks path registered the `execute` global).
 //!
-//! Everything here is per-activity by construction — the worker's `WorkerState`
-//! is never mutated, so concurrent workflows stay isolated.
+//! Everything here is per-activity by construction — the worker's parsed
+//! project in `WorkerState` is never mutated, so concurrent workflows stay
+//! isolated. The one thing activities share is the engine set a given override
+//! rebuilds to, which holds no per-activity state.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,7 +18,6 @@ use std::sync::Arc;
 use dbt_jinja_utils::jinja_environment::JinjaEnv;
 
 use crate::error::DbtTemporalError;
-use crate::worker::profile::RebuildResult;
 use crate::worker_state::WorkerState;
 
 use super::node_helpers::{json_to_minijinja, patch_target_global};
@@ -36,9 +37,11 @@ pub struct RenderOverrides<'a> {
     ///
     /// One per unit of work, not the worker's own: the token is what lets a
     /// cancelled activity stop the query it started, and a shared source would
-    /// mean cancelling one node cancels every node on the worker. It must
-    /// outlive the render — the engine holds only a `Weak` ref to its source,
-    /// so a dropped source reads as "already cancelled".
+    /// mean cancelling one node cancels every node on the worker. It lives on
+    /// the per-activity `Adapter`, never on an engine, which is what lets
+    /// engines be shared between activities. It must outlive the render — the
+    /// token holds only a `Weak` ref to its source, so a dropped source reads as
+    /// "already cancelled".
     pub cancellation: &'a dbt_common::cancellation::CancellationToken,
 }
 
@@ -53,10 +56,6 @@ pub struct RenderEnv {
     pub env_schema: Option<String>,
     /// Profile database after env overrides, same conditions as `env_schema`.
     pub env_database: Option<String>,
-    /// Keeps the rebuilt engine's `CancellationTokenSource` alive for the whole
-    /// activity. The engine's token holds only a `Weak` ref to its source, so
-    /// dropping this makes every subsequent adapter call report "cancelled".
-    _rebuild_guard: Option<RebuildResult>,
 }
 
 impl std::fmt::Debug for RenderEnv {
@@ -89,7 +88,7 @@ pub fn prepare_render_env(
     override_vars(&mut jinja_env, overrides.vars);
     override_flags(&mut jinja_env, overrides.full_refresh);
 
-    // Rebuild the adapter engine only when this workflow can resolve to a
+    // Use rebuilt engines only when this workflow can resolve to a
     // different profile than the worker's startup one — a rebuild re-renders
     // the profile and opens fresh connections, so it is not worth doing when
     // nothing can change. Two things change it: a `target` that names another
@@ -98,20 +97,21 @@ pub fn prepare_render_env(
     // reads env vars at all.
     let target_changed = overrides.target.is_some_and(|t| t != state.default_target);
     let env_changed = state.profile_env_vars.affected_by(overrides.env.keys());
-    let mut rebuild_guard = None;
     let (engine, env_schema, env_database) = if target_changed || env_changed {
+        // Shared with every other activity that resolves to the same target and
+        // profile-visible env: the rebuild is built once, by whichever of them
+        // gets here first.
         let result =
-            crate::worker::rebuild_adapter_engines_with_env(state, overrides.target, overrides.env)
+            crate::worker::rebuild_adapter_engines_shared(state, overrides.target, overrides.env)
                 .map_err(|e| {
-                    DbtTemporalError::Configuration(format!(
-                        "rebuilding adapter engines for {context}: {e:#}"
-                    ))
-                })?;
+                DbtTemporalError::Configuration(format!(
+                    "rebuilding adapter engines for {context}: {e:#}"
+                ))
+            })?;
         let engine = result.engines.get(adapter_type, context)?;
         // This node's adapter, not the default's: a target declaring several
         // adapters gives each its own schema and database.
         let resolved = result.target_for(adapter_type);
-        rebuild_guard = Some(result);
         (engine, Some(resolved.schema), resolved.database)
     } else {
         (state.adapter_engines.get(adapter_type, context)?, None, None)
@@ -158,7 +158,6 @@ pub fn prepare_render_env(
         adapter,
         env_schema,
         env_database,
-        _rebuild_guard: rebuild_guard,
     })
 }
 

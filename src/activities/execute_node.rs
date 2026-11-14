@@ -153,10 +153,21 @@ async fn load_defer_nodes(
         return Ok(None);
     };
     // A manifest at a given reference is the run that produced it — immutable,
-    // and the same for every node of this run.
-    if let Some(cached) = state.defer_manifests.get(manifest_ref) {
-        return Ok(Some(cached));
-    }
+    // and the same for every node of this run, so the first node loads it and
+    // the rest wait for that load.
+    let nodes = state
+        .defer_manifests
+        .get_or_load(manifest_ref, || fetch_defer_nodes(activities, state, manifest_ref))
+        .await?;
+    Ok(Some(nodes))
+}
+
+/// Download and decode the manifest at `manifest_ref`.
+async fn fetch_defer_nodes(
+    activities: &DbtActivities,
+    state: &crate::worker_state::WorkerState,
+    manifest_ref: &str,
+) -> Result<Arc<dbt_schemas::schemas::Nodes>, anyhow::Error> {
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "defer_manifest_ref requires artifact storage to be configured \
@@ -187,12 +198,9 @@ async fn load_defer_nodes(
         identifier: Some(resolved.identifier),
         snowflake_ignore_case: None,
     };
-    let nodes =
-        Arc::new(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(manifest, quoting));
-    state
-        .defer_manifests
-        .insert(manifest_ref, Arc::clone(&nodes));
-    Ok(Some(nodes))
+    Ok(Arc::new(dbt_schemas::schemas::manifest::nodes_from_dbt_manifest(
+        manifest, quoting,
+    )))
 }
 
 /// Build the compile+run base context.
@@ -811,23 +819,20 @@ fn execute_node_body(
 
     // Private Jinja env + adapter for this activity, with the workflow's env
     // vars, --vars and --full-refresh applied. `render_env` must stay alive for
-    // the whole activity: it owns the rebuilt engine's cancellation source.
+    // the whole activity: it owns the adapter bound to this activity's token.
     // `base.adapter` is the node's `+adapter` selection when it made one and the
     // run's default otherwise, so routing on it needs no fallback of its own —
     // and an adapter the target does not declare fails here rather than running
     // against the wrong warehouse.
-    let mut render_env = render_env::prepare_render_env(
-        state,
-        &render_env::RenderOverrides {
-            cancellation,
-            env: &input.env,
-            target: input.target.as_deref(),
-            vars: &input.vars,
-            full_refresh: input.full_refresh,
-        },
-        base.adapter,
-        unique_id,
-    )?;
+    let overrides = render_env::RenderOverrides {
+        cancellation,
+        env: &input.env,
+        target: input.target.as_deref(),
+        vars: &input.vars,
+        full_refresh: input.full_refresh,
+    };
+    let mut render_env =
+        render_env::prepare_render_env(state, &overrides, base.adapter, unique_id)?;
     let jinja_env = &mut render_env.jinja_env;
     let env_schema = render_env.env_schema.clone();
     let env_database = render_env.env_database.clone();
@@ -944,6 +949,8 @@ fn execute_node_body(
     let resolved = resolve_relations(
         state,
         jinja_env,
+        &input.invocation_id,
+        &overrides,
         unique_id,
         env_schema.as_deref(),
         env_database.as_deref(),

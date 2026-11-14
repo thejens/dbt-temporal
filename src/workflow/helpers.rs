@@ -500,13 +500,19 @@ fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
 /// internally but we're only interested in the success/error/skip trichotomy.
 pub const fn classify_result_status(status: NodeStatus) -> NodeStatus {
     match status {
-        NodeStatus::Error => NodeStatus::Error,
+        // Pending / Running: a finished activity cannot report itself as not
+        // yet finished. Counting it as a failure surfaces the defect instead
+        // of letting it pass.
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => NodeStatus::Error,
         NodeStatus::Skipped => NodeStatus::Skipped,
         // A warned node completed. It is not a failure and must not gate the
         // run — it is kept apart from `Success` only so the run can say it
         // found something.
         NodeStatus::Warn => NodeStatus::Warn,
-        _ => NodeStatus::Success,
+        // A cancelled activity reaches the scheduler as an `Err`, never as a
+        // result, so `Cancelled` is unreachable here in practice; it keeps the
+        // success class rather than inventing a fourth one for the trichotomy.
+        NodeStatus::Success | NodeStatus::Cancelled => NodeStatus::Success,
     }
 }
 
@@ -522,15 +528,15 @@ pub fn format_result_tag(status: NodeStatus, message: Option<&str>, execution_ti
             let detail = message.unwrap_or("warning");
             format!("WARN {detail} in {execution_time:.2}s")
         }
-        NodeStatus::Error => {
+        // Pending / Running are tagged like the error they are classified as
+        // (see `classify_result_status`).
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => {
             let msg = message.unwrap_or("error");
             format!("ERROR {msg}")
         }
         NodeStatus::Skipped => "SKIP".to_string(),
-        // Pending / Running / Cancelled never appear on the result-tag path
-        // (results are only built from completed activities), so the Debug
-        // form is just a defensive default.
-        _ => format!("{status:?}"),
+        // Spelled as the scheduler's own line for a cancelled node.
+        NodeStatus::Cancelled => "CANCELLED".to_string(),
     }
 }
 
@@ -1552,15 +1558,18 @@ mod tests {
     // --- classify_result_status ---
 
     #[test]
-    fn classify_result_status_collapses_to_three_terminals() {
-        assert_eq!(classify_result_status(NodeStatus::Error), NodeStatus::Error);
-        assert_eq!(classify_result_status(NodeStatus::Skipped), NodeStatus::Skipped);
-        // All other variants — including Pending/Running/Cancelled/Success —
-        // collapse to Success on the result-collection path.
-        assert_eq!(classify_result_status(NodeStatus::Success), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Pending), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Running), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Cancelled), NodeStatus::Success);
+    fn classify_result_status_maps_every_status() {
+        for (status, expected) in [
+            (NodeStatus::Success, NodeStatus::Success),
+            (NodeStatus::Warn, NodeStatus::Warn),
+            (NodeStatus::Error, NodeStatus::Error),
+            (NodeStatus::Skipped, NodeStatus::Skipped),
+            (NodeStatus::Cancelled, NodeStatus::Success),
+            (NodeStatus::Pending, NodeStatus::Error),
+            (NodeStatus::Running, NodeStatus::Error),
+        ] {
+            assert_eq!(classify_result_status(status), expected, "{status}");
+        }
     }
 
     // --- format_result_tag ---
@@ -1589,15 +1598,19 @@ mod tests {
     }
 
     #[test]
-    fn format_result_tag_non_terminal_falls_back_to_debug() {
-        // Pending/Running/Cancelled never reach the result-tag path in practice,
-        // but the defensive `_` arm must still yield the Debug form.
-        for status in [
-            NodeStatus::Pending,
-            NodeStatus::Running,
-            NodeStatus::Cancelled,
+    fn format_result_tag_covers_every_status() {
+        for (status, message, expected) in [
+            (NodeStatus::Success, None, "OK in 2.50s"),
+            (NodeStatus::Warn, None, "WARN warning in 2.50s"),
+            (NodeStatus::Warn, Some("2 rows"), "WARN 2 rows in 2.50s"),
+            (NodeStatus::Error, None, "ERROR error"),
+            (NodeStatus::Skipped, Some("ignored"), "SKIP"),
+            (NodeStatus::Cancelled, None, "CANCELLED"),
+            // Tagged as the error `classify_result_status` makes of them.
+            (NodeStatus::Pending, None, "ERROR error"),
+            (NodeStatus::Running, Some("still going"), "ERROR still going"),
         ] {
-            assert_eq!(format_result_tag(status, None, 0.0), format!("{status:?}"));
+            assert_eq!(format_result_tag(status, message, 2.5), expected, "{status}");
         }
     }
 

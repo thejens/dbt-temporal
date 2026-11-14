@@ -238,54 +238,19 @@ fn bounded_node_status(tree: &NodeStatusTree) -> NodeStatusTree {
 }
 
 pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Skipped,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Skipped, Some(message.to_string()))
 }
 
 pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Cancelled,
-        execution_time: 0.0,
-        message: Some("cancelled".to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(
+        unique_id,
+        NodeStatus::Cancelled,
+        Some("cancelled".to_string()),
+    )
 }
 
 pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Error,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Error, Some(message.to_string()))
 }
 
 /// English pluralisation suffix: empty for 1, "s" otherwise.
@@ -379,12 +344,6 @@ pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
     format!("Freshness. PASS={pass} WARN={warn} ERROR={error} TOTAL={}", results.len())
 }
 
-/// Seconds between two deterministic workflow timestamps, or 0.0 if either
-/// is missing (workflow_time() is None outside of an executing workflow).
-///
-/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
-/// stable across history replay; the workflow file's own docstring forbids
-/// wall-clock time for this reason.
 /// When the logical run began, and how long it has taken so far.
 ///
 /// One value rather than two loose parameters: they are only meaningful
@@ -411,6 +370,12 @@ pub struct RunFacts<'a> {
     pub target: Option<&'a str>,
 }
 
+/// Seconds between two deterministic workflow timestamps, or 0.0 if either
+/// is missing (workflow_time() is None outside of an executing workflow).
+///
+/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
+/// stable across history replay; the workflow file's own docstring forbids
+/// wall-clock time for this reason.
 pub fn elapsed_secs(
     start: Option<std::time::SystemTime>,
     end: Option<std::time::SystemTime>,
@@ -1172,19 +1137,7 @@ mod tests {
     }
 
     fn result_with_status(uid: &str, status: NodeStatus) -> NodeExecutionResult {
-        NodeExecutionResult {
-            unique_id: uid.to_string(),
-            status,
-            execution_time: 0.0,
-            message: None,
-            adapter_response: BTreeMap::new(),
-            compiled_code: None,
-            timing: vec![],
-            failures: None,
-            freshness: None,
-            compiled_code_ref: None,
-            relation_name: None,
-        }
+        NodeExecutionResult::not_executed(uid, status, None)
     }
 
     fn tree_from_statuses(statuses: &[NodeStatus]) -> NodeStatusTree {

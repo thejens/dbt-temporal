@@ -77,7 +77,6 @@ impl ObjectStoreArtifactStore {
     }
 
     /// Build from an explicit object_store instance and prefix (for testing).
-    #[allow(dead_code)]
     pub fn new(store: Box<dyn ObjectStore>, prefix: String) -> Self {
         Self { store, prefix }
     }

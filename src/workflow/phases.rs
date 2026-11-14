@@ -10,7 +10,6 @@
 
 // WorkflowContext uses Rc internally — the run() method already silences
 // this same lint for the same reason.
-#![allow(clippy::future_not_send)]
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
@@ -35,6 +34,17 @@ use crate::types::{
 use super::DbtRunWorkflow;
 use super::helpers::{activity_error_message, build_retry_policy, elapsed_secs, plural};
 use super::search_attributes::build_search_attribute_updates;
+
+/// A non-retryable workflow failure naming the activity that failed and the
+/// reason it returned (see [`activity_error_message`] for why that reason needs
+/// the `cause` chain). Non-retryable, so the workflow fails outright instead
+/// of the workflow task being retried into the same activity error.
+fn activity_failure(what: &str, e: &temporalio_sdk::ActivityExecutionError) -> WorkflowTermination {
+    WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
+        "{what}: {}",
+        activity_error_message(e)
+    )))
+}
 
 /// Build the workflow-detail line shown after `plan_project` returns:
 /// "planned 17 nodes across 8 levels".
@@ -183,12 +193,7 @@ pub async fn save_segment_state(
         ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
     )
     .await
-    .map_err(|e| {
-        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "save_segment_state activity failed: {}",
-            activity_error_message(&e)
-        )))
-    })
+    .map_err(|e| activity_failure("save_segment_state activity failed", &e))
 }
 
 /// Restore the state the previous segment spilled.
@@ -214,12 +219,7 @@ pub async fn load_segment_state(
         ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
     )
     .await
-    .map_err(|e| {
-        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "load_segment_state activity failed: {}",
-            activity_error_message(&e)
-        )))
-    })
+    .map_err(|e| activity_failure("load_segment_state activity failed", &e))
 }
 
 /// What the run produced, as the artifact activity needs it.
@@ -378,11 +378,7 @@ pub async fn plan_and_announce(
             ActivityOptions::start_to_close_timeout(Duration::from_secs(plan_timeout_secs)),
         )
         .await
-        .map_err(|e| {
-            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("plan_project activity failed: {}", activity_error_message(&e)),
-            ))
-        })?;
+        .map_err(|e| activity_failure("plan_project activity failed", &e))?;
 
     if !plan.search_attributes.is_empty() {
         ctx.upsert_search_attributes(build_search_attribute_updates(&plan.search_attributes)?);
@@ -413,12 +409,7 @@ pub async fn resolve_project_config(
             .build(),
     )
     .await
-    .map_err(|e| {
-        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "resolve_config activity failed: {}",
-            activity_error_message(&e)
-        )))
-    })
+    .map_err(|e| activity_failure("resolve_config activity failed", &e))
 }
 
 /// `ControlFlow::Break(out)` means the pre_run hooks signalled `skip` — the
@@ -474,12 +465,7 @@ pub async fn run_on_run_start(
         hook_activity_options(ProjectHookPhase::OnRunStart, policy),
     )
     .await
-    .map_err(|e| {
-        WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "on-run-start hook failed: {}",
-            activity_error_message(&e)
-        )))
-    })
+    .map_err(|e| activity_failure("on-run-start hook failed", &e))
 }
 
 /// The node ids a check's violations must name, or `None` for the whole project.
@@ -530,14 +516,7 @@ pub async fn run_project_checks(
             ActivityOptions::start_to_close_timeout(Duration::from_secs(timeouts.plan_secs)),
         )
         .await
-        .map_err(|e| {
-            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!(
-                    "project checks could not be evaluated: {}",
-                    activity_error_message(&e)
-                ),
-            ))
-        })?;
+        .map_err(|e| activity_failure("project checks could not be evaluated", &e))?;
 
     if output.failed == 0 {
         ctx.set_current_details(format!("{} project check(s) passed", output.results.len()));
@@ -575,11 +554,7 @@ pub async fn store_run_artifacts(
             )),
         )
         .await
-        .map_err(|e| {
-            WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("store_artifacts activity failed: {}", activity_error_message(&e)),
-            ))
-        })?;
+        .map_err(|e| activity_failure("store_artifacts activity failed", &e))?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))
 }
@@ -665,19 +640,8 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
     let node_results = plan
         .nodes
         .values()
-        .map(|node| NodeExecutionResult {
-            unique_id: node.unique_id.clone(),
-            status: NodeStatus::Success,
-            execution_time: 0.0,
-            message: None,
-            adapter_response: BTreeMap::new(),
-            compiled_code: None,
-            timing: vec![],
-            failures: None,
-            freshness: None,
-            // `list` executes nothing.
-            compiled_code_ref: None,
-            relation_name: None,
+        .map(|node| {
+            NodeExecutionResult::not_executed(node.unique_id.clone(), NodeStatus::Success, None)
         })
         .collect();
     DbtRunOutput {

@@ -85,7 +85,6 @@ pub fn match_file(pattern: &str, node_path: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

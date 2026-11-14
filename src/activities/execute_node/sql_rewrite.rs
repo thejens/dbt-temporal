@@ -453,7 +453,6 @@ fn skip_dollar_quoted(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

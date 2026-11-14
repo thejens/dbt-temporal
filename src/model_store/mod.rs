@@ -111,7 +111,6 @@ fn scan_for_projects(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

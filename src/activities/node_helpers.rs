@@ -171,10 +171,13 @@ fn ephemeral_dependencies<'a>(
 > {
     let mut by_name: BTreeMap<&str, (&str, &dyn dbt_schemas::schemas::nodes::InternalDbtNode)> =
         BTreeMap::new();
-    for (unique_id, node) in nodes.iter() {
-        if !depends_on.iter().any(|dep| dep == unique_id) {
+    // Sorted and deduplicated so a repeated dependency is not mistaken for a
+    // name clash, and so a genuine clash is always reported with the same pair.
+    let unique_ids: BTreeSet<&str> = depends_on.iter().map(String::as_str).collect();
+    for unique_id in unique_ids {
+        let Some(node) = nodes.get_node(unique_id) else {
             continue;
-        }
+        };
         if !node
             .base()
             .materialized
@@ -184,7 +187,8 @@ fn ephemeral_dependencies<'a>(
             continue;
         }
         let name = node.common().name.as_str();
-        if let Some((existing, _)) = by_name.insert(name, (unique_id.as_str(), node)) {
+        if let Some((existing, _)) = by_name.insert(name, (node.common().unique_id.as_str(), node))
+        {
             return Err(DbtTemporalError::Compilation(format!(
                 "two ephemeral dependencies are both named '{name}' ({existing} and \
                  {unique_id}); their CTEs cannot be told apart in compiled SQL"
@@ -878,6 +882,62 @@ mod tests {
         assert!(out.contains("select 'vendor' as who"), "got:\n{out}");
         assert!(!out.contains("select 'shop' as who"), "got:\n{out}");
         Ok(())
+    }
+
+    /// Only the node's own dependencies are candidates: a nested ephemeral is
+    /// found when the walk reaches its parent, and a non-ephemeral dependency
+    /// is never a candidate.
+    #[test]
+    fn ephemeral_dependencies_returns_only_direct_ephemeral_dependencies() {
+        use std::sync::Arc as A;
+
+        use dbt_schemas::schemas::common::DbtMaterialization;
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel, NodeBaseAttributes};
+
+        let model = |name: &str, materialized| {
+            A::new(DbtModel {
+                __common_attr__: CommonAttributes {
+                    unique_id: format!("model.shop.{name}"),
+                    name: name.to_string(),
+                    ..CommonAttributes::default()
+                },
+                __base_attr__: NodeBaseAttributes {
+                    materialized,
+                    ..NodeBaseAttributes::default()
+                },
+                ..DbtModel::default()
+            })
+        };
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        for (name, materialized) in [
+            ("outer", DbtMaterialization::Ephemeral),
+            ("inner", DbtMaterialization::Ephemeral),
+            ("table_dep", DbtMaterialization::Table),
+            ("unrelated", DbtMaterialization::Ephemeral),
+        ] {
+            nodes
+                .models
+                .insert(format!("model.shop.{name}"), model(name, materialized));
+        }
+
+        // `outer` depends on `inner`; the user node depends on `outer` and a
+        // table, and names `outer` twice and an id absent from the project.
+        let deps: Vec<String> = [
+            "model.shop.outer",
+            "model.shop.table_dep",
+            "model.shop.outer",
+            "model.shop.missing",
+        ]
+        .map(String::from)
+        .to_vec();
+        let found = ephemeral_dependencies(&deps, &nodes).expect("no name clash");
+        let entries: Vec<(&str, &str)> = found.iter().map(|(n, (id, _))| (*n, *id)).collect();
+        assert_eq!(entries, vec![("outer", "model.shop.outer")]);
+
+        // Walking into the nested ephemeral resolves its own dependencies.
+        let inner_deps = vec!["model.shop.inner".to_string()];
+        let found = ephemeral_dependencies(&inner_deps, &nodes).expect("no name clash");
+        assert_eq!(found.keys().copied().collect::<Vec<_>>(), vec!["inner"]);
     }
 
     /// A CTE marker naming a dependency that is not ephemeral has no body to

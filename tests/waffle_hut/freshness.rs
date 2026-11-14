@@ -4,7 +4,7 @@
 //! excluded from the plan; a node past `error_after` fails the workflow.
 
 use anyhow::{Context, Result};
-use dbt_temporal::types::NodeStatus;
+use dbt_temporal::types::{FreshnessGrade, NodeStatus};
 
 use super::infra::{
     connect_client, copy_fixture, init_tracing, make_input, run_dbt_workflow,
@@ -128,7 +128,7 @@ async fn test_source_freshness_pass_and_warn() -> Result<()> {
                 .as_ref()
                 .context("orders freshness outcome missing")?;
             assert_eq!(orders.status, NodeStatus::Success, "a fresh source is a plain pass");
-            assert_eq!(orders_freshness.status, "pass");
+            assert_eq!(orders_freshness.status, FreshnessGrade::Pass);
             assert!(orders_freshness.max_loaded_at.starts_with("2018-01-05"));
             // ~8 years old: sanity-check the age arithmetic.
             assert!(orders_freshness.max_loaded_at_time_ago_in_s > 8.0 * 365.0 * 86_400.0);
@@ -144,7 +144,7 @@ async fn test_source_freshness_pass_and_warn() -> Result<()> {
                 .as_ref()
                 .context("payments freshness outcome missing")?;
             assert_eq!(payments.status, NodeStatus::Warn, "warn_after=1d must warn the node");
-            assert_eq!(payments_freshness.status, "warn", "warn_after=1d must warn");
+            assert_eq!(payments_freshness.status, FreshnessGrade::Warn, "warn_after=1d must warn");
             assert!(payments_freshness.max_loaded_at.starts_with("2026-01-01"));
             Ok(())
         })
@@ -335,16 +335,16 @@ async fn test_model_freshness_measures_sources_and_sla_models() -> Result<()> {
             };
 
             let source_orders = outcome(".waffle_hut.orders")?;
-            assert_eq!(source_orders.status, "pass");
+            assert_eq!(source_orders.status, FreshnessGrade::Pass);
             assert_eq!(source_orders.resource_type, "source");
 
             let stg_orders = outcome(".stg_orders")?;
-            assert_eq!(stg_orders.status, "pass");
+            assert_eq!(stg_orders.status, FreshnessGrade::Pass);
             assert_eq!(stg_orders.resource_type, "model");
             assert!(stg_orders.max_loaded_at.starts_with("2018-01-05"), "{stg_orders:?}");
 
             let stg_payments = outcome(".stg_payments")?;
-            assert_eq!(stg_payments.status, "warn", "warn_after=1d must warn");
+            assert_eq!(stg_payments.status, FreshnessGrade::Warn, "warn_after=1d must warn");
             assert_eq!(stg_payments.resource_type, "model");
 
             let artifacts = run

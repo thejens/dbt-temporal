@@ -8,7 +8,8 @@ use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{MemoValue, WorkflowTermination};
 
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
+    DbtRunInput, ExecutionPlan, FreshnessGrade, NodeExecutionResult, NodeStatus, NodeStatusTree,
+    RetryConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -360,14 +361,14 @@ pub fn build_summary_lines(
 /// grading dbt gives each *measurement* (`pass` / `warn` / `error`) from the
 /// `FreshnessOutcome`, which is the number an SLA run exists to show.
 pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
-    let with_status = |status: &str| {
+    let with_status = |status: FreshnessGrade| {
         results
             .iter()
             .filter(|r| r.freshness.as_ref().is_some_and(|f| f.status == status))
             .count()
     };
-    let pass = with_status("pass");
-    let warn = with_status("warn");
+    let pass = with_status(FreshnessGrade::Pass);
+    let warn = with_status(FreshnessGrade::Warn);
     // A node past error_after fails its activity and produces no outcome, so
     // the error count comes from the node status rather than from the outcomes.
     let error = results
@@ -1282,22 +1283,22 @@ mod tests {
 
     #[test]
     fn freshness_summary_separates_warn_from_pass() {
-        let measured = |unique_id: &str, status: &str| {
+        let measured = |unique_id: &str, status: FreshnessGrade| {
             let mut result = skipped_result(unique_id, "");
             result.status = NodeStatus::Success;
             result.freshness = Some(crate::types::FreshnessOutcome {
                 max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
                 snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
                 max_loaded_at_time_ago_in_s: 3600.0,
-                status: status.into(),
+                status,
                 resource_type: "source".into(),
                 criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
             });
             result
         };
         let results = vec![
-            measured("source.p.s.a", "pass"),
-            measured("source.p.s.b", "warn"),
+            measured("source.p.s.a", FreshnessGrade::Pass),
+            measured("source.p.s.b", FreshnessGrade::Warn),
             // A stale node fails its activity and carries no outcome.
             error_result("model.p.c", "stale"),
         ];

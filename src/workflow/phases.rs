@@ -1030,7 +1030,7 @@ mod tests {
         );
         assert_eq!(phs.phase, ProjectHookPhase::OnRunEnd);
         assert_eq!(phs.node_results.len(), 1);
-        assert!(phs.prior_segments.is_empty());
+        assert_eq!(phs.prior_segments, Vec::<String>::new());
     }
 
     /// The activity reads the earlier segments back from these references, so

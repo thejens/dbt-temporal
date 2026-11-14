@@ -488,7 +488,7 @@ pub fn is_blocked_by_failed_upstream(
 
 /// True when `dep`'s failure shouldn't propagate to its dependents — it's a
 /// model configured with `on_error: continue`.
-fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
+pub fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
     plan.nodes.get(dep_unique_id).is_some_and(|info| {
         info.resource_type == NodeType::Model && info.on_error == Some(OnError::Continue)
     })

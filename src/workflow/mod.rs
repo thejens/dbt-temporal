@@ -13,6 +13,7 @@
 mod helpers;
 mod levels;
 mod phases;
+pub mod scheduler;
 mod search_attributes;
 
 use std::collections::BTreeMap;

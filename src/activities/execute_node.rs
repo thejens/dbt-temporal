@@ -1021,7 +1021,7 @@ fn execute_node_body(
             &state.io_args.in_dir,
             &ephemeral_dir,
         )?;
-        let sql = rewrite_relations(sql, &relation_rewrite);
+        let sql = rewrite_relations(sql, &relation_rewrite, base.adapter);
         // minijinja Values share their string via Arc — clone the Value, not the SQL.
         let sql_value = minijinja::Value::from(sql);
         node_context.insert("sql".to_owned(), sql_value.clone());
@@ -1076,7 +1076,7 @@ fn execute_node_body(
             )?;
             // Resolve the relations the startup manifest baked into this text —
             // the upstream `ref()`s that still name startup schemas.
-            let compiled = rewrite_relations(compiled, &relation_rewrite);
+            let compiled = rewrite_relations(compiled, &relation_rewrite, base.adapter);
 
             // Write compiled SQL to the temp dir so model.compiled_code / model.compiled_sql
             // resolve correctly when accessed by the materialization template.

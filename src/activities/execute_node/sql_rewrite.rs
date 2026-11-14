@@ -12,8 +12,11 @@
 //! module lexes the statement well enough to know what it is looking at, and
 //! rewrites in one pass:
 //!
-//! - String literals, quoted-literal dialects (`E'…'`, `$tag$…$tag$`) and
-//!   comments are skipped entirely.
+//! - String literals and comments are skipped entirely. Which literal forms
+//!   exist depends on the warehouse (see [`LiteralRules`]): whether a
+//!   backslash escapes inside `'…'`, `E'…'` escape strings, double-quoted
+//!   strings and triple-quoted strings. `$tag$…$tag$` bodies are skipped on
+//!   every dialect.
 //! - An identifier is only a rewrite candidate when it is a leading component
 //!   of a dotted chain — `x` in `x.y`, never the trailing `y`, and never a
 //!   bare `x`. Column aliases and keywords therefore never match.
@@ -26,6 +29,8 @@
 //! rendering rather than to patch text afterwards.
 
 use std::collections::BTreeMap;
+
+use dbt_adapter::AdapterType;
 
 /// Where each of the run's relations moved, indexed the way compiled SQL
 /// names them: by the schema and identifier the startup manifest resolved.
@@ -82,10 +87,93 @@ struct Chain {
     third: Option<Component>,
 }
 
-pub fn rewrite_relations(sql: String, rewrite: &RelationRewrite) -> String {
+/// What a double-quoted token is on one warehouse.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DoubleQuote {
+    /// A quoted identifier, as in PostgreSQL and Snowflake.
+    Identifier,
+    /// A string literal; identifiers are backtick-quoted instead.
+    String,
+}
+
+/// How string literals are written on one warehouse. Misjudging any of these
+/// inverts the lexer's notion of inside/outside a literal for the rest of the
+/// statement: relations get skipped, or text inside literals gets rewritten.
+#[derive(Clone, Copy)]
+struct LiteralRules {
+    /// A backslash inside a plain `'…'` literal escapes the next character.
+    /// Where it does not (standard-conforming strings), `'\'` is a complete
+    /// one-character literal.
+    backslash_escapes: bool,
+    /// `E'…'` opens an escape string whose backslashes escape, even though a
+    /// plain literal's do not.
+    escape_strings: bool,
+    /// What `"…"` is.
+    double_quote: DoubleQuote,
+    /// `'''…'''` and `"""…"""` are literals that may contain bare quotes.
+    triple_quoted: bool,
+}
+
+impl LiteralRules {
+    /// Exhaustive on purpose: a new adapter must be classified here rather than
+    /// silently inheriting another warehouse's literal syntax.
+    const fn for_adapter(adapter: AdapterType) -> Self {
+        // Standard SQL: a backslash is an ordinary character in `'…'`.
+        const STANDARD: LiteralRules = LiteralRules {
+            backslash_escapes: false,
+            escape_strings: false,
+            double_quote: DoubleQuote::Identifier,
+            triple_quoted: false,
+        };
+        // Backslash escapes in `'…'`; `"…"` stays an identifier.
+        const BACKSLASH: LiteralRules = LiteralRules {
+            backslash_escapes: true,
+            ..STANDARD
+        };
+        match adapter {
+            // PostgreSQL (standard_conforming_strings defaults on) and DuckDB
+            // take backslashes literally in plain literals and honour them in
+            // `E'…'`. dbt lexes LakeCompute with DuckDB's dialect.
+            AdapterType::Postgres | AdapterType::DuckDB | AdapterType::LakeCompute => Self {
+                escape_strings: true,
+                ..STANDARD
+            },
+            // Redshift forked PostgreSQL 8.0, before standard-conforming
+            // strings existed: plain literals process backslash escapes, which
+            // is why LIKE's default escape is written as two backslashes.
+            // Snowflake and ClickHouse document backslash escapes as well.
+            AdapterType::Redshift | AdapterType::Snowflake | AdapterType::ClickHouse => BACKSLASH,
+            // `"…"` is a string literal and identifiers are backtick-quoted.
+            AdapterType::Databricks | AdapterType::Spark => Self {
+                double_quote: DoubleQuote::String,
+                ..BACKSLASH
+            },
+            AdapterType::Bigquery => Self {
+                double_quote: DoubleQuote::String,
+                triple_quoted: true,
+                ..BACKSLASH
+            },
+            // ANSI literals: Trino and its derivatives, T-SQL, Oracle, Exasol
+            // and DataFusion. Dremio (Calcite) and Salesforce Data Cloud
+            // (PostgreSQL-style SQL) are expected to follow the standard too.
+            AdapterType::Trino
+            | AdapterType::Starburst
+            | AdapterType::Athena
+            | AdapterType::Fabric
+            | AdapterType::Oracle
+            | AdapterType::Exasol
+            | AdapterType::Datafusion
+            | AdapterType::Dremio
+            | AdapterType::Salesforce => STANDARD,
+        }
+    }
+}
+
+pub fn rewrite_relations(sql: String, rewrite: &RelationRewrite, adapter: AdapterType) -> String {
     if rewrite.is_empty() || sql.is_empty() {
         return sql;
     }
+    let rules = LiteralRules::for_adapter(adapter);
 
     // (byte range of the name, replacement). Collected in source order over a
     // single pass, then applied together — a replacement is never re-scanned.
@@ -97,13 +185,27 @@ pub fn rewrite_relations(sql: String, rewrite: &RelationRewrite) -> String {
         match bytes[i] {
             b'-' if bytes.get(i + 1) == Some(&b'-') => i = skip_line_comment(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'\'' => i = skip_single_quoted(bytes, i),
+            b'\'' => {
+                i = skip_string_literal(bytes, i, rules.backslash_escapes, rules.triple_quoted);
+            }
+            b'"' if rules.double_quote == DoubleQuote::String => {
+                i = skip_string_literal(bytes, i, rules.backslash_escapes, rules.triple_quoted);
+            }
             b'$' => match skip_dollar_quoted(bytes, i) {
                 Some(next) => i = next,
                 // Not a dollar-quote opener; `$` cannot start an identifier we
                 // care about, so step over it.
                 None => i += 1,
             },
+            // `E'…'` must be recognised before the `E` is read as an identifier.
+            // An `E` that ends a longer identifier (`name'…'`) is not a prefix.
+            b'e' | b'E'
+                if rules.escape_strings
+                    && bytes.get(i + 1) == Some(&b'\'')
+                    && (i == 0 || !is_ident_continue(bytes[i - 1])) =>
+            {
+                i = skip_string_literal(bytes, i + 1, true, false);
+            }
             _ => {
                 let Some((chain, next)) = scan_chain(bytes, i) else {
                     // An unterminated quote means the rest of the statement
@@ -292,21 +394,38 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
     i
 }
 
-/// Skip a `'…'` literal. A doubled quote escapes; so does a backslash, which
-/// PostgreSQL only honours for `E'…'` but which no adapter emits inside a
-/// relation name — treating it as an escape everywhere only ever skips more
-/// text, never less.
-fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
+/// Skip the literal whose opening quote is at `start`, returning the offset
+/// just past it, or `bytes.len()` when it is unterminated.
+///
+/// The delimiter is whichever quote byte sits at `start`. A doubled quote is an
+/// escaped quote in every dialect. A backslash skips the following byte only
+/// when `backslash` says this literal honours them; callers decide that per
+/// literal because `E'…'` differs from a plain literal on the same dialect.
+/// Only ASCII bytes are ever matched, so skipping the byte after a backslash
+/// may land inside a multi-byte character but never on a delimiter, and every
+/// returned offset follows an ASCII quote or is the end of input.
+fn skip_string_literal(bytes: &[u8], start: usize, backslash: bool, triple_quoted: bool) -> usize {
+    let quote = bytes[start];
+    // `'''` opens a triple-quoted literal; `''` alone is an empty string.
+    let triple = triple_quoted
+        && bytes.get(start + 1) == Some(&quote)
+        && bytes.get(start + 2) == Some(&quote);
+    let mut i = start + if triple { 3 } else { 1 };
     while i < bytes.len() {
         match bytes[i] {
-            b'\\' => i += 2,
-            b'\'' if bytes.get(i + 1) == Some(&b'\'') => i += 2,
-            b'\'' => return i + 1,
+            b'\\' if backslash => i += 2,
+            c if c == quote && triple => {
+                if bytes.get(i + 1) == Some(&quote) && bytes.get(i + 2) == Some(&quote) {
+                    return i + 3;
+                }
+                i += 1;
+            }
+            c if c == quote && bytes.get(i + 1) == Some(&quote) => i += 2,
+            c if c == quote => return i + 1,
             _ => i += 1,
         }
     }
-    i
+    bytes.len()
 }
 
 /// Skip a `$tag$…$tag$` literal, returning `None` when `start` does not open
@@ -355,8 +474,34 @@ mod tests {
         r
     }
 
+    /// The standard-literal dialect the generic tests run under.
     fn rewrite(sql: &str, r: &RelationRewrite) -> String {
-        rewrite_relations(sql.to_string(), r)
+        rewrite_on(AdapterType::Postgres, sql, r)
+    }
+
+    fn rewrite_on(adapter: AdapterType, sql: &str, r: &RelationRewrite) -> String {
+        rewrite_relations(sql.to_string(), r, adapter)
+    }
+
+    /// Dialects where a backslash is an ordinary character in `'…'`.
+    const STANDARD: [AdapterType; 4] = [
+        AdapterType::Postgres,
+        AdapterType::DuckDB,
+        AdapterType::Trino,
+        AdapterType::LakeCompute,
+    ];
+    /// Dialects where a backslash escapes inside `'…'`.
+    const BACKSLASH: [AdapterType; 6] = [
+        AdapterType::Bigquery,
+        AdapterType::Snowflake,
+        AdapterType::Databricks,
+        AdapterType::Spark,
+        AdapterType::Redshift,
+        AdapterType::ClickHouse,
+    ];
+
+    fn every_tested_dialect() -> Vec<AdapterType> {
+        STANDARD.iter().chain(&BACKSLASH).copied().collect()
     }
 
     #[test]
@@ -564,5 +709,201 @@ mod tests {
     fn leaves_numeric_literals_alone() {
         let r = schemas(&[("1", "5", "2")]);
         assert_eq!(rewrite("SELECT 1.5", &r), "SELECT 1.5");
+    }
+
+    /// Run `(sql, expected)` pairs against `dev.orders -> t1.orders` on each dialect.
+    fn check(adapters: &[AdapterType], cases: &[(&str, &str)]) {
+        let r = schemas(&[("dev", "orders", "t1")]);
+        for adapter in adapters {
+            for (sql, expected) in cases {
+                assert_eq!(&rewrite_on(*adapter, sql, &r), expected, "{adapter:?}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_backslash_literal_ends_on_standard_dialects() {
+        check(
+            &STANDARD,
+            &[
+                (r"select '\' as sep, * from dev.orders", r"select '\' as sep, * from t1.orders"),
+                // The literal after it must still be skipped, not rewritten.
+                (
+                    r"select '\', 'dev.orders' from dev.orders",
+                    r"select '\', 'dev.orders' from t1.orders",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_backslash_quote_does_not_end_the_literal_on_backslash_dialects() {
+        check(
+            &BACKSLASH,
+            &[
+                (
+                    r"select 'it\'s dev.orders' from dev.orders",
+                    r"select 'it\'s dev.orders' from t1.orders",
+                ),
+                (r"select '\\' from dev.orders", r"select '\\' from t1.orders"),
+            ],
+        );
+    }
+
+    #[test]
+    fn escape_strings_honour_backslashes_where_plain_literals_do_not() {
+        check(
+            &[AdapterType::Postgres, AdapterType::DuckDB],
+            &[
+                (r"select E'\'' , * from dev.orders", r"select E'\'' , * from t1.orders"),
+                (
+                    r"select e'a\'dev.orders' from dev.orders",
+                    r"select e'a\'dev.orders' from t1.orders",
+                ),
+                // `E` closing a longer identifier is not an escape-string prefix.
+                (r"select name'\' from dev.orders", r"select name'\' from t1.orders"),
+                (
+                    r"select E'\\', 'dev.orders' from dev.orders",
+                    r"select E'\\', 'dev.orders' from t1.orders",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn escape_prefix_is_inert_where_the_dialect_has_no_escape_strings() {
+        // Trino has no `E'…'`, so `E` is an identifier and `'\'` a plain literal.
+        check(
+            &[AdapterType::Trino],
+            &[(r"select E'\', * from dev.orders", r"select E'\', * from t1.orders")],
+        );
+    }
+
+    #[test]
+    fn doubled_quotes_escape_on_every_dialect() {
+        check(
+            &every_tested_dialect(),
+            &[
+                (
+                    "select 'it''s dev.orders' from dev.orders",
+                    "select 'it''s dev.orders' from t1.orders",
+                ),
+                ("select '' , * from dev.orders", "select '' , * from t1.orders"),
+            ],
+        );
+    }
+
+    #[test]
+    fn relation_names_inside_literals_are_never_rewritten() {
+        check(
+            &every_tested_dialect(),
+            &[(
+                "select 'dev.orders', 'x dev.orders y' from dev.orders",
+                "select 'dev.orders', 'x dev.orders y' from t1.orders",
+            )],
+        );
+    }
+
+    #[test]
+    fn unterminated_literals_do_not_panic_or_rewrite_what_follows() {
+        check(
+            &every_tested_dialect(),
+            &[
+                ("select 'dev.orders", "select 'dev.orders"),
+                // A trailing backslash would advance past the end of input.
+                (r"select 'dev.orders\", r"select 'dev.orders\"),
+                (r"select E'dev.orders\", r"select E'dev.orders\"),
+                ("select e", "select e"),
+                ("select E'", "select E'"),
+                ("select '''dev.orders", "select '''dev.orders"),
+            ],
+        );
+    }
+
+    #[test]
+    fn non_ascii_text_in_literals_and_quoted_identifiers_is_safe() {
+        let r = schemas(&[("dev", "orders", "t1"), ("scheme_é", "tbl_ü", "t2")]);
+        for adapter in every_tested_dialect() {
+            assert_eq!(
+                rewrite_on(adapter, "select 'é日本 dev.orders' from dev.orders", &r),
+                "select 'é日本 dev.orders' from t1.orders",
+                "{adapter:?}"
+            );
+            assert_eq!(
+                rewrite_on(adapter, "select `x` from `scheme_é`.`tbl_ü`", &r),
+                "select `x` from `t2`.`tbl_ü`",
+                "{adapter:?}"
+            );
+        }
+        // A backslash directly before a multi-byte character.
+        assert_eq!(
+            rewrite_on(AdapterType::Bigquery, r"select 'a\é', * from dev.orders", &r),
+            r"select 'a\é', * from t1.orders"
+        );
+        assert_eq!(
+            rewrite_on(AdapterType::Postgres, r#"select E'\é', * from "scheme_é"."tbl_ü""#, &r),
+            r#"select E'\é', * from "t2"."tbl_ü""#
+        );
+    }
+
+    #[test]
+    fn double_quotes_delimit_strings_only_where_identifiers_use_backticks() {
+        let r = schemas(&[("dev", "orders", "t1")]);
+        for adapter in [
+            AdapterType::Bigquery,
+            AdapterType::Databricks,
+            AdapterType::Spark,
+        ] {
+            assert_eq!(
+                rewrite_on(
+                    adapter,
+                    r#"select "dev.orders", "a\"b dev.orders" from dev.orders"#,
+                    &r
+                ),
+                r#"select "dev.orders", "a\"b dev.orders" from t1.orders"#,
+                "{adapter:?}"
+            );
+        }
+        // Elsewhere `"dev"."orders"` is a relation.
+        for adapter in [AdapterType::Postgres, AdapterType::Snowflake] {
+            assert_eq!(
+                rewrite_on(adapter, r#"select * from "dev"."orders""#, &r),
+                r#"select * from "t1"."orders""#,
+                "{adapter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bigquery_triple_quoted_literals_may_contain_bare_quotes() {
+        let r = schemas(&[("dev", "orders", "t1")]);
+        for sql in [
+            "select '''it's dev.orders''' from dev.orders",
+            "select \"\"\"say \"dev.orders\" \"\"\" from dev.orders",
+            r"select '''a\''' dev.orders''' from dev.orders",
+            "select r'''dev.orders''' from dev.orders",
+        ] {
+            assert_eq!(
+                rewrite_on(AdapterType::Bigquery, sql, &r),
+                sql.replace("from dev.orders", "from t1.orders"),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn bigquery_raw_and_empty_strings() {
+        let r = schemas(&[("dev", "orders", "t1")]);
+        for sql in [
+            r"select r'\d+ dev.orders', R'\' ' from dev.orders",
+            "select '', \"\" from dev.orders",
+            "select rb'\\\\', b'x' from dev.orders",
+        ] {
+            assert_eq!(
+                rewrite_on(AdapterType::Bigquery, sql, &r),
+                sql.replace("from dev.orders", "from t1.orders"),
+                "{sql}"
+            );
+        }
     }
 }

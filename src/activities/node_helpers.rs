@@ -617,9 +617,9 @@ mod tests {
 
     #[test]
     fn upstream_ephemeral_wrap_handles_user_with_clause() -> anyhow::Result<()> {
-        // Regression for the BigQuery `Expected keyword DEPTH` failure: when
+        // Guards the BigQuery `Expected keyword DEPTH` failure: when
         // the user's compiled SQL starts with `WITH`, naively prepending the
-        // ephemeral CTEs (our old code) produced two `WITH` keywords in a row.
+        // ephemeral CTEs produces two `WITH` keywords in a row.
         // BigQuery's parser then tried to read the second `WITH` as part of a
         // recursive CTE's `... CYCLE ... DEPTH` clause and rejected it.
         //
@@ -940,8 +940,8 @@ mod tests {
     }
 
     /// A CTE marker naming a dependency that is not ephemeral has no body to
-    /// inline. It used to be skipped, and the failure surfaced later as a
-    /// missing persisted file; it is now reported against the name in the SQL.
+    /// inline. Skipping it would defer the failure to a missing persisted file,
+    /// so it is reported against the name in the SQL.
     #[test]
     fn inject_ephemeral_ctes_reports_a_non_ephemeral_dependency() -> anyhow::Result<()> {
         use std::sync::Arc as A;

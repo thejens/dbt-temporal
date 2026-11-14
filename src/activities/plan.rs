@@ -262,11 +262,11 @@ fn artifact_io_error(e: anyhow::Error) -> anyhow::Error {
 
 /// Check the microbatch window before any node runs.
 ///
-/// The window is two strings on the workflow input, and every node activity
-/// used to parse them for itself — so a typo, a reversed pair, or only one of
-/// the two was discovered once per node, or not at all: with just one of them
-/// set, the windowing simply did not activate and the run quietly rebuilt every
-/// batch of every microbatch model.
+/// The window is two strings on the workflow input. If every node activity
+/// parsed them for itself, a typo, a reversed pair, or only one of the two
+/// would be discovered once per node, or not at all: with just one of them
+/// set, the windowing would not activate and the run would quietly rebuild
+/// every batch of every microbatch model.
 fn validate_microbatch_window(input: &DbtRunInput) -> Result<(), anyhow::Error> {
     let (start, end) = match (&input.event_time_start, &input.event_time_end) {
         (None, None) => return Ok(()),
@@ -879,8 +879,9 @@ mod tests {
 
     #[test]
     fn compile_command_includes_sql_nodes_but_not_seeds() {
-        // Regression: an earlier version returned false for any non-{run, build}
-        // command, producing "no nodes found for command 'compile'" on real projects.
+        // Commands other than {run, build} must not be treated as excluding
+        // everything, or planning fails with "no nodes found for command
+        // 'compile'" on real projects.
         assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Model));
         assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Test));
         assert!(command_includes_node_type(DbtCommand::Compile, NodeType::Snapshot));
@@ -888,8 +889,8 @@ mod tests {
         assert!(!command_includes_node_type(DbtCommand::Compile, NodeType::Seed));
     }
 
-    /// An unknown command used to match no arm and plan an empty run, which
-    /// then failed with "no nodes found" — technically an error, but one that
+    /// An unknown command would match no arm and plan an empty run, which
+    /// then fails with "no nodes found" — technically an error, but one that
     /// blames the selection rather than the typo.
     #[test]
     fn an_unknown_command_is_not_a_command() {
@@ -1028,7 +1029,7 @@ mod tests {
         }
     }
 
-    /// Regression: panda-cascade phantom-test macro defs must be detected so the
+    /// Phantom-test macro defs (seen in the panda-cascade project) must be detected so the
     /// planner can skip them. dbt-fusion registers each generic-test definition
     /// in `test-paths/` as a runnable test; the body looks like a macro def and
     /// renders to empty SQL → `Syntax error: Unexpected ")"`.
@@ -1446,8 +1447,8 @@ mod tests {
         assert!(validate_microbatch_window(&window_input(None, None)).is_ok());
     }
 
-    /// Half a window used to activate nothing: the run rebuilt every batch of
-    /// every microbatch model and reported success.
+    /// Half a window would activate nothing: the run would rebuild every batch
+    /// of every microbatch model and report success.
     #[test]
     fn half_a_microbatch_window_is_rejected() {
         for (start, end, missing) in [

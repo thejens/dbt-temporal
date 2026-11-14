@@ -545,14 +545,13 @@ mod tests {
 
     #[test]
     fn anyhow_alternate_format_preserves_chain_for_dbt_fusion_errors() {
-        // Regression: the worker used to wrap dbt-fusion errors with `: {e}`
-        // (Display), which prints only the outermost `anyhow::Error` message
-        // and discards the chained context — turning real failures like
+        // Wrapping sites format dbt-fusion errors with `: {e:#}` (alternate
+        // Display) so chains print as `outer: inner: deeper`. Plain `{e}`
+        // prints only the outermost `anyhow::Error` message and discards the
+        // chained context, which would turn real failures like
         // `dbt1001: Failed to read file <path>` into bare
         // `Failed to read file: No such file or directory (os error 2)`.
-        // We now use `: {e:#}` (alternate Display) at every wrapping site so
-        // chains print as `outer: inner: deeper`. This test pins that
-        // contract: switching back to `{e}` would make it fail.
+        // This test pins that contract: formatting with `{e}` would fail it.
         use anyhow::Context;
         let inner: Result<(), std::io::Error> =
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing /path/to/file.sql"));

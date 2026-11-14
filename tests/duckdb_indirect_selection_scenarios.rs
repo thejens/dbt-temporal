@@ -1,9 +1,9 @@
 //! `--indirect-selection`: which tests a selector-scoped run pulls in.
 //!
 //! dbt runs a selected model's tests even though the selector never names them.
-//! dbt-temporal previously did not, so `--select my_model` under `build` ran the
-//! model and silently skipped every test on it — a green run over unverified
-//! data. These drive the real planner against a real project.
+//! Without that, `--select my_model` under `build` would run the model and
+//! silently skip every test on it — a green run over unverified data. These
+//! drive the real planner against a real project.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::large_futures)]
 
@@ -152,7 +152,7 @@ fn has_test_on(ids: &[String], needle: &str) -> bool {
         .any(|id| id.starts_with("test.") && id.contains(needle))
 }
 
-/// The regression: selecting a model must bring its own test along.
+/// Selecting a model must bring its own test along.
 #[tokio::test]
 async fn eager_pulls_in_the_selected_models_test() {
     let harness = project().await;
@@ -166,7 +166,7 @@ async fn eager_pulls_in_the_selected_models_test() {
     );
 }
 
-/// `empty` is the old behavior, now opt-in rather than the accident.
+/// `empty` is the opt-out: a selector then names exactly the nodes it matches.
 #[tokio::test]
 async fn empty_selects_no_tests_at_all() {
     let harness = project().await;
@@ -233,7 +233,7 @@ async fn expanding_a_full_selection_adds_nothing() {
     assert_eq!(expanded.len(), all.len(), "no duplicates: {expanded:?}");
 }
 
-/// Regression: indirect selection must respect the command's node-type filter.
+/// Indirect selection must respect the command's node-type filter.
 /// `dbt run` executes models only, so `run --select a` must not gain `a`'s
 /// tests just because they depend on it.
 #[tokio::test]

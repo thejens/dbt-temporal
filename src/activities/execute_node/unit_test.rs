@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn compare_reads_utf8view_label_columns() {
-        // Regression: the adapter widens every result string column to
+        // The adapter widens every result string column to
         // `Utf8View`, so a plain `StringArray` downcast fails on real results
         // and the unit test errors with "not a string column" instead of
         // comparing anything.

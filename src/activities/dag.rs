@@ -811,7 +811,7 @@ mod tests {
         assert!(err.to_string().contains("cyclic dependency"), "{err}");
     }
 
-    /// Regression: panda-cascade marketing_model phantom cycle.
+    /// Guards against the panda-cascade marketing_model phantom cycle.
     ///
     /// `test_country_base` refs four sibling models in a dep chain via a Jinja
     /// loop — `marketing_spend_{daily,weekly,monthly,quarterly}`. Naively
@@ -984,7 +984,7 @@ mod tests {
         assert!(levels[0].contains(&"test.m.phantom".to_string()));
     }
 
-    /// Regression: panda-cascade `logo_activity_model` transitive cycle.
+    /// Guards against the panda-cascade `logo_activity_model` transitive cycle.
     ///
     /// Reduced topology from the real project. The trigger is a test that refs
     /// a *descendant* of a model M, while another node N depends on M without
@@ -1189,7 +1189,7 @@ mod unit_test_gate_tests {
         ]);
         inject_unit_test_gates(&nodes, &sel, &mut d);
 
-        // The unit test no longer waits for the model; it inherits the
+        // The unit test does not wait for the model; it inherits the
         // model's inputs and gates the model instead.
         assert_eq!(d["unit_test.p.u"], deps(&[("x", &["model.p.input"])])["x"]);
         assert!(d["model.p.m"].contains("unit_test.p.u"));

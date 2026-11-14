@@ -8,12 +8,12 @@ use std::path::PathBuf;
 
 /// A fetched model store, and the dbt projects found inside it.
 ///
-/// Owning the directory is the point. A fetch used to allocate a UUID-named
-/// directory under the system temp dir and return only paths, so nothing could
-/// ever remove it: a worker that restarts often enough fills its temp
+/// Owning the directory is the point. Handing out only paths into a
+/// UUID-named directory under the system temp dir would leave nothing able to
+/// remove it: a worker that restarts often enough would fill its temp
 /// filesystem with copies of the same project, and a clone that failed halfway
-/// left a partial one behind under a name nothing would look at again. The
-/// directory now goes away when the registry that loaded from it does.
+/// would leave a partial one behind under a name nothing would look at again.
+/// The directory goes away when the registry that loaded from it does.
 #[derive(Debug)]
 pub struct FetchedProjects {
     /// Removed on drop. `None` for a project directory the worker was pointed

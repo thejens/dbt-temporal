@@ -401,8 +401,8 @@ mod tests {
         assert_eq!(out, vec!["model.shop.stg_orders".to_string()]);
     }
 
-    /// Regression: the matcher used to substring-match the dotted FQN, so
-    /// `customers` also pulled in `stg_customers`.
+    /// The matcher must not substring-match the dotted FQN, or `customers`
+    /// would also pull in `stg_customers`.
     #[test]
     fn apply_selectors_fqn_name_does_not_substring_match() {
         let (ids, nodes) = build_three_model_project();
@@ -472,7 +472,7 @@ mod tests {
         );
     }
 
-    /// And one ending in `.sql` parses as `file:`, which now selects a node
+    /// And one ending in `.sql` parses as `file:`, which selects a node
     /// rather than being turned away as unevaluable.
     #[test]
     fn apply_selectors_file_method_and_its_bare_sql_spelling() {

@@ -101,12 +101,10 @@ pub fn init_for_tests() {
 /// subscriber, so narrowing it never starves the data layer of the spans dbt
 /// reads back.
 fn console_filter() -> EnvFilter {
-    // No module suppression here. This used to silence
-    // `temporalio_sdk::workflow_future` wholesale, for an error it logged on
-    // every unhandled query (`__stack_trace` from the Temporal UI). The pinned
-    // SDK no longer logs that; the only non-debug record left in that module is
-    // the `Workflow task failed for <run>: <failure>` warning, which is the one
-    // line that explains why a workflow is wedged.
+    // No module suppression here. Silencing `temporalio_sdk::workflow_future`
+    // wholesale would hide the `Workflow task failed for <run>: <failure>`
+    // warning, the one line that explains why a workflow is wedged; the pinned
+    // SDK logs nothing else non-debug in that module.
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
 

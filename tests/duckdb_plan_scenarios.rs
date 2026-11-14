@@ -248,10 +248,10 @@ models:
     assert!(ids[0].ends_with(".measurable"), "got: {ids:?}");
 }
 
-/// A misspelled command used to match no arm of the planner's dispatch and
-/// select nothing, so the run failed with "no nodes found" — an error that
+/// A misspelled command would match no arm of the planner's dispatch and
+/// select nothing, so the run would fail with "no nodes found" — an error that
 /// blames the selection rather than the typo, and looks identical to a genuine
-/// empty selection.
+/// empty selection. It must be rejected by name instead.
 #[tokio::test]
 async fn a_misspelled_command_says_so() {
     let harness = Harness::build(&[("m", "select 1 as id")]).await;

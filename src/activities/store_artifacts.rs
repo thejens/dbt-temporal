@@ -335,8 +335,8 @@ async fn fetch_compiled_sql(
 /// dbt version stamped into artifact metadata.
 ///
 /// The artifacts describe a dbt run, so consumers read this as dbt's version,
-/// not the orchestrator's — `run_results.json` used to report dbt-temporal's,
-/// which made every artifact claim a dbt that does not exist. None of the
+/// not the orchestrator's — reporting dbt-temporal's would make every artifact
+/// claim a dbt that does not exist. None of the
 /// pinned crates exports its version as a constant (each stamps its own
 /// `CARGO_PKG_VERSION` where it needs one), so it is written here and moves
 /// with the pin; `dbt_version_matches_the_pinned_crates` fails if it drifts.
@@ -756,9 +756,9 @@ mod tests {
     }
 
     /// A stale source is the one measurement anybody reads a freshness artifact
-    /// for. It used to be missing from both: the stale verdict carried no
-    /// outcome, the activity failed instead of returning one, and the filter
-    /// here keeps only results that have one.
+    /// for. The filter here keeps only results that carry an outcome, so a
+    /// stale verdict must carry one rather than the activity failing without
+    /// returning a result.
     #[test]
     fn sources_json_includes_a_stale_source() -> anyhow::Result<()> {
         let mut stale = with_freshness("source.p.s.orders", "source", FreshnessGrade::Error);

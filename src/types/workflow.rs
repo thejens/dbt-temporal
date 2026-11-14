@@ -688,6 +688,46 @@ pub struct NodeStatusTree {
     pub nodes: BTreeMap<String, NodeStatus>,
 }
 
+/// Coarse stage of a run, as reported by the `run_status` query. Terminal
+/// state is not a phase: it comes from the workflow result itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    #[default]
+    Initializing,
+    Planning,
+    PreRunHooks,
+    Executing,
+    Finalizing,
+}
+
+/// Value of the `DbtStatus` search attribute, which lets the workflow list be
+/// filtered by outcome. `Running` is set at plan time; the other four replace
+/// it as the run ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl RunOutcome {
+    /// The keyword the search attribute holds. Workflow list filters and saved
+    /// queries match on these strings, so they are spelled exactly as operators
+    /// already query them.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Live run progress served by the `run_status` query.
 ///
 /// Unlike the memo (truncated, written on a level cadence), this reflects
@@ -695,9 +735,7 @@ pub struct NodeStatusTree {
 /// read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunStatusSnapshot {
-    /// Coarse phase: `initializing`, `planning`, `pre_run_hooks`, `executing`,
-    /// `finalizing`. Terminal state comes from the workflow result itself.
-    pub phase: String,
+    pub phase: RunPhase,
     pub total_nodes: usize,
     pub total_levels: usize,
     /// Index of the most recently completed level (1-based; 0 = none yet).
@@ -1086,6 +1124,52 @@ mod tests {
         let input: DbtRunInput = serde_json::from_str(json)?;
         assert_eq!(input.command, "build");
         Ok(())
+    }
+
+    #[test]
+    fn run_phase_serializes_to_the_strings_the_query_reports() {
+        for (phase, wire) in [
+            (RunPhase::Initializing, "initializing"),
+            (RunPhase::Planning, "planning"),
+            (RunPhase::PreRunHooks, "pre_run_hooks"),
+            (RunPhase::Executing, "executing"),
+            (RunPhase::Finalizing, "finalizing"),
+        ] {
+            assert_eq!(serde_json::to_value(phase).unwrap(), serde_json::json!(wire));
+            assert_eq!(serde_json::from_value::<RunPhase>(serde_json::json!(wire)).unwrap(), phase);
+        }
+    }
+
+    #[test]
+    fn run_status_snapshot_with_a_string_phase_deserializes() {
+        let snapshot: RunStatusSnapshot = serde_json::from_value(serde_json::json!({
+            "phase": "pre_run_hooks",
+            "total_nodes": 3,
+            "total_levels": 2,
+            "completed_levels": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+            "running": 0,
+            "fail_fast": false,
+        }))
+        .unwrap();
+        assert_eq!(snapshot.phase, RunPhase::PreRunHooks);
+        assert_eq!(serde_json::to_value(&snapshot).unwrap()["phase"], "pre_run_hooks");
+        assert_eq!(RunStatusSnapshot::default().phase, RunPhase::Initializing);
+    }
+
+    #[test]
+    fn run_outcome_spells_the_search_attribute_values() {
+        for (outcome, wire) in [
+            (RunOutcome::Running, "running"),
+            (RunOutcome::Passed, "passed"),
+            (RunOutcome::Failed, "failed"),
+            (RunOutcome::Skipped, "skipped"),
+            (RunOutcome::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(outcome.as_str(), wire);
+        }
     }
 
     #[test]

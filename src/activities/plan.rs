@@ -8,7 +8,7 @@ use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
 
-use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo};
+use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo, RunOutcome};
 use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
@@ -743,7 +743,7 @@ fn build_search_attributes(
     }
     search_attributes
         .entry("DbtStatus".to_string())
-        .or_insert_with(|| "running".to_string());
+        .or_insert_with(|| RunOutcome::Running.as_str().to_string());
 
     if !registered.is_empty() {
         let before = search_attributes.len();

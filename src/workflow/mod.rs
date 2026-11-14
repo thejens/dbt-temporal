@@ -26,8 +26,8 @@ use temporalio_sdk::{
 };
 
 use crate::types::{
-    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RunResumeState, RunSegmentControl,
-    RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RunOutcome, RunPhase, RunResumeState,
+    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
@@ -61,7 +61,7 @@ impl DbtRunWorkflow {
     fn new(_ctx: &WorkflowContextView, input: DbtRunInput) -> Self {
         let fail_fast_override = inherited_fail_fast_override(&input);
         let status = RunStatusSnapshot {
-            phase: "initializing".to_string(),
+            phase: RunPhase::Initializing,
             fail_fast: fail_fast_override.unwrap_or(input.fail_fast),
             ..RunStatusSnapshot::default()
         };
@@ -121,7 +121,7 @@ impl DbtRunWorkflow {
             .and_then(|state| state.started_at)
             .map_or(start, |t| Some(std::time::SystemTime::from(t)));
 
-        ctx.state_mut(|s| s.status.phase = "planning".to_string());
+        ctx.state_mut(|s| s.status.phase = RunPhase::Planning);
         // Timeouts come from dbt_temporal.yml, but planning happens before that is
         // resolved — use the built-in default for the plan activity itself.
         let plan = match resumed.as_ref() {
@@ -131,13 +131,13 @@ impl DbtRunWorkflow {
         ctx.state_mut(|s| {
             s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
             s.status.total_levels = plan.levels.len();
-            s.status.phase = "pre_run_hooks".to_string();
+            s.status.phase = RunPhase::PreRunHooks;
         });
 
         // list: return the selected node set without executing any SQL.
         if DbtCommand::parse(&input.command) == Some(DbtCommand::List) {
             let out = build_list_output(&plan, elapsed_secs(start, ctx.workflow_time()));
-            upsert_terminal_status(ctx, &plan, "passed")?;
+            upsert_terminal_status(ctx, &plan, RunOutcome::Passed)?;
             ctx.set_current_details("list".to_string());
             return Ok(out);
         }
@@ -180,7 +180,7 @@ impl DbtRunWorkflow {
             )
             .await?
             {
-                upsert_terminal_status(ctx, &plan, "skipped")?;
+                upsert_terminal_status(ctx, &plan, RunOutcome::Skipped)?;
                 ctx.set_current_details("skipped by pre_run hook".to_string());
                 return Ok(out);
             }
@@ -192,7 +192,7 @@ impl DbtRunWorkflow {
             run_on_run_start(ctx, &input, &plan, &effective_env, hook_policy).await?;
         }
 
-        ctx.state_mut(|s| s.status.phase = "executing".to_string());
+        ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
         let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
         let mut levels = execute_levels(
             ctx,
@@ -219,7 +219,7 @@ impl DbtRunWorkflow {
             return continue_run_as_new(ctx, &input, &plan, state).await;
         }
         ctx.state_mut(|s| {
-            s.status.phase = "finalizing".to_string();
+            s.status.phase = RunPhase::Finalizing;
             s.status.tally(&levels.node_status);
         });
 
@@ -232,7 +232,7 @@ impl DbtRunWorkflow {
         }
 
         if levels.was_cancelled {
-            upsert_terminal_status(ctx, &plan, "cancelled")?;
+            upsert_terminal_status(ctx, &plan, RunOutcome::Cancelled)?;
             ctx.set_current_details("cancelled".to_string());
             return Err(WorkflowTermination::cancelled());
         }
@@ -312,7 +312,15 @@ impl DbtRunWorkflow {
             success,
             output.elapsed_time,
         ));
-        upsert_terminal_status(ctx, &plan, if success { "passed" } else { "failed" })?;
+        upsert_terminal_status(
+            ctx,
+            &plan,
+            if success {
+                RunOutcome::Passed
+            } else {
+                RunOutcome::Failed
+            },
+        )?;
 
         if success {
             Ok(output)

@@ -169,7 +169,7 @@ pub async fn connect_and_register(
         conn_opts.tls_options = Some(tls);
     }
     if let Some(ref api_key) = config.temporal_api_key {
-        conn_opts.api_key = Some(api_key.clone());
+        conn_opts.api_key = Some(api_key.expose().to_string());
     }
 
     let connection = Connection::connect(conn_opts)

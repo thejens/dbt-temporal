@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod secret;
 pub mod tuning;
 
 #[cfg(test)]
@@ -7,6 +8,7 @@ mod test_util;
 use std::collections::BTreeMap;
 
 pub use self::discovery::is_remote_source;
+pub use self::secret::Secret;
 
 /// Configuration for the dbt-temporal worker, read from environment variables.
 #[derive(Debug, Clone)]
@@ -16,7 +18,7 @@ pub struct DbtTemporalConfig {
     pub temporal_address: String,
     pub temporal_namespace: String,
     pub temporal_task_queue: String,
-    pub temporal_api_key: Option<String>,
+    pub temporal_api_key: Option<Secret>,
     pub temporal_tls_cert: Option<String>,
     pub temporal_tls_key: Option<String>,
 
@@ -121,7 +123,7 @@ pub enum TemporalMetricsConfig {
         use_http: bool,
         /// Extra headers (e.g. auth). From `TEMPORAL_METRICS_OTLP_HEADERS`
         /// as comma-separated `key=value` pairs.
-        headers: BTreeMap<String, String>,
+        headers: BTreeMap<String, Secret>,
     },
 }
 
@@ -219,7 +221,7 @@ impl DbtTemporalConfig {
                 .unwrap_or_else(|_| "default".to_string()),
             temporal_task_queue: std::env::var("TEMPORAL_TASK_QUEUE")
                 .unwrap_or_else(|_| "dbt-tasks".to_string()),
-            temporal_api_key: std::env::var("TEMPORAL_API_KEY").ok(),
+            temporal_api_key: std::env::var("TEMPORAL_API_KEY").ok().map(Secret::new),
             temporal_tls_cert: std::env::var("TEMPORAL_TLS_CERT").ok(),
             temporal_tls_key: std::env::var("TEMPORAL_TLS_KEY").ok(),
             dbt_project_dirs,
@@ -413,7 +415,7 @@ mod tests {
                 assert_eq!(cfg.temporal_address, "http://temporal:7233");
                 assert_eq!(cfg.temporal_namespace, "ns");
                 assert_eq!(cfg.temporal_task_queue, "q1");
-                assert_eq!(cfg.temporal_api_key.as_deref(), Some("secret"));
+                assert_eq!(cfg.temporal_api_key.as_ref().map(Secret::expose), Some("secret"));
                 assert_eq!(cfg.temporal_tls_cert.as_deref(), Some("/cert"));
                 assert_eq!(cfg.temporal_tls_key.as_deref(), Some("/key"));
                 Ok(())
@@ -644,6 +646,35 @@ mod tests {
         .unwrap();
     }
 
+    /// A config is the natural thing to log with `{:?}` at start-up; none of
+    /// its credentials may come out.
+    #[test]
+    fn debug_output_holds_no_credentials() {
+        let project = make_project_dir();
+        let project_str = project.path().to_str().unwrap();
+        with_env(
+            &env_with_project(
+                project_str,
+                vec![
+                    ("TEMPORAL_API_KEY", Some("api-key-sentinel")),
+                    ("TEMPORAL_METRICS_EXPORTER", Some("otlp")),
+                    ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://collector:4317")),
+                    ("TEMPORAL_METRICS_OTLP_HEADERS", Some("x-api-key=header-sentinel")),
+                ],
+            ),
+            || {
+                let cfg = DbtTemporalConfig::from_env()?;
+                let shown = format!("{cfg:?} {cfg:#?}");
+                for sentinel in ["api-key-sentinel", "header-sentinel"] {
+                    assert!(!shown.contains(sentinel), "{sentinel} leaked into Debug output");
+                }
+                assert!(shown.contains("x-api-key"), "header names stay visible");
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn from_env_reads_otlp_metrics_with_fallback_endpoint() {
         let project = make_project_dir();
@@ -669,8 +700,8 @@ mod tests {
                 };
                 assert_eq!(url, "http://collector:4317");
                 assert!(!use_http);
-                assert_eq!(headers.get("x-api-key").map(String::as_str), Some("abc"));
-                assert_eq!(headers.get("x-team").map(String::as_str), Some("data"));
+                assert_eq!(headers.get("x-api-key").map(Secret::expose), Some("abc"));
+                assert_eq!(headers.get("x-team").map(Secret::expose), Some("data"));
                 Ok(())
             },
         )

@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use temporalio_sdk::error::ApplicationFailure;
 use tracing::info;
 
 use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
@@ -22,7 +21,7 @@ use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
 use crate::error::DbtTemporalError;
 
 use super::DbtActivities;
-use super::heartbeat;
+use super::cancellable;
 use super::node_helpers::json_to_minijinja;
 use super::render_env;
 use super::retry::{self, RetryDecision};
@@ -50,8 +49,9 @@ fn hook_retry_decision(
 ///
 /// Hook errors are non-retryable unless the project opted this phase in via
 /// `retry.project_hooks` — re-running a hook repeats its side effects, and only
-/// the author knows whether that is safe. A cancelled activity reports
-/// cancellation promptly, but the hook SQL already sent is not interrupted.
+/// the author knows whether that is safe. A cancelled activity signals its
+/// cancellation token so the hook SQL in flight is interrupted, then waits for
+/// the hook to stop before reporting cancellation.
 pub async fn run_project_hooks_outer(
     activities: &DbtActivities,
     ctx: ActivityContext,
@@ -60,37 +60,36 @@ pub async fn run_project_hooks_outer(
     let phase = input.phase;
     let retry_on_error = input.retry_on_error;
     let project = input.project.clone();
-    tokio::select! {
-        result = run_project_hooks_inner(activities, input) => {
-            result.map_err(|e| {
-                let patterns =
-                    retry::registry_non_retryable_patterns(&activities.registry, &project);
-                // An untyped hook failure is a template or SQL problem, not a
-                // blip, so it stays permanent even when retry is enabled.
-                let dbt_err = retry::downcast_or_default(e, retry::Unclassified::Permanent);
-                match hook_retry_decision(
-                    &dbt_err,
-                    retry_on_error,
-                    patterns.as_deref().unwrap_or(&[]),
-                ) {
-                    RetryDecision::Retry => {
-                        info!(phase = %phase, error = %dbt_err, "hook failed, retrying");
-                        ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(
-                            "{dbt_err}"
-                        )))
-                    }
-                    RetryDecision::NoRetry => ActivityError::application(
-                        ApplicationFailure::non_retryable(anyhow::anyhow!("{dbt_err}")),
-                    ),
-                }
-            })
-        }
-        () = ctx.cancelled() => {
-            info!(phase = %phase, "project hooks cancelled");
-            Err(ActivityError::cancelled())
-        }
-        never = heartbeat::heartbeat_loop(&ctx) => match never {},
+
+    // This activity's own cancellation source: the render environment's adapter
+    // engine takes its token, so cancelling the activity interrupts the hook SQL
+    // in flight. The source outlives the work because the engine holds only a
+    // `Weak` reference to it.
+    let cancel = dbt_common::cancellation::CancellationTokenSource::new();
+    let token = cancel.token();
+    let (result, cancelled) = cancellable::run_in_activity(
+        &ctx,
+        &cancel,
+        || info!(phase = %phase, "project hooks cancelled — stopping warehouse work"),
+        run_project_hooks_cancellable(activities, input, &token),
+    )
+    .await;
+
+    if cancelled {
+        return Err(ActivityError::cancelled());
     }
+    result.map_err(|e| {
+        let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
+        // An untyped hook failure is a template or SQL problem, not a
+        // blip, so it stays permanent even when retry is enabled.
+        let dbt_err = retry::downcast_or_default(e, retry::Unclassified::Permanent);
+        let decision =
+            hook_retry_decision(&dbt_err, retry_on_error, patterns.as_deref().unwrap_or(&[]));
+        if decision == RetryDecision::Retry {
+            info!(phase = %phase, error = %dbt_err, "hook failed, retrying");
+        }
+        retry::failure_for(&dbt_err, decision)
+    })
 }
 
 /// Render and execute one phase's `dbt_project.yml` hooks against a project's
@@ -98,17 +97,30 @@ pub async fn run_project_hooks_outer(
 ///
 /// `run_project_hooks_outer` wraps this with cancellation and heartbeat. Also
 /// the entry point for integration tests that drive hooks against an embedded
-/// engine (e.g. the DuckDB scenario harness).
+/// engine (e.g. the DuckDB scenario harness); nothing cancels the hooks here.
 pub async fn run_project_hooks_inner(
     activities: &DbtActivities,
     input: ProjectHooksInput,
 ) -> Result<(), anyhow::Error> {
+    let cancel = dbt_common::cancellation::CancellationTokenSource::new();
+    run_project_hooks_cancellable(activities, input, &cancel.token()).await
+}
+
+/// `run_project_hooks_inner`, with the caller holding the cancellation source.
+///
+/// The activity wrapper keeps the source so it can interrupt the hook SQL from
+/// its own task while this one is blocked inside dbt. The caller must keep the
+/// source alive until this returns.
+async fn run_project_hooks_cancellable(
+    activities: &DbtActivities,
+    input: ProjectHooksInput,
+    cancellation: &dbt_common::cancellation::CancellationToken,
+) -> Result<(), anyhow::Error> {
     let state = Arc::clone(activities.registry.get(Some(&input.project))?);
     // Hook SQL runs on the dbt pool, so this task stays free to heartbeat and
-    // to notice cancellation. A cancelled activity does not stop the hook: the
-    // SQL already sent runs to completion on its pool thread, and only the
-    // result is dropped.
-    crate::dbt_pool::run(move || run_project_hooks_body(&state, &input)).await?
+    // to notice cancellation.
+    let token = cancellation.clone();
+    crate::dbt_pool::run(move || run_project_hooks_body(&state, &input, &token)).await?
 }
 
 /// The synchronous half of [`run_project_hooks_inner`]: render and run each
@@ -118,6 +130,7 @@ pub async fn run_project_hooks_inner(
 fn run_project_hooks_body(
     state: &WorkerState,
     input: &ProjectHooksInput,
+    cancellation: &dbt_common::cancellation::CancellationToken,
 ) -> Result<(), anyhow::Error> {
     // Hooks render Jinja and run SQL, so they need an `Invocation` root span for
     // the same reason node execution does. Sharing the run's invocation id puts
@@ -146,9 +159,7 @@ fn run_project_hooks_body(
     let mut render_env = render_env::prepare_render_env(
         state,
         &render_env::RenderOverrides {
-            // Hooks run on the worker's own source: a hook is not a node, and
-            // nothing cancels one individually.
-            cancellation: &state.cancellation_source.token(),
+            cancellation,
             env: &input.env,
             target: input.target.as_deref(),
             vars: &input.vars,

@@ -26,7 +26,7 @@ use crate::error::DbtTemporalError;
 use crate::types::{DbtCommand, NodeExecutionInput, NodeExecutionResult, NodeStatus, TimingEntry};
 
 use super::DbtActivities;
-use super::heartbeat;
+use super::cancellable;
 use super::node_helpers::{
     extract_adapter_response, extract_test_outcome, inject_ephemeral_ctes, render_materialization,
 };
@@ -61,28 +61,17 @@ pub async fn execute_node_outer(
         execute_node_cancellable(activities, input, &token),
         spans.node.clone(),
     );
-    tokio::pin!(work);
 
-    let mut cancelled = false;
-    let result = loop {
-        tokio::select! {
-            result = &mut work => break result,
-            // `&mut work` above, so this branch does not drop the work: the
-            // query is told to stop and then joined. Dropping the future would
-            // leave the blocking thread running against the warehouse with
-            // nothing waiting for it.
-            () = ctx.cancelled(), if !cancelled => {
-                cancelled = true;
-                info!(node = %unique_id, "activity cancelled — stopping warehouse work");
-                cancel.cancel();
-            }
-            // Never resolves — keeps the UI's last-heartbeat fresh and lets the
-            // server's heartbeat_timeout reschedule on a fresh worker if this
-            // one dies. The node's own work runs on the dbt pool, so this
-            // task is free to keep heartbeating while a long query runs.
-            never = heartbeat::heartbeat_loop(&ctx) => match never {},
-        }
-    };
+    // `work` is joined, never dropped, on cancellation: dropping the future
+    // would leave the blocking thread running against the warehouse with
+    // nothing waiting for it.
+    let (result, cancelled) = cancellable::run_in_activity(
+        &ctx,
+        &cancel,
+        || info!(node = %unique_id, "activity cancelled — stopping warehouse work"),
+        work,
+    )
+    .await;
 
     if cancelled {
         super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);

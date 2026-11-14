@@ -111,7 +111,7 @@ pub async fn store_artifacts_inner(
     // A run that continued as new left each earlier segment's results and log
     // in that segment's own checkpoint rather than dragging them through every
     // history since. Collect them so the artifacts describe the whole run.
-    let input = collect_prior_segments(store.as_ref(), input).await?;
+    let mut input = collect_prior_segments(store.as_ref(), input).await?;
 
     // The nodes wrote their compiled SQL to the store instead of carrying it
     // through the workflow; read it back for the one artifact that reports it.
@@ -128,13 +128,9 @@ pub async fn store_artifacts_inner(
     info!(path = %run_results_path, "stored run_results.json");
 
     // Store manifest (if inline) or note existing ref.
-    let manifest_path = if let Some(manifest_json) = &input.manifest_json {
+    let manifest_path = if let Some(manifest_json) = input.manifest_json.take() {
         store
-            .store(
-                &input.invocation_id,
-                "manifest.json",
-                Bytes::copy_from_slice(manifest_json.as_bytes()),
-            )
+            .store(&input.invocation_id, "manifest.json", Bytes::from(manifest_json))
             .await
             .map_err(|e| store_io_error("storing manifest.json", e))?
     } else if let Some(manifest_ref) = &input.manifest_ref {
@@ -147,17 +143,15 @@ pub async fn store_artifacts_inner(
     info!(path = %manifest_path, "manifest.json available");
 
     // Store run log if enabled and provided.
-    let log_path = if let Some(run_log) = &input.run_log {
-        if activities.write_run_log.0 {
-            let path = store
-                .store(&input.invocation_id, "log.txt", Bytes::copy_from_slice(run_log.as_bytes()))
-                .await
-                .map_err(|e| store_io_error("storing log.txt", e))?;
-            info!(path = %path, "stored log.txt");
-            Some(path)
-        } else {
-            None
-        }
+    let log_path = if activities.write_run_log.0
+        && let Some(run_log) = input.run_log.take()
+    {
+        let path = store
+            .store(&input.invocation_id, "log.txt", Bytes::from(run_log))
+            .await
+            .map_err(|e| store_io_error("storing log.txt", e))?;
+        info!(path = %path, "stored log.txt");
+        Some(path)
     } else {
         None
     };

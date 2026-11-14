@@ -329,6 +329,23 @@ Two ways to stay safe:
    A wide `build` can run for hours, so option 1 is usually the better answer
    for anything but a hand-managed deployment.
 
+### Activity input shape and mixed-version workers
+
+The `execute_node` and `run_project_hooks` activities receive the run's input
+once (`{"compact": {"run": {"input": ..., "extra_env": ...}, ...}}`) and derive
+the env, vars, target and command from it, instead of repeating them per node in
+workflow history. An activity still accepts the flat shape that earlier
+releases recorded, so runs in flight across an upgrade finish normally.
+
+The reverse does not hold, by design: a worker from a release that predates the
+compact shape cannot parse it and fails the attempt with a missing-field error
+rather than running the node with an empty env. Temporal retries that attempt
+under the node's retry policy (`max_attempts`, default 3), so a node scheduled
+by a new worker and picked up by an old one succeeds only if a retry reaches an
+upgraded worker in time; otherwise the node fails and the run reports it. Keep
+old and new workers off the same task queue while rolling out, or use
+`TEMPORAL_DEPLOYMENT_NAME` so a run stays on the version that started it.
+
 **Model file changes** — two strategies:
 
 1. **Baked into image**: rebuild the image with new model files, re-deploy. This is the simplest and most reproducible approach.

@@ -174,6 +174,25 @@ pub struct DbtRunInput {
     pub resume_from: Option<RunResumeState>,
 }
 
+impl DbtRunInput {
+    /// The env a run executes with before any `pre_run` hook adds to it: the
+    /// input's own `env`, plus the input itself serialized under `_` (mirroring
+    /// bash's `$_`) so models and macros can read the full payload through
+    /// `env_var('_')`.
+    ///
+    /// A caller-supplied `_` is always overwritten: the only meaningful value
+    /// is the payload that actually started the workflow. Serializing a
+    /// `DbtRunInput` cannot fail; should it ever, `_` is left unset rather than
+    /// failing the run.
+    pub fn base_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        if let Ok(json) = serde_json::to_string(self) {
+            env.insert("_".to_string(), json);
+        }
+        env
+    }
+}
+
 /// Where a continued run picks up.
 ///
 /// Deliberately small: it travels in the continuation's workflow input, which

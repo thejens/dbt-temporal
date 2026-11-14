@@ -24,7 +24,7 @@ use temporalio_sdk::{ActivityExecutionError, WorkflowContext, WorkflowTerminatio
 use crate::activities::DbtActivities;
 use crate::types::{
     DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
-    TimeoutConfig,
+    RunScope, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -152,7 +152,7 @@ pub struct ReadyQueueRun<'a> {
     input: &'a DbtRunInput,
     retry_config: &'a RetryConfig,
     timeouts: &'a TimeoutConfig,
-    effective_env: &'a BTreeMap<String, String>,
+    run_scope: RunScope,
     scheduler: Scheduler,
     total_nodes: usize,
     log_lines: Vec<String>,
@@ -186,7 +186,7 @@ impl<'a> ReadyQueueRun<'a> {
             input,
             retry_config,
             timeouts,
-            effective_env,
+            run_scope: RunScope::new(input, effective_env),
             scheduler,
             total_nodes: plan.levels.iter().map(Vec::len).sum(),
             log_lines: resume.log_lines.clone(),
@@ -326,7 +326,7 @@ impl<'a> ReadyQueueRun<'a> {
         self.record_start(&node);
         let future = ctx.execute_activity(
             DbtActivities::execute_node,
-            node_execution_input(self.plan, self.input, self.effective_env, &node),
+            node_execution_input(self.plan, &self.run_scope, &node),
             node_activity_options(
                 self.plan,
                 self.timeouts,

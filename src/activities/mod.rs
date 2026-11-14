@@ -32,8 +32,8 @@ use crate::config::{
 };
 use crate::project_registry::ProjectRegistry;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, LoadSegmentStateInput, NodeExecutionInput, NodeExecutionResult,
-    ProjectChecksInput, ProjectChecksOutput, ProjectHooksInput, ResolveConfigInput,
+    DbtRunInput, ExecutionPlan, LoadSegmentStateInput, NodeActivityInput, NodeExecutionResult,
+    ProjectChecksInput, ProjectChecksOutput, ProjectHooksActivityInput, ResolveConfigInput,
     ResolvedProjectConfig, RunSegmentControl, SaveSegmentStateInput, StoreArtifactsInput,
     StoreArtifactsOutput,
 };
@@ -97,9 +97,9 @@ impl DbtActivities {
     pub async fn execute_node(
         self: Arc<Self>,
         ctx: ActivityContext,
-        input: NodeExecutionInput,
+        input: NodeActivityInput,
     ) -> Result<NodeExecutionResult, ActivityError> {
-        execute_node::execute_node_outer(&self, ctx, input).await
+        execute_node::execute_node_outer(&self, ctx, input.resolve()).await
     }
 
     #[activity(name = "store_artifacts")]
@@ -169,9 +169,9 @@ impl DbtActivities {
     pub async fn run_project_hooks(
         self: Arc<Self>,
         ctx: ActivityContext,
-        input: ProjectHooksInput,
+        input: ProjectHooksActivityInput,
     ) -> Result<(), ActivityError> {
-        project_hooks::run_project_hooks_outer(&self, ctx, input).await
+        project_hooks::run_project_hooks_outer(&self, ctx, input.resolve()).await
     }
 }
 

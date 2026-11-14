@@ -34,8 +34,8 @@ use crate::types::{
 
 use self::helpers::{
     NodeStatusSummary, READY_QUEUE_PATCH, RunClock, RunFacts, SINGLE_TERMINAL_MEMO_PATCH,
-    build_effective_env, build_freshness_summary_line, build_summary_lines, elapsed_secs,
-    format_final_details, upsert_memo_state,
+    build_freshness_summary_line, build_summary_lines, elapsed_secs, format_final_details,
+    upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
@@ -171,7 +171,7 @@ impl DbtRunWorkflow {
             effective_env = state.effective_env.clone();
             hook_errors = state.hook_errors.clone();
         } else {
-            effective_env = build_effective_env(&input);
+            effective_env = input.base_env();
             hook_errors = Vec::new();
 
             if let ControlFlow::Break(out) = run_pre_run_hooks(

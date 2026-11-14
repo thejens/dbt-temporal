@@ -384,17 +384,20 @@ fn select_materialization_name(rt: NodeType, base_materialized: &str) -> String 
 
 /// Create the node's target schema, once per run rather than once per node.
 ///
-/// A project with three hundred models in one schema used to issue three
-/// hundred identical `CREATE SCHEMA IF NOT EXISTS` statements and the metadata
-/// round trips behind them. The claim is keyed by run, not by worker: a schema
-/// dropped between runs must be created again.
+/// A project with three hundred models in one schema would otherwise issue
+/// three hundred identical `CREATE SCHEMA IF NOT EXISTS` statements and the
+/// metadata round trips behind them. Creation is single-flight per schema: a
+/// node that finds another node's `CREATE` in flight blocks until it finishes,
+/// because materializing into a schema that does not exist yet fails. The
+/// memory is keyed by run, not by worker: a schema dropped between runs must be
+/// created again.
 ///
-/// Failures are still not fatal — a run against an existing schema on a role
-/// without CREATE is a legitimate setup, and the materialization gives a much
-/// better error if the schema really is absent. But a *retryable* failure here
-/// (a dropped connection, a throttle) is propagated: swallowing it meant the
-/// node went on to fail with a confusing materialization error instead of
-/// being retried.
+/// A non-retryable failure is not fatal — a run against an existing schema on a
+/// role without CREATE is a legitimate setup, and the materialization gives a
+/// much better error if the schema really is absent. It settles the schema, so
+/// the failing statement is issued once per run rather than once per node. A
+/// *retryable* failure (a dropped connection, a throttle) is propagated and the
+/// schema forgotten, so the activity is retried.
 fn ensure_target_schema(
     state: &crate::worker_state::WorkerState,
     invocation_id: &str,
@@ -413,36 +416,28 @@ fn ensure_target_schema(
         })
         .unwrap_or_else(|| (base.database.clone(), base.schema.clone()));
 
-    if !state
-        .created_schemas
-        .claim(invocation_id, base.adapter, &database, &schema)
-    {
-        return Ok(());
-    }
-
-    let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", node_context, &[]) else {
-        return Ok(());
-    };
-
-    // Not created after all — let the next node needing it try again.
     state
         .created_schemas
-        .release(invocation_id, base.adapter, &database, &schema);
-
-    let classified = crate::error::classify_adapter_execution_error(
-        &*e,
-        &format!("creating schema {database}.{schema}"),
-    );
-    if classified.is_retryable() {
-        return Err(classified);
-    }
-    tracing::warn!(
-        database = %database,
-        schema = %schema,
-        error = %classified,
-        "create_schema failed (non-fatal)"
-    );
-    Ok(())
+        .ensure(invocation_id, base.adapter, &database, &schema, || {
+            let Err(e) = jinja_env.render_str("{% do create_schema(this) %}", node_context, &[])
+            else {
+                return Ok(());
+            };
+            let classified = crate::error::classify_adapter_execution_error(
+                &*e,
+                &format!("creating schema {database}.{schema}"),
+            );
+            if classified.is_retryable() {
+                return Err(classified);
+            }
+            tracing::warn!(
+                database = %database,
+                schema = %schema,
+                error = %classified,
+                "create_schema failed (non-fatal)"
+            );
+            Ok(())
+        })
 }
 
 /// The relation the node wrote, as `database.schema.identifier`.

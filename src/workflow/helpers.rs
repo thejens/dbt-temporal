@@ -298,10 +298,10 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
     let mut log_lines = Vec::with_capacity(3);
     log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
 
-    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
     for info in plan.nodes.values() {
         *type_counts
-            .entry(info.resource_type.as_str_name())
+            .entry(resource_type_label(info.resource_type))
             .or_default() += 1;
     }
     let parts: Vec<String> = type_counts
@@ -1174,9 +1174,8 @@ mod tests {
         let header = build_log_header(&plan);
         assert_eq!(header.len(), 3);
         assert!(header[0].starts_with("Running with dbt-temporal="));
-        // `test_plan` builds only models; the tally keys on dbt's enum name, so the
-        // count is pluralised through the helper.
-        assert_eq!(header[1], "Found 3 NODE_TYPE_MODELs");
+        // `test_plan` builds only models; the tally is pluralised through the helper.
+        assert_eq!(header[1], "Found 3 models");
         assert_eq!(header[2], "Concurrency: 2 parallel levels");
     }
 
@@ -1184,7 +1183,7 @@ mod tests {
     fn build_log_header_singular_for_single_level_and_node_type() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
         let header = build_log_header(&plan);
-        assert_eq!(header[1], "Found 1 NODE_TYPE_MODEL");
+        assert_eq!(header[1], "Found 1 model");
         assert_eq!(header[2], "Concurrency: 1 parallel level");
     }
 

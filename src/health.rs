@@ -153,7 +153,6 @@ async fn handle_health_connection(mut stream: tokio::net::TcpStream, path: &Path
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

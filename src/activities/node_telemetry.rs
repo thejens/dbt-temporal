@@ -34,7 +34,6 @@ use crate::types::{NodeExecutionInput, NodeStatus};
 pub struct NodeExecutionSpans {
     /// Held only to keep the per-run root span open while `node` runs — the
     /// data layer reads it for trace correlation; no code reads the field.
-    #[allow(dead_code)]
     pub invocation: tracing::Span,
     pub node: tracing::Span,
 }

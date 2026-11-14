@@ -612,7 +612,6 @@ pub struct StoreArtifactsInput {
 }
 
 /// Output of the store_artifacts activity.
-#[allow(clippy::struct_field_names)] // Fields are serialized to JSON; renaming would break the API contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreArtifactsOutput {
     /// Path/URI where run_results.json was stored.

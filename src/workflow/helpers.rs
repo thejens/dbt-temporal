@@ -379,12 +379,6 @@ pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
     format!("Freshness. PASS={pass} WARN={warn} ERROR={error} TOTAL={}", results.len())
 }
 
-/// Seconds between two deterministic workflow timestamps, or 0.0 if either
-/// is missing (workflow_time() is None outside of an executing workflow).
-///
-/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
-/// stable across history replay; the workflow file's own docstring forbids
-/// wall-clock time for this reason.
 /// When the logical run began, and how long it has taken so far.
 ///
 /// One value rather than two loose parameters: they are only meaningful
@@ -411,6 +405,12 @@ pub struct RunFacts<'a> {
     pub target: Option<&'a str>,
 }
 
+/// Seconds between two deterministic workflow timestamps, or 0.0 if either
+/// is missing (workflow_time() is None outside of an executing workflow).
+///
+/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
+/// stable across history replay; the workflow file's own docstring forbids
+/// wall-clock time for this reason.
 pub fn elapsed_secs(
     start: Option<std::time::SystemTime>,
     end: Option<std::time::SystemTime>,

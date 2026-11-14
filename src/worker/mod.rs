@@ -438,6 +438,16 @@ async fn initialize_project_inner(
 
     let listener_factory = Arc::new(DefaultJinjaTypeCheckEventListenerFactory::default());
 
+    // dbt caches which template answers `generate_schema_name` and its siblings
+    // in a process-global map keyed by (dialect, package, macro) — with no
+    // project in the key, because the CLI only ever loads one. A worker loads
+    // several: without this, a package two projects share resolves to whichever
+    // project's macro was cached first, so the second project either fails to
+    // load ("Template not found") or silently names its relations with the
+    // other project's rules. The cache is only read while resolving, and
+    // projects resolve one at a time, so emptying it here isolates them.
+    dbt_jinja_utils::utils::clear_template_cache();
+
     let (resolver_state, jinja_env) = dbt_parser::resolver::resolve(
         &resolve_args,
         &invocation_args,

@@ -33,7 +33,7 @@ use crate::types::{
 };
 
 use super::DbtRunWorkflow;
-use super::helpers::{build_retry_policy, elapsed_secs, plural};
+use super::helpers::{activity_error_message, build_retry_policy, elapsed_secs, plural};
 use super::search_attributes::build_search_attribute_updates;
 
 /// Build the workflow-detail line shown after `plan_project` returns:
@@ -180,7 +180,8 @@ pub async fn save_segment_state(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "save_segment_state activity failed: {e:#}"
+            "save_segment_state activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -210,7 +211,8 @@ pub async fn load_segment_state(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "load_segment_state activity failed: {e:#}"
+            "load_segment_state activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -373,7 +375,7 @@ pub async fn plan_and_announce(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("plan_project activity failed: {e:#}"),
+                anyhow::anyhow!("plan_project activity failed: {}", activity_error_message(&e)),
             ))
         })?;
 
@@ -408,7 +410,8 @@ pub async fn resolve_project_config(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "resolve_config activity failed: {e:#}"
+            "resolve_config activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -467,7 +470,8 @@ pub async fn run_on_run_start(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "on-run-start hook failed: {e:#}"
+            "on-run-start hook failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -522,7 +526,10 @@ pub async fn run_project_checks(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("project checks could not be evaluated: {e:#}"),
+                anyhow::anyhow!(
+                    "project checks could not be evaluated: {}",
+                    activity_error_message(&e)
+                ),
             ))
         })?;
 
@@ -564,7 +571,7 @@ pub async fn store_run_artifacts(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("store_artifacts activity failed: {e:#}"),
+                anyhow::anyhow!("store_artifacts activity failed: {}", activity_error_message(&e)),
             ))
         })?;
     let log_path = artifacts.log_path.clone();

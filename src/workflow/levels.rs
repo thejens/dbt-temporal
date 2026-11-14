@@ -23,12 +23,12 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    MEMO_CADENCE_PATCH, build_log_header, build_node_status_tree, build_retry_policy,
-    cancelled_result, classify_result_status, error_result, format_activity_label,
-    format_progress_line, format_result_tag, format_running_details, is_blocked_by_failed_upstream,
-    mark_remaining_level_as_cancelled, node_label, set_node_status, short_activity_error,
-    should_announce_level, should_flush_memo, skipped_result, upsert_memo_state,
-    upsert_node_status,
+    MEMO_CADENCE_PATCH, activity_error_message, build_log_header, build_node_status_tree,
+    build_retry_policy, cancelled_result, classify_result_status, error_result,
+    format_activity_label, format_progress_line, format_result_tag, format_running_details,
+    is_blocked_by_failed_upstream, mark_remaining_level_as_cancelled, node_label, set_node_status,
+    short_activity_error, should_announce_level, should_flush_memo, skipped_result,
+    upsert_memo_state, upsert_node_status,
 };
 
 /// Cap memo writes for deep DAGs — upsert on this cadence on quiet levels.
@@ -469,9 +469,10 @@ async fn execute_one_level(
                 *state.had_failure = true;
                 state.failed_nodes.insert(unique_id.clone());
                 set_node_status(state.node_status, &unique_id, NodeStatus::Error);
-                state
-                    .all_results
-                    .push(error_result(&unique_id, &format!("activity failed: {e:#}")));
+                state.all_results.push(error_result(
+                    &unique_id,
+                    &format!("activity failed: {}", activity_error_message(&e)),
+                ));
             }
         }
     }

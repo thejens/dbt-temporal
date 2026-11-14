@@ -230,6 +230,7 @@ data solely in the multi-project case.
 |---|---|
 | **dbt's data layer on every tracing stack** | dbt code reads span start info and `TelemetryAttributes` out of span extensions and panics when either is missing; the types are private to `dbt-tracing`, so only its own `TelemetryDataLayer` can put them there. [`tracing_setup`](../src/tracing_setup.rs) wires that layer with no middlewares and no consumers into the non-OTLP stack, where it records the state and exports nothing. Any process that renders dbt Jinja — the worker, every integration test — needs it in its subscriber. |
 | **Forked arrow-rs and ring** | dbt v2 uses forked versions of `arrow-rs` (v56, sdf-labs fork) and `ring` (sdf-labs fork). Without matching `[patch.crates-io]` entries, version conflicts prevent compilation. See `Cargo.toml`. |
+| **Template cache cleared per project** | dbt caches which template answers `generate_schema_name`, `generate_database_name` and `generate_alias_name` in a process-global map keyed by `(dialect, package, macro)`. The key has no project in it, so in a worker that loads several projects, a package two of them share resolves to whichever project's macro was cached first: the later project fails to load with `Template not found`, or silently names relations by the other project's rules. `initialize_project` in [`worker/mod.rs`](../src/worker/mod.rs) calls `clear_template_cache()` before each resolve. Remove once the cache is scoped to a project or environment. |
 | **Read-only projects loaded from a copy** | dbt's loader appends `dbt_internal_packages/` to a project's `.gitignore` whenever it is missing, and fails the load when the write does. A project baked into an image with a read-only root filesystem, or mounted from a ConfigMap, cannot take the write. [`model_store::local`](../src/model_store/local.rs) applies the loader's own condition, and when the write would fail, copies the project under the temp dir and loads that. Remove once dbt skips or tolerates the write. |
 | **Ephemeral CTE injection** | Ephemeral models are excluded from the execution plan. We detect `__dbt__cte__` references in compiled SQL and recursively compile + inline the ephemeral models as CTEs. |
 
@@ -302,6 +303,22 @@ change needed). `#14552` closed on a reporter's own repro confirmation
 source, but no reason to doubt a third-party repro.
 
 ### Confirmed against the `v2.0.11` tag (`32b858a7`)
+
+**The naming-macro template cache is keyed without the project.**
+`TEMPLATE_CACHE` in `dbt-jinja-utils/src/utils.rs` maps `(dialect,
+current_project, macro_name)` to a template name, where `current_project` is
+the package a node belongs to. `find_macro_template` tries the package, then
+the root project, then dbt's own, and caches the first hit for the life of
+the process. Two project loads in one process therefore share answers:
+loading a project whose root overrides `generate_schema_name` and then one
+that does not fails the second with `Template not found:
+<first>.generate_schema_name`, and the reverse order caches the built-in and
+skips the second project's override without an error. Reproduced with two
+loads of same-named projects; the shared-package case follows from the key.
+The CLI never sees it because it loads one project per process. Keying the
+cache by root project, or holding it on the environment, would fix it. Worked
+around by clearing the cache before each resolve, see "Template cache cleared
+per project" above.
 
 **Loading a project writes to its `.gitignore`, and a failed write fails the
 load.** `dbt-loader/src/loader.rs` appends `dbt_internal_packages/` to an

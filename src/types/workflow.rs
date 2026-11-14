@@ -1,3 +1,5 @@
+use dbt_schemas::schemas::common::OnError;
+use dbt_schemas::schemas::telemetry::NodeType;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -353,8 +355,9 @@ pub struct ExecutionPlan {
 pub struct NodeInfo {
     pub unique_id: String,
     pub name: String,
-    /// "model", "test", "seed", "snapshot"
-    pub resource_type: String,
+    /// Serialized as dbt's protobuf enum name (`NODE_TYPE_MODEL`,
+    /// `NODE_TYPE_TEST`, ...), the spelling workflow histories already carry.
+    pub resource_type: NodeType,
     /// "table", "view", "incremental", "ephemeral"
     pub materialization: Option<String>,
     pub package_name: String,
@@ -363,11 +366,11 @@ pub struct NodeInfo {
     /// depth. Only set when priority scheduling is enabled on the worker.
     #[serde(default)]
     pub priority: Option<u32>,
-    /// The model's `on_error` config ("continue" or "skip_children"), if set.
+    /// The model's `on_error` config (`continue` or `skip_children`), if set.
     /// Only models can set this; `None` for every other resource type and for
     /// models that don't override the default (propagate failure downstream).
     #[serde(default)]
-    pub on_error: Option<String>,
+    pub on_error: Option<OnError>,
 }
 
 /// Input to the execute_node activity.
@@ -457,6 +460,13 @@ pub struct ProjectHooksInput {
     /// the activity does not have to re-read config on every attempt.
     #[serde(default)]
     pub retry_on_error: bool,
+    /// Checkpoints of every earlier segment of a continued run, oldest first,
+    /// for `on_run_end` only (empty for `on_run_start`). The activity reads
+    /// their results back and puts them ahead of `node_results`, so the
+    /// hook's `results` variable describes the whole run and not just its
+    /// last leg.
+    #[serde(default)]
+    pub prior_segments: Vec<String>,
 }
 
 /// Result of executing a single node.
@@ -502,6 +512,29 @@ pub struct NodeExecutionResult {
     pub relation_name: Option<String>,
 }
 
+/// The grade dbt gives a freshness measurement in `sources.json` /
+/// `freshness.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessGrade {
+    /// Within `warn_after`, or no threshold was exceeded.
+    Pass,
+    /// Past `warn_after` but not `error_after`.
+    Warn,
+    /// Past `error_after`.
+    Error,
+}
+
+impl FreshnessGrade {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Detail of a completed freshness check, carried on the node result so
 /// `store_artifacts` can assemble `sources.json` / `freshness.json` without
 /// re-resolving the node's criteria.
@@ -513,10 +546,9 @@ pub struct FreshnessOutcome {
     pub snapshotted_at: String,
     /// Age of the freshest row in seconds (snapshotted_at - max_loaded_at).
     pub max_loaded_at_time_ago_in_s: f64,
-    /// `pass` | `warn` (dbt's FreshnessStatus; `error` aborts the activity
-    /// instead of producing an outcome). `NodeStatus` has no warning state, so
+    /// How the check graded. `NodeStatus` collapses a warn into success, so
     /// this field is where a warn survives — see also the node `message`.
-    pub status: String,
+    pub status: FreshnessGrade,
     /// `source` or `model` — dbt tags freshness.json rows with the resource
     /// type, and it is what separates the two artifacts.
     pub resource_type: String,
@@ -613,6 +645,11 @@ pub struct DbtRunOutput {
     /// history. `run_results.json` still describes the complete run — the
     /// artifact activity collects each segment from its own checkpoint.
     pub node_results: Vec<NodeExecutionResult>,
+    /// Whether `node_results` is only the final segment of a continued run.
+    /// When true the complete set is in the `run_results.json` named by
+    /// `artifacts.run_results_path`.
+    #[serde(default)]
+    pub node_results_partial: bool,
     pub elapsed_time: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<StoreArtifactsOutput>,
@@ -673,6 +710,46 @@ pub struct NodeStatusTree {
     pub nodes: BTreeMap<String, NodeStatus>,
 }
 
+/// Coarse stage of a run, as reported by the `run_status` query. Terminal
+/// state is not a phase: it comes from the workflow result itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    #[default]
+    Initializing,
+    Planning,
+    PreRunHooks,
+    Executing,
+    Finalizing,
+}
+
+/// Value of the `DbtStatus` search attribute, which lets the workflow list be
+/// filtered by outcome. `Running` is set at plan time; the other four replace
+/// it as the run ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl RunOutcome {
+    /// The keyword the search attribute holds. Workflow list filters and saved
+    /// queries match on these strings, so they are spelled exactly as operators
+    /// already query them.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Live run progress served by the `run_status` query.
 ///
 /// Unlike the memo (truncated, written on a level cadence), this reflects
@@ -680,9 +757,7 @@ pub struct NodeStatusTree {
 /// read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunStatusSnapshot {
-    /// Coarse phase: `initializing`, `planning`, `pre_run_hooks`, `executing`,
-    /// `finalizing`. Terminal state comes from the workflow result itself.
-    pub phase: String,
+    pub phase: RunPhase,
     pub total_nodes: usize,
     pub total_levels: usize,
     /// Index of the most recently completed level (1-based; 0 = none yet).
@@ -791,6 +866,95 @@ mod tests {
         // The wire spelling is dbt's, hyphen included.
         assert_eq!(DbtCommand::parse("source freshness"), None);
         assert_eq!(DbtCommand::parse(""), None);
+    }
+
+    /// Every resource type dbt can tag a node with, beside the string a plan
+    /// recorded in a workflow history spells it as.
+    const RESOURCE_TYPE_WIRE: [(NodeType, &str); 17] = [
+        (NodeType::Unspecified, "NODE_TYPE_UNSPECIFIED"),
+        (NodeType::Model, "NODE_TYPE_MODEL"),
+        (NodeType::Seed, "NODE_TYPE_SEED"),
+        (NodeType::Snapshot, "NODE_TYPE_SNAPSHOT"),
+        (NodeType::Source, "NODE_TYPE_SOURCE"),
+        (NodeType::Test, "NODE_TYPE_TEST"),
+        (NodeType::UnitTest, "NODE_TYPE_UNIT_TEST"),
+        (NodeType::Macro, "NODE_TYPE_MACRO"),
+        (NodeType::DocsMacro, "NODE_TYPE_DOCS_MACRO"),
+        (NodeType::Analysis, "NODE_TYPE_ANALYSIS"),
+        (NodeType::Operation, "NODE_TYPE_OPERATION"),
+        (NodeType::Exposure, "NODE_TYPE_EXPOSURE"),
+        (NodeType::Metric, "NODE_TYPE_METRIC"),
+        (NodeType::SavedQuery, "NODE_TYPE_SAVED_QUERY"),
+        (NodeType::SemanticModel, "NODE_TYPE_SEMANTIC_MODEL"),
+        (NodeType::Function, "NODE_TYPE_FUNCTION"),
+        (NodeType::Check, "NODE_TYPE_CHECK"),
+    ];
+
+    fn node_info_json(resource_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "unique_id": "model.shop.m",
+            "name": "m",
+            "resource_type": resource_type,
+            "materialization": "table",
+            "package_name": "shop",
+            "depends_on": [],
+            "priority": null,
+            "on_error": null,
+        })
+    }
+
+    #[test]
+    fn node_info_resource_type_serializes_to_the_recorded_strings() {
+        for (resource_type, wire) in RESOURCE_TYPE_WIRE {
+            let info = NodeInfo {
+                unique_id: "model.shop.m".into(),
+                name: "m".into(),
+                resource_type,
+                materialization: Some("table".into()),
+                package_name: "shop".into(),
+                depends_on: vec![],
+                priority: None,
+                on_error: None,
+            };
+            assert_eq!(serde_json::to_value(&info).unwrap(), node_info_json(wire), "{wire}");
+        }
+    }
+
+    #[test]
+    fn node_info_recorded_with_string_resource_type_deserializes() {
+        for (resource_type, wire) in RESOURCE_TYPE_WIRE {
+            let info: NodeInfo = serde_json::from_value(node_info_json(wire)).unwrap();
+            assert_eq!(info.resource_type, resource_type, "{wire}");
+        }
+    }
+
+    #[test]
+    fn node_info_on_error_serializes_to_the_recorded_strings() {
+        for (on_error, wire) in [
+            (OnError::Continue, "continue"),
+            (OnError::SkipChildren, "skip_children"),
+        ] {
+            let mut json = node_info_json("NODE_TYPE_MODEL");
+            json["on_error"] = serde_json::json!(wire);
+            let info: NodeInfo = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(info.on_error.as_ref(), Some(&on_error), "{wire}");
+            assert_eq!(serde_json::to_value(&info).unwrap(), json, "{wire}");
+        }
+    }
+
+    #[test]
+    fn node_info_without_on_error_deserializes_as_unset() {
+        let mut json = node_info_json("NODE_TYPE_MODEL");
+        json.as_object_mut().unwrap().remove("on_error");
+        let info: NodeInfo = serde_json::from_value(json).unwrap();
+        assert!(info.on_error.is_none());
+    }
+
+    #[test]
+    fn node_info_with_an_unknown_resource_type_is_rejected() {
+        // The planner only ever writes dbt's own enum names, so anything else
+        // is a corrupt payload rather than a newer dbt's type to carry along.
+        assert!(serde_json::from_value::<NodeInfo>(node_info_json("model")).is_err());
     }
 
     #[test]
@@ -985,6 +1149,83 @@ mod tests {
     }
 
     #[test]
+    fn run_phase_serializes_to_the_strings_the_query_reports() {
+        for (phase, wire) in [
+            (RunPhase::Initializing, "initializing"),
+            (RunPhase::Planning, "planning"),
+            (RunPhase::PreRunHooks, "pre_run_hooks"),
+            (RunPhase::Executing, "executing"),
+            (RunPhase::Finalizing, "finalizing"),
+        ] {
+            assert_eq!(serde_json::to_value(phase).unwrap(), serde_json::json!(wire));
+            assert_eq!(serde_json::from_value::<RunPhase>(serde_json::json!(wire)).unwrap(), phase);
+        }
+    }
+
+    #[test]
+    fn run_status_snapshot_with_a_string_phase_deserializes() {
+        let snapshot: RunStatusSnapshot = serde_json::from_value(serde_json::json!({
+            "phase": "pre_run_hooks",
+            "total_nodes": 3,
+            "total_levels": 2,
+            "completed_levels": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+            "running": 0,
+            "fail_fast": false,
+        }))
+        .unwrap();
+        assert_eq!(snapshot.phase, RunPhase::PreRunHooks);
+        assert_eq!(serde_json::to_value(&snapshot).unwrap()["phase"], "pre_run_hooks");
+        assert_eq!(RunStatusSnapshot::default().phase, RunPhase::Initializing);
+    }
+
+    #[test]
+    fn freshness_grade_serializes_to_dbts_strings() {
+        for (grade, wire) in [
+            (FreshnessGrade::Pass, "pass"),
+            (FreshnessGrade::Warn, "warn"),
+            (FreshnessGrade::Error, "error"),
+        ] {
+            assert_eq!(grade.as_str(), wire);
+            assert_eq!(serde_json::to_value(grade).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<FreshnessGrade>(serde_json::json!(wire)).unwrap(),
+                grade
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_outcome_with_a_string_status_deserializes() {
+        let outcome: FreshnessOutcome = serde_json::from_value(serde_json::json!({
+            "max_loaded_at": "2026-06-12T10:00:00+00:00",
+            "snapshotted_at": "2026-06-12T11:00:00+00:00",
+            "max_loaded_at_time_ago_in_s": 3600.0,
+            "status": "warn",
+            "resource_type": "source",
+            "criteria": {},
+        }))
+        .unwrap();
+        assert_eq!(outcome.status, FreshnessGrade::Warn);
+        assert_eq!(serde_json::to_value(&outcome).unwrap()["status"], "warn");
+    }
+
+    #[test]
+    fn run_outcome_spells_the_search_attribute_values() {
+        for (outcome, wire) in [
+            (RunOutcome::Running, "running"),
+            (RunOutcome::Passed, "passed"),
+            (RunOutcome::Failed, "failed"),
+            (RunOutcome::Skipped, "skipped"),
+            (RunOutcome::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(outcome.as_str(), wire);
+        }
+    }
+
+    #[test]
     fn run_status_snapshot_tally_counts_by_status() {
         let mut tree = NodeStatusTree {
             nodes: BTreeMap::new(),
@@ -1011,5 +1252,35 @@ mod tests {
         // Re-tallying replaces, not accumulates.
         snapshot.tally(&tree);
         assert_eq!(snapshot.succeeded, 2);
+    }
+
+    /// Outputs recorded before `node_results_partial` existed are complete
+    /// ones, so the flag defaults to false.
+    #[test]
+    fn old_output_without_partial_flag_deserializes_as_complete() {
+        let out: DbtRunOutput = serde_json::from_value(serde_json::json!({
+            "invocation_id": "inv",
+            "success": true,
+            "node_results": [],
+            "elapsed_time": 1.0,
+        }))
+        .unwrap();
+        assert!(!out.node_results_partial);
+    }
+
+    #[test]
+    fn partial_flag_round_trips() {
+        let out: DbtRunOutput = serde_json::from_value(serde_json::json!({
+            "invocation_id": "inv",
+            "success": true,
+            "node_results": [],
+            "node_results_partial": true,
+            "elapsed_time": 1.0,
+        }))
+        .unwrap();
+        assert!(out.node_results_partial);
+        let again: DbtRunOutput =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        assert!(again.node_results_partial);
     }
 }

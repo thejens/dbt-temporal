@@ -28,12 +28,12 @@ use crate::types::{
     CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
     HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus, ProjectChecksInput,
     ProjectChecksOutput, ProjectHookPhase, ProjectHooksInput, ResolveConfigInput,
-    ResolvedProjectConfig, RetryConfig, RunSegmentState, SaveSegmentStateInput,
+    ResolvedProjectConfig, RetryConfig, RunOutcome, RunSegmentState, SaveSegmentStateInput,
     StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
-use super::helpers::{build_retry_policy, elapsed_secs, plural};
+use super::helpers::{activity_error_message, build_retry_policy, elapsed_secs, plural};
 use super::search_attributes::build_search_attribute_updates;
 
 /// Build the workflow-detail line shown after `plan_project` returns:
@@ -100,6 +100,7 @@ pub fn build_skip_output(
         skipped: true,
         skip_reason,
         node_results: vec![],
+        node_results_partial: false,
         elapsed_time: elapsed,
         artifacts: None,
         log_path: None,
@@ -141,13 +142,16 @@ fn hook_activity_options(phase: ProjectHookPhase, policy: HookPolicy<'_>) -> Act
 }
 
 /// Build the input for `run_project_hooks` (on-run-start or on-run-end).
-/// `node_results` is empty for on-run-start, populated for on-run-end.
+/// `node_results` and `prior_segments` are empty for on-run-start, populated
+/// for on-run-end: `node_results` is this segment's, and `prior_segments` names
+/// the checkpoints holding the earlier segments' results of a continued run.
 pub fn build_project_hooks_input(
     phase: ProjectHookPhase,
     plan: &ExecutionPlan,
     input: &DbtRunInput,
     effective_env: &BTreeMap<String, String>,
     node_results: &[NodeExecutionResult],
+    prior_segments: &[String],
     retry_config: &RetryConfig,
 ) -> ProjectHooksInput {
     ProjectHooksInput {
@@ -160,6 +164,7 @@ pub fn build_project_hooks_input(
         vars: input.vars.clone(),
         full_refresh: input.full_refresh,
         retry_on_error: retry_config.project_hooks.allows(phase),
+        prior_segments: prior_segments.to_vec(),
     }
 }
 
@@ -180,7 +185,8 @@ pub async fn save_segment_state(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "save_segment_state activity failed: {e:#}"
+            "save_segment_state activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -210,7 +216,8 @@ pub async fn load_segment_state(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "load_segment_state activity failed: {e:#}"
+            "load_segment_state activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -323,14 +330,14 @@ pub fn apply_post_run_outcome(
 /// `WorkflowContext`.
 fn terminal_status_updates(
     plan: &ExecutionPlan,
-    status: &str,
+    status: RunOutcome,
 ) -> Option<Result<Vec<SearchAttributeUpdate>, WorkflowTermination>> {
     if !plan.search_attributes.contains_key("DbtStatus") {
         return None;
     }
     Some(build_search_attribute_updates(&BTreeMap::from([(
         "DbtStatus".to_string(),
-        status.to_string(),
+        status.as_str().to_string(),
     )])))
 }
 
@@ -341,7 +348,7 @@ fn terminal_status_updates(
 pub fn upsert_terminal_status(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
-    status: &str,
+    status: RunOutcome,
 ) -> Result<(), WorkflowTermination> {
     if let Some(updates) = terminal_status_updates(plan, status) {
         ctx.upsert_search_attributes(updates?);
@@ -373,7 +380,7 @@ pub async fn plan_and_announce(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("plan_project activity failed: {e:#}"),
+                anyhow::anyhow!("plan_project activity failed: {}", activity_error_message(&e)),
             ))
         })?;
 
@@ -408,7 +415,8 @@ pub async fn resolve_project_config(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "resolve_config activity failed: {e:#}"
+            "resolve_config activity failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -460,6 +468,7 @@ pub async fn run_on_run_start(
             input,
             effective_env,
             &[],
+            &[],
             policy.retry,
         ),
         hook_activity_options(ProjectHookPhase::OnRunStart, policy),
@@ -467,7 +476,8 @@ pub async fn run_on_run_start(
     .await
     .map_err(|e| {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
-            "on-run-start hook failed: {e:#}"
+            "on-run-start hook failed: {}",
+            activity_error_message(&e)
         )))
     })
 }
@@ -522,7 +532,10 @@ pub async fn run_project_checks(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("project checks could not be evaluated: {e:#}"),
+                anyhow::anyhow!(
+                    "project checks could not be evaluated: {}",
+                    activity_error_message(&e)
+                ),
             ))
         })?;
 
@@ -564,11 +577,19 @@ pub async fn store_run_artifacts(
         .await
         .map_err(|e| {
             WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!("store_artifacts activity failed: {e:#}"),
+                anyhow::anyhow!("store_artifacts activity failed: {}", activity_error_message(&e)),
             ))
         })?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))
+}
+
+/// The results an `on-run-end` hook sees: this segment's, plus the checkpoints
+/// of earlier segments the activity reads back and puts ahead of them.
+#[derive(Clone, Copy)]
+pub struct OnRunEndRecord<'a> {
+    pub results: &'a [NodeExecutionResult],
+    pub prior_segments: &'a [String],
 }
 
 /// Failure here is non-fatal: appended to `hook_errors`, doesn't change the
@@ -579,7 +600,7 @@ pub async fn run_on_run_end(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
     effective_env: &BTreeMap<String, String>,
-    all_results: &[NodeExecutionResult],
+    record: OnRunEndRecord<'_>,
     hook_errors: &mut Vec<HookError>,
     policy: HookPolicy<'_>,
 ) {
@@ -595,7 +616,8 @@ pub async fn run_on_run_end(
                 plan,
                 input,
                 effective_env,
-                all_results,
+                record.results,
+                record.prior_segments,
                 policy.retry,
             ),
             hook_activity_options(ProjectHookPhase::OnRunEnd, policy),
@@ -664,6 +686,7 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
         skipped: false,
         skip_reason: None,
         node_results,
+        node_results_partial: false,
         elapsed_time: elapsed,
         artifacts: None,
         log_path: None,
@@ -689,6 +712,7 @@ mod tests {
     }
 
     use crate::types::HookConfig;
+    use dbt_schemas::schemas::telemetry::NodeType;
 
     fn empty_plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -711,7 +735,7 @@ mod tests {
         crate::types::NodeInfo {
             unique_id: format!("model.shop.{name}"),
             name: name.to_string(),
-            resource_type: "model".to_string(),
+            resource_type: NodeType::Model,
             materialization: Some("table".to_string()),
             package_name: "shop".to_string(),
             depends_on: vec![],
@@ -788,7 +812,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.customers".to_string(),
                         name: "customers".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec![],
@@ -801,7 +825,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.orders".to_string(),
                         name: "orders".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec!["model.shop.customers".to_string()],
@@ -899,6 +923,7 @@ mod tests {
             skipped: false,
             skip_reason: None,
             node_results: vec![],
+            node_results_partial: false,
             elapsed_time: 1.5,
             artifacts: None,
             log_path: None,
@@ -965,6 +990,7 @@ mod tests {
             &input,
             &env,
             &[], // on-run-start has no results yet
+            &[],
             &RetryConfig::default(),
         );
         assert_eq!(phs.phase, ProjectHookPhase::OnRunStart);
@@ -1000,10 +1026,29 @@ mod tests {
             &input,
             &env,
             &results,
+            &[],
             &RetryConfig::default(),
         );
         assert_eq!(phs.phase, ProjectHookPhase::OnRunEnd);
         assert_eq!(phs.node_results.len(), 1);
+        assert_eq!(phs.prior_segments, Vec::<String>::new());
+    }
+
+    /// The activity reads the earlier segments back from these references, so
+    /// they must reach it in the order the chain was built.
+    #[test]
+    fn build_project_hooks_input_on_run_end_carries_prior_segments() {
+        let prior = vec!["inv/seg_0.json".to_string(), "inv/seg_1.json".to_string()];
+        let phs = build_project_hooks_input(
+            ProjectHookPhase::OnRunEnd,
+            &empty_plan(),
+            &empty_input(),
+            &BTreeMap::new(),
+            &[],
+            &prior,
+            &RetryConfig::default(),
+        );
+        assert_eq!(phs.prior_segments, prior);
     }
 
     // --- build_store_artifacts_input ---
@@ -1231,7 +1276,7 @@ mod tests {
         // empty_plan has no search attributes → DbtStatus is unregistered, so
         // the terminal upsert must be skipped (upserting it would fail the task).
         let plan = empty_plan();
-        assert!(terminal_status_updates(&plan, "passed").is_none());
+        assert!(terminal_status_updates(&plan, RunOutcome::Passed).is_none());
     }
 
     #[test]
@@ -1241,7 +1286,7 @@ mod tests {
         let mut plan = empty_plan();
         plan.search_attributes
             .insert("DbtStatus".to_string(), "running".to_string());
-        let updates = terminal_status_updates(&plan, "failed")
+        let updates = terminal_status_updates(&plan, RunOutcome::Failed)
             .expect("registered → Some")
             .expect("update builds");
         assert_eq!(updates.len(), 1);
@@ -1353,12 +1398,20 @@ mod tests {
             &input,
             &env,
             &[],
+            &[],
             &retry,
         );
         assert!(start.retry_on_error);
 
-        let end =
-            build_project_hooks_input(ProjectHookPhase::OnRunEnd, &plan, &input, &env, &[], &retry);
+        let end = build_project_hooks_input(
+            ProjectHookPhase::OnRunEnd,
+            &plan,
+            &input,
+            &env,
+            &[],
+            &[],
+            &retry,
+        );
         assert!(!end.retry_on_error);
     }
 }

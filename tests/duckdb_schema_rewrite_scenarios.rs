@@ -103,3 +103,65 @@ async fn custom_macro_schema_rewrite_is_a_no_op_without_env_override() {
     // `target.schema = main`. Nothing patches it, because nothing changed.
     assert_eq!(result.relation_name.as_deref(), Some("spike.custom_main.plain"));
 }
+
+/// A project may override `generate_database_name` and leave
+/// `generate_schema_name` alone. The database macro is then re-executed per
+/// workflow while the schema still follows dbt's default pattern against the
+/// workflow's own `target.schema`.
+#[tokio::test]
+async fn custom_generate_database_name_macro_alone_keeps_default_schema_resolution() {
+    const DATABASE_NAME_MACRO: &str = "{% macro generate_database_name(custom_database_name, node) %}\
+        {%- if custom_database_name is none -%}\
+            {{ target.database }}\
+        {%- else -%}\
+            {{ custom_database_name }}\
+        {%- endif -%}\
+    {% endmacro %}";
+
+    let harness = Harness::build_files_with_profile(
+        &[
+            ("macros/generate_database_name.sql", DATABASE_NAME_MACRO),
+            ("models/plain.sql", "select 1 as id"),
+        ],
+        CUSTOM_MACRO_PROFILE,
+    )
+    .await;
+    assert!(harness.state().has_custom_database_name_macro);
+    assert!(!harness.state().has_custom_schema_name_macro);
+
+    let mut env = BTreeMap::new();
+    env.insert("DBTT_SCHEMA".to_string(), "workflow7".to_string());
+
+    let result = harness
+        .run_uid_with_env("model.spike.plain", &env)
+        .await
+        .unwrap();
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success);
+    assert_eq!(result.relation_name.as_deref(), Some("spike.workflow7.plain"));
+    assert_eq!(harness.query_scalar("select id from workflow7.plain").await, "1");
+}
+
+/// dbt caches which template answers `generate_schema_name` per process, keyed
+/// by package name and not by project. A worker loads several projects into one
+/// process, so each load must start from an empty cache: here two projects
+/// share the package name `spike`, and only the first overrides the macro.
+#[tokio::test]
+async fn a_project_does_not_inherit_another_projects_naming_macro() {
+    let custom = Harness::build_files_with_profile(CUSTOM_MACRO_FILES, CUSTOM_MACRO_PROFILE).await;
+    let custom_result = custom.run("plain").await.unwrap();
+    assert_eq!(custom_result.relation_name.as_deref(), Some("spike.custom_main.plain"));
+
+    // Loaded second, with no macro of its own. A stale cache entry makes this
+    // load fail on the first project's template, which this project lacks.
+    let plain = Harness::build(&[("plain", "select 1 as id")]).await;
+    assert!(!plain.state().has_custom_schema_name_macro);
+    let plain_result = plain.run("plain").await.unwrap();
+    assert_eq!(plain_result.relation_name.as_deref(), Some("spike.main.plain"));
+
+    // And the other way round: a project loaded after one that used dbt's
+    // built-in macro must still get its own override, not the cached built-in.
+    let custom_again =
+        Harness::build_files_with_profile(CUSTOM_MACRO_FILES, CUSTOM_MACRO_PROFILE).await;
+    let again = custom_again.run("plain").await.unwrap();
+    assert_eq!(again.relation_name.as_deref(), Some("spike.custom_main.plain"));
+}

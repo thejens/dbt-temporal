@@ -19,6 +19,9 @@ use super::execute_node::freshness;
 use super::indirect::{IndirectSelection, expand_indirect_selection};
 use super::selectors::apply_selectors;
 
+mod manifest;
+pub use manifest::ManifestCache;
+
 /// Collect all node IDs that match the command (run vs build), applying the
 /// exclusions that happen before selectors.
 ///
@@ -312,13 +315,13 @@ fn validate_microbatch_window(input: &DbtRunInput) -> Result<(), anyhow::Error> 
 async fn store_manifest_json(
     artifact_store: Option<&std::sync::Arc<dyn crate::artifact_store::ArtifactStore>>,
     invocation_id: &str,
-    manifest_json: &str,
+    manifest_json: String,
 ) -> Result<String, anyhow::Error> {
     let store = artifact_store.ok_or_else(|| {
         anyhow::anyhow!("ArtifactStore not configured but write_artifacts is enabled")
     })?;
     store
-        .store(invocation_id, "manifest.json", Bytes::copy_from_slice(manifest_json.as_bytes()))
+        .store(invocation_id, "manifest.json", Bytes::from(manifest_json))
         .await
         .map_err(|e| artifact_io_error(e.context("storing manifest.json")))
 }
@@ -491,11 +494,19 @@ pub async fn plan_project_inner(
     // hundreds of KB (especially with adapter macro packages) and nothing else
     // in the run needs it.
     let manifest_ref = if write_artifacts {
-        let manifest =
-            dbt_schemas::schemas::manifest::build_manifest(&invocation_id, &state.resolver_state);
-        let manifest_json = serde_json::to_string(&manifest)?;
+        let template = state
+            .manifest
+            .get_or_build(|| {
+                dbt_schemas::schemas::manifest::build_manifest("", &state.resolver_state)
+            })
+            .await?;
+        let manifest_json = template.render(
+            &invocation_id,
+            chrono::Utc::now(),
+            dbt_common::constants::collect_dbt_custom_envs(),
+        )?;
         Some(
-            store_manifest_json(activities.artifact_store.as_ref(), &invocation_id, &manifest_json)
+            store_manifest_json(activities.artifact_store.as_ref(), &invocation_id, manifest_json)
                 .await?,
         )
     } else {
@@ -1503,7 +1514,7 @@ mod tests {
         );
 
         let manifest = r#"{"nodes":{}}"#;
-        let path = store_manifest_json(Some(&store), "inv-1", manifest)
+        let path = store_manifest_json(Some(&store), "inv-1", manifest.to_string())
             .await
             .expect("storing the manifest should succeed");
 
@@ -1516,7 +1527,7 @@ mod tests {
     /// than after every node has executed.
     #[tokio::test]
     async fn store_manifest_json_without_a_store_names_the_missing_configuration() {
-        let err = store_manifest_json(None, "inv-1", "{}")
+        let err = store_manifest_json(None, "inv-1", "{}".to_string())
             .await
             .expect_err("a missing store must fail");
         assert!(

@@ -649,6 +649,7 @@ async fn initialize_project_inner(
         cancellation_source: cts,
         auth_override,
         project_checks,
+        manifest: crate::activities::plan::ManifestCache::default(),
     })
 }
 

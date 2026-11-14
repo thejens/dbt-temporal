@@ -76,6 +76,16 @@ fn promote_ephemeral_deps(
 ///
 /// Either way, T is already scheduled after N by the existing forward edge(s), so the
 /// gate would be redundant in addition to unsafe.
+///
+/// # Complexity
+///
+/// With V nodes and E dependency edges in `deps`, and P (node, test) gate candidates,
+/// the transitive ancestors of all tests come from one strongly-connected-component
+/// pass plus one reachability-bitset union per component, so they cost
+/// O((V + E) * V / 64) time and O(V^2 / 64) bits in the worst case, and each of the P
+/// candidates is then an O(log V) membership test. Computing a separate ancestor set
+/// per test by graph traversal would instead cost O(T * (V + E)) for T tests, which
+/// grows quadratically on projects whose test count scales with their model count.
 pub fn inject_test_gates(
     nodes: &Nodes,
     selected_ids: &[String],
@@ -104,8 +114,8 @@ pub fn inject_test_gates(
         }
     }
 
-    // Compute each test's transitive ancestor set in the raw (pre-injection) dep
-    // graph — every node T depends on, directly or via chains of model→model edges.
+    // Ancestor sets are taken from the raw (pre-injection) dep graph, so the
+    // gate edges added below never influence which gates are skipped.
     let test_ids: Vec<&str> = selected_ids
         .iter()
         .filter(|id| {
@@ -115,27 +125,7 @@ pub fn inject_test_gates(
         })
         .map(String::as_str)
         .collect();
-    let mut test_ancestors: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-    for test_id in &test_ids {
-        let mut ancestors: BTreeSet<String> = BTreeSet::new();
-        let mut stack: Vec<String> = deps
-            .get(*test_id)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        while let Some(cur) = stack.pop() {
-            if !ancestors.insert(cur.clone()) {
-                continue;
-            }
-            if let Some(parent_deps) = deps.get(&cur) {
-                for p in parent_deps {
-                    if !ancestors.contains(p) {
-                        stack.push(p.clone());
-                    }
-                }
-            }
-        }
-        test_ancestors.insert(*test_id, ancestors);
-    }
+    let ancestors = AncestorIndex::new(deps, &test_ids);
 
     // For each non-test node that depends on a model with tests, add the test IDs
     // as additional dependencies — except where doing so would close a cycle.
@@ -151,10 +141,7 @@ pub fn inject_test_gates(
             for dep_id in &node_deps {
                 if let Some(tests) = model_tests.get(dep_id.as_str()) {
                     for test_id in tests {
-                        if test_ancestors
-                            .get(test_id)
-                            .is_some_and(|a| a.contains(id.as_str()))
-                        {
+                        if ancestors.is_ancestor(test_id, id) {
                             continue;
                         }
                         extra.insert((*test_id).to_string());
@@ -167,6 +154,142 @@ pub fn inject_test_gates(
                 entry.extend(extra);
             }
         }
+    }
+}
+
+/// Reachability over the raw dependency graph: answers "is `node` a transitive
+/// dependency of `root`" for a fixed set of roots.
+///
+/// Strongly-connected components are condensed first so that the answer is also exact
+/// for a graph that contains a cycle (a node on a cycle is its own ancestor); the
+/// reachable set of a component is the union of the sets of the components it points
+/// to, which Tarjan's algorithm emits successors-first.
+struct AncestorIndex {
+    index_of: BTreeMap<String, usize>,
+    /// Component of each root's node, keyed by node index.
+    component_of: BTreeMap<usize, usize>,
+    /// Per component, the bitset of nodes reachable through at least one edge.
+    reachable: Vec<Vec<u64>>,
+}
+
+impl AncestorIndex {
+    fn new(deps: &BTreeMap<String, BTreeSet<String>>, roots: &[&str]) -> Self {
+        let mut index_of: BTreeMap<String, usize> = BTreeMap::new();
+        let mut intern = |id: &str| {
+            let next = index_of.len();
+            *index_of.entry(id.to_string()).or_insert(next)
+        };
+        for (node, node_deps) in deps {
+            intern(node);
+            for dep in node_deps {
+                intern(dep);
+            }
+        }
+        let n = index_of.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (node, node_deps) in deps {
+            adj[index_of[node]] = node_deps.iter().map(|d| index_of[d]).collect();
+        }
+
+        let words = n.div_ceil(64);
+        let unvisited = usize::MAX;
+        let mut order = vec![unvisited; n];
+        let mut low = vec![0usize; n];
+        let mut on_stack = vec![false; n];
+        let mut component = vec![unvisited; n];
+        let mut reachable: Vec<Vec<u64>> = Vec::new();
+        let mut scc_stack: Vec<usize> = Vec::new();
+        let mut counter = 0usize;
+
+        // Iterative so a dependency chain thousands of models deep cannot
+        // overflow the call stack.
+        for root in roots.iter().filter_map(|r| index_of.get(*r).copied()) {
+            if order[root] != unvisited {
+                continue;
+            }
+            let mut calls: Vec<(usize, usize)> = vec![(root, 0)];
+            order[root] = counter;
+            low[root] = counter;
+            counter += 1;
+            scc_stack.push(root);
+            on_stack[root] = true;
+            while let Some(&(v, edge)) = calls.last() {
+                if let Some(&w) = adj[v].get(edge) {
+                    if let Some(frame) = calls.last_mut() {
+                        frame.1 += 1;
+                    }
+                    if order[w] == unvisited {
+                        order[w] = counter;
+                        low[w] = counter;
+                        counter += 1;
+                        scc_stack.push(w);
+                        on_stack[w] = true;
+                        calls.push((w, 0));
+                    } else if on_stack[w] {
+                        low[v] = low[v].min(order[w]);
+                    }
+                    continue;
+                }
+                calls.pop();
+                if let Some(&(parent, _)) = calls.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] != order[v] {
+                    continue;
+                }
+                let id = reachable.len();
+                let mut members = Vec::new();
+                while let Some(m) = scc_stack.pop() {
+                    on_stack[m] = false;
+                    component[m] = id;
+                    members.push(m);
+                    if m == v {
+                        break;
+                    }
+                }
+                let mut bits = vec![0u64; words];
+                // Members of a cycle reach one another (and themselves).
+                if members.len() > 1 || adj[v].contains(&v) {
+                    for &m in &members {
+                        bits[m / 64] |= 1 << (m % 64);
+                    }
+                }
+                for &m in &members {
+                    for &w in &adj[m] {
+                        if component[w] == id {
+                            continue;
+                        }
+                        bits[w / 64] |= 1 << (w % 64);
+                        // `w`'s component closed earlier: it is not on the stack.
+                        for (dst, src) in bits.iter_mut().zip(&reachable[component[w]]) {
+                            *dst |= src;
+                        }
+                    }
+                }
+                reachable.push(bits);
+            }
+        }
+
+        let component_of = roots
+            .iter()
+            .filter_map(|r| index_of.get(*r).map(|&i| (i, component[i])))
+            .collect();
+        Self {
+            index_of,
+            component_of,
+            reachable,
+        }
+    }
+
+    /// Whether `node` is reachable from `root` through one or more dependency
+    /// edges. `root` must have been passed to [`Self::new`].
+    fn is_ancestor(&self, root: &str, node: &str) -> bool {
+        let (Some(&r), Some(&n)) = (self.index_of.get(root), self.index_of.get(node)) else {
+            return false;
+        };
+        self.component_of
+            .get(&r)
+            .is_some_and(|&c| self.reachable[c][n / 64] & (1 << (n % 64)) != 0)
     }
 }
 
@@ -360,6 +483,243 @@ mod tests {
             ..Default::default()
         };
         nodes.tests.insert(unique_id.to_string(), Arc::new(test));
+    }
+
+    /// Straightforward formulation of the gate rule: one ancestor traversal per
+    /// test. Kept as the specification that `inject_test_gates` must match.
+    #[cfg(test)]
+    fn inject_test_gates_reference(
+        nodes: &Nodes,
+        selected_ids: &[String],
+        deps: &mut BTreeMap<String, BTreeSet<String>>,
+    ) {
+        let selected_set: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
+
+        // Build model->tests map: for each model, collect all selected tests that depend on it.
+        let mut model_tests: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for id in selected_ids {
+            if let Some(node) = nodes.get_node(id)
+                && node.resource_type() == NodeType::Test
+            {
+                for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
+                    if selected_set.contains(dep_id.as_str())
+                        && nodes
+                            .get_node(dep_id)
+                            .is_some_and(|n| n.resource_type() == NodeType::Model)
+                    {
+                        model_tests
+                            .entry(dep_id.as_str())
+                            .or_default()
+                            .push(id.as_str());
+                    }
+                }
+            }
+        }
+
+        // Compute each test's transitive ancestor set in the raw (pre-injection) dep
+        // graph — every node T depends on, directly or via chains of model→model edges.
+        let test_ids: Vec<&str> = selected_ids
+            .iter()
+            .filter(|id| {
+                nodes
+                    .get_node(id)
+                    .is_some_and(|n| n.resource_type() == NodeType::Test)
+            })
+            .map(String::as_str)
+            .collect();
+        let mut test_ancestors: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        for test_id in &test_ids {
+            let mut ancestors: BTreeSet<String> = BTreeSet::new();
+            let mut stack: Vec<String> = deps
+                .get(*test_id)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            while let Some(cur) = stack.pop() {
+                if !ancestors.insert(cur.clone()) {
+                    continue;
+                }
+                if let Some(parent_deps) = deps.get(&cur) {
+                    for p in parent_deps {
+                        if !ancestors.contains(p) {
+                            stack.push(p.clone());
+                        }
+                    }
+                }
+            }
+            test_ancestors.insert(*test_id, ancestors);
+        }
+
+        // For each non-test node that depends on a model with tests, add the test IDs
+        // as additional dependencies — except where doing so would close a cycle.
+        for id in selected_ids {
+            let is_test = nodes
+                .get_node(id)
+                .is_some_and(|n| n.resource_type() == NodeType::Test);
+            if is_test {
+                continue;
+            }
+            if let Some(node_deps) = deps.get(id).cloned() {
+                let mut extra = BTreeSet::new();
+                for dep_id in &node_deps {
+                    if let Some(tests) = model_tests.get(dep_id.as_str()) {
+                        for test_id in tests {
+                            if test_ancestors
+                                .get(test_id)
+                                .is_some_and(|a| a.contains(id.as_str()))
+                            {
+                                continue;
+                            }
+                            extra.insert((*test_id).to_string());
+                        }
+                    }
+                }
+                if !extra.is_empty()
+                    && let Some(entry) = deps.get_mut(id)
+                {
+                    entry.extend(extra);
+                }
+            }
+        }
+    }
+
+    /// Small deterministic xorshift generator, so generated graphs are
+    /// reproducible without a randomness dependency.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next() % bound as u64).unwrap_or(0)
+        }
+    }
+
+    /// Model dependency lists (indices of earlier models) for each graph shape.
+    fn model_edges(shape: &str, size: usize, rng: &mut Xorshift) -> Vec<Vec<usize>> {
+        (0..size)
+            .map(|i| match shape {
+                "chain" => {
+                    if i == 0 {
+                        vec![]
+                    } else {
+                        vec![i - 1]
+                    }
+                }
+                // Layers of three; every model depends on the whole previous layer.
+                "diamond" => {
+                    if i < 3 {
+                        vec![]
+                    } else {
+                        ((i / 3 - 1) * 3..(i / 3) * 3).collect()
+                    }
+                }
+                "fan_out" => {
+                    if i == 0 {
+                        vec![]
+                    } else {
+                        vec![0]
+                    }
+                }
+                // Two independent random DAGs, split at the midpoint.
+                "disconnected" => {
+                    let floor = if i < size / 2 { 0 } else { size / 2 };
+                    let span = i - floor;
+                    if span == 0 {
+                        vec![]
+                    } else {
+                        (0..=rng.below(3))
+                            .map(|_| floor + rng.below(span))
+                            .collect()
+                    }
+                }
+                _ => {
+                    if i == 0 {
+                        vec![]
+                    } else {
+                        (0..=rng.below(3)).map(|_| rng.below(i)).collect()
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Builds a project of `size` models in the given shape plus `test_count`
+    /// tests that each reference one to four random models, returning the
+    /// selected ids (a random few models are left unselected).
+    fn gate_fixture(
+        shape: &str,
+        size: usize,
+        test_count: usize,
+        seed: u64,
+    ) -> (Nodes, Vec<String>) {
+        let mut rng = Xorshift(seed);
+        let model_id = |i: usize| format!("model.g.m{i:03}");
+        let mut nodes = Nodes::default();
+        let mut selected = Vec::new();
+        for (i, edges) in model_edges(shape, size, &mut rng).iter().enumerate() {
+            let dep_ids: Vec<String> = edges.iter().map(|&d| model_id(d)).collect();
+            let dep_refs: Vec<&str> = dep_ids.iter().map(String::as_str).collect();
+            add_model(&mut nodes, &model_id(i), &dep_refs);
+            if rng.below(12) != 0 {
+                selected.push(model_id(i));
+            }
+        }
+        for t in 0..test_count {
+            let dep_ids: Vec<String> = (0..=rng.below(4))
+                .map(|_| model_id(rng.below(size)))
+                .collect();
+            let dep_refs: Vec<&str> = dep_ids.iter().map(String::as_str).collect();
+            let id = format!("test.g.t{t:03}");
+            add_test(&mut nodes, &id, &dep_refs);
+            selected.push(id);
+        }
+        (nodes, selected)
+    }
+
+    /// The reachability-index implementation must produce exactly the edge
+    /// sets of the per-test traversal, across graph shapes, seeds and a graph
+    /// whose raw dependencies contain a cycle.
+    #[test]
+    fn inject_test_gates_matches_the_reference_on_generated_graphs() {
+        let mut gated_edges = 0usize;
+        let mut compared = 0usize;
+        for shape in ["chain", "diamond", "fan_out", "disconnected", "random"] {
+            for seed in 1..=12u64 {
+                let (nodes, selected) = gate_fixture(shape, 40, 25, seed * 0x9E37_79B9 + 7);
+                let raw = build_dependency_map(&nodes, &selected);
+                let mut expected = raw.clone();
+                inject_test_gates_reference(&nodes, &selected, &mut expected);
+                let mut actual = raw.clone();
+                inject_test_gates(&nodes, &selected, &mut actual);
+                assert_eq!(actual, expected, "shape {shape}, seed {seed}");
+                gated_edges += actual.values().map(BTreeSet::len).sum::<usize>()
+                    - raw.values().map(BTreeSet::len).sum::<usize>();
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 60);
+        assert!(gated_edges > 0, "generated graphs never exercised a gate");
+
+        // Raw cycle (m000 <-> m001 and a self-loop on m002): not a valid
+        // project, but both implementations must still agree.
+        let (nodes, selected) = gate_fixture("chain", 6, 6, 99);
+        let mut raw = build_dependency_map(&nodes, &selected);
+        for (from, to) in [("m000", "m001"), ("m002", "m002")] {
+            let (from, to) = (format!("model.g.{from}"), format!("model.g.{to}"));
+            if let Some(entry) = raw.get_mut(&from) {
+                entry.insert(to);
+            }
+        }
+        let mut expected = raw.clone();
+        inject_test_gates_reference(&nodes, &selected, &mut expected);
+        let mut actual = raw;
+        inject_test_gates(&nodes, &selected, &mut actual);
+        assert_eq!(actual, expected, "cyclic raw graph");
     }
 
     #[test]

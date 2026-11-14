@@ -183,6 +183,19 @@ pub fn prepare_render_env(
 /// worker lifetime. That is the price of correctness here, and it restores the
 /// per-invocation freshness the cache was designed around.
 ///
+/// Clearing less often is not safe, because the cache cannot be kept current:
+///
+/// - dbt itself only adds the relations a materialization returns, and does so
+///   after the node succeeds. A node that created its relation and then failed
+///   leaves it in the warehouse but not in the cache, so the retry would be told
+///   the relation is absent and fail the same way.
+/// - The engine is shared by every workflow on the worker, and the same schema
+///   is written by other workers, by `run_query` DDL in hooks and macros, and by
+///   anything outside dbt. None of those update this cache.
+/// - Narrowing the clear to the schemas a node writes saves nothing: a node's
+///   lookups are of its own relation, so the schema it writes is the schema it
+///   lists.
+///
 /// The cache belongs to the engine, and an activity binds exactly one engine, so
 /// clearing the selected one is enough: every engine is cleared before each of
 /// its own uses, and none is cleared on another's behalf.

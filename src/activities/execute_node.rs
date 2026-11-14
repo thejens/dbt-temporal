@@ -908,6 +908,15 @@ fn execute_node_body(
         state.packages.clone(),
     );
 
+    // Ephemeral models this node pulls in render with their own node context,
+    // built from the same base context and scratch IO as this node's.
+    let ephemeral_context = super::node_helpers::ephemeral_context_builder(
+        state,
+        &base_context,
+        base.adapter,
+        &io_args,
+    );
+
     // Microbatch: replace ref() and source() with time-window-aware versions when
     // event_time_start/end are provided. The materialisation template uses these to
     // filter upstream models/sources to the batch window. Dependency validation is
@@ -1033,8 +1042,11 @@ fn execute_node_body(
             &state.resolver_state.nodes,
             jinja_env,
             &node_context,
-            &state.io_args.in_dir,
-            &ephemeral_dir,
+            super::node_helpers::EphemeralDirs {
+                in_dir: &state.io_args.in_dir,
+                ephemeral_dir: &ephemeral_dir,
+                context_for: &ephemeral_context,
+            },
         )?;
         let sql = rewrite_relations(sql, &relation_rewrite, base.adapter);
         // minijinja Values share their string via Arc — clone the Value, not the SQL.
@@ -1083,10 +1095,10 @@ fn execute_node_body(
                 &base.depends_on.nodes,
                 &state.resolver_state.nodes,
                 jinja_env,
-                &node_context,
                 super::node_helpers::EphemeralDirs {
                     in_dir: &state.io_args.in_dir,
                     ephemeral_dir: &ephemeral_dir,
+                    context_for: &ephemeral_context,
                 },
             )?;
             // Resolve the relations the startup manifest baked into this text —

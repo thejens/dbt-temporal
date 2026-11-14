@@ -629,6 +629,44 @@ async fn ephemeral_model_is_inlined_as_a_cte() {
 }
 
 #[tokio::test]
+async fn ephemeral_model_renders_with_its_own_node_context() {
+    // An ephemeral model's SQL is compiled as that model, not as whichever
+    // model consumes it: `model.name` and `this` name the ephemeral itself, and
+    // the same holds for an ephemeral reached through another ephemeral.
+    let harness = Harness::build(&[
+        (
+            "base",
+            "{{ config(materialized='ephemeral') }}\n\
+             select '{{ model.name }}' as model_name, '{{ this.identifier }}' as this_name",
+        ),
+        (
+            "mid",
+            "{{ config(materialized='ephemeral') }}\n\
+             select '{{ model.name }}' as mid_name, base.* from {{ ref('base') }} as base",
+        ),
+        (
+            "downstream",
+            "select '{{ model.name }}' as consumer, mid.* from {{ ref('mid') }} as mid",
+        ),
+    ])
+    .await;
+
+    let compiled = harness
+        .run_ok("downstream")
+        .await
+        .compiled_code
+        .expect("compiled sql");
+    assert!(
+        compiled.contains("'base' as model_name") && compiled.contains("'base' as this_name"),
+        "ephemeral `base` must render as itself, got: {compiled}"
+    );
+    assert!(
+        compiled.contains("'mid' as mid_name") && compiled.contains("'downstream' as consumer"),
+        "each model must render as itself, got: {compiled}"
+    );
+}
+
+#[tokio::test]
 async fn transitive_ephemeral_chain_is_inlined() {
     // base (ephemeral) <- mid (ephemeral, refs base) <- downstream (table, refs mid).
     // Exercises persist_ephemeral_chain's recursive leaf-first persistence.

@@ -98,9 +98,9 @@ pub fn build_unit_test_sql(
     nodes: &Nodes,
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     node_context: &BTreeMap<String, minijinja::Value>,
-    in_dir: &Path,
-    ephemeral_dir: &Path,
+    ephemeral: super::super::node_helpers::EphemeralDirs<'_>,
 ) -> Result<String, DbtTemporalError> {
+    let in_dir = ephemeral.in_dir;
     let unique_id = &unit.__common_attr__.unique_id;
 
     if let Some(overrides) = &unit.__unit_test_attr__.overrides
@@ -239,11 +239,7 @@ pub fn build_unit_test_sql(
         &model.__base_attr__.depends_on.nodes,
         nodes,
         jinja_env,
-        node_context,
-        super::super::node_helpers::EphemeralDirs {
-            in_dir,
-            ephemeral_dir,
-        },
+        ephemeral,
     )?;
 
     Ok(prepend_fixture_ctes(&model_sql, &fixture_ctes))

@@ -712,6 +712,7 @@ mod tests {
     }
 
     use crate::types::HookConfig;
+    use dbt_schemas::schemas::telemetry::NodeType;
 
     fn empty_plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -734,7 +735,7 @@ mod tests {
         crate::types::NodeInfo {
             unique_id: format!("model.shop.{name}"),
             name: name.to_string(),
-            resource_type: "model".to_string(),
+            resource_type: NodeType::Model,
             materialization: Some("table".to_string()),
             package_name: "shop".to_string(),
             depends_on: vec![],
@@ -811,7 +812,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.customers".to_string(),
                         name: "customers".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec![],
@@ -824,7 +825,7 @@ mod tests {
                     NodeInfo {
                         unique_id: "model.shop.orders".to_string(),
                         name: "orders".to_string(),
-                        resource_type: "model".to_string(),
+                        resource_type: NodeType::Model,
                         materialization: Some("table".to_string()),
                         package_name: "shop".to_string(),
                         depends_on: vec!["model.shop.customers".to_string()],

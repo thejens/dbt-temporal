@@ -1,3 +1,4 @@
+use dbt_schemas::schemas::telemetry::NodeType;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -353,8 +354,9 @@ pub struct ExecutionPlan {
 pub struct NodeInfo {
     pub unique_id: String,
     pub name: String,
-    /// "model", "test", "seed", "snapshot"
-    pub resource_type: String,
+    /// Serialized as dbt's protobuf enum name (`NODE_TYPE_MODEL`,
+    /// `NODE_TYPE_TEST`, ...), the spelling workflow histories already carry.
+    pub resource_type: NodeType,
     /// "table", "view", "incremental", "ephemeral"
     pub materialization: Option<String>,
     pub package_name: String,
@@ -803,6 +805,73 @@ mod tests {
         // The wire spelling is dbt's, hyphen included.
         assert_eq!(DbtCommand::parse("source freshness"), None);
         assert_eq!(DbtCommand::parse(""), None);
+    }
+
+    /// Every resource type dbt can tag a node with, beside the string a plan
+    /// recorded in a workflow history spells it as.
+    const RESOURCE_TYPE_WIRE: [(NodeType, &str); 17] = [
+        (NodeType::Unspecified, "NODE_TYPE_UNSPECIFIED"),
+        (NodeType::Model, "NODE_TYPE_MODEL"),
+        (NodeType::Seed, "NODE_TYPE_SEED"),
+        (NodeType::Snapshot, "NODE_TYPE_SNAPSHOT"),
+        (NodeType::Source, "NODE_TYPE_SOURCE"),
+        (NodeType::Test, "NODE_TYPE_TEST"),
+        (NodeType::UnitTest, "NODE_TYPE_UNIT_TEST"),
+        (NodeType::Macro, "NODE_TYPE_MACRO"),
+        (NodeType::DocsMacro, "NODE_TYPE_DOCS_MACRO"),
+        (NodeType::Analysis, "NODE_TYPE_ANALYSIS"),
+        (NodeType::Operation, "NODE_TYPE_OPERATION"),
+        (NodeType::Exposure, "NODE_TYPE_EXPOSURE"),
+        (NodeType::Metric, "NODE_TYPE_METRIC"),
+        (NodeType::SavedQuery, "NODE_TYPE_SAVED_QUERY"),
+        (NodeType::SemanticModel, "NODE_TYPE_SEMANTIC_MODEL"),
+        (NodeType::Function, "NODE_TYPE_FUNCTION"),
+        (NodeType::Check, "NODE_TYPE_CHECK"),
+    ];
+
+    fn node_info_json(resource_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "unique_id": "model.shop.m",
+            "name": "m",
+            "resource_type": resource_type,
+            "materialization": "table",
+            "package_name": "shop",
+            "depends_on": [],
+            "priority": null,
+            "on_error": null,
+        })
+    }
+
+    #[test]
+    fn node_info_resource_type_serializes_to_the_recorded_strings() {
+        for (resource_type, wire) in RESOURCE_TYPE_WIRE {
+            let info = NodeInfo {
+                unique_id: "model.shop.m".into(),
+                name: "m".into(),
+                resource_type,
+                materialization: Some("table".into()),
+                package_name: "shop".into(),
+                depends_on: vec![],
+                priority: None,
+                on_error: None,
+            };
+            assert_eq!(serde_json::to_value(&info).unwrap(), node_info_json(wire), "{wire}");
+        }
+    }
+
+    #[test]
+    fn node_info_recorded_with_string_resource_type_deserializes() {
+        for (resource_type, wire) in RESOURCE_TYPE_WIRE {
+            let info: NodeInfo = serde_json::from_value(node_info_json(wire)).unwrap();
+            assert_eq!(info.resource_type, resource_type, "{wire}");
+        }
+    }
+
+    #[test]
+    fn node_info_with_an_unknown_resource_type_is_rejected() {
+        // The planner only ever writes dbt's own enum names, so anything else
+        // is a corrupt payload rather than a newer dbt's type to carry along.
+        assert!(serde_json::from_value::<NodeInfo>(node_info_json("model")).is_err());
     }
 
     #[test]

@@ -777,7 +777,7 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
     Some(NodeInfo {
         unique_id: common.unique_id.clone(),
         name: common.name.clone(),
-        resource_type: node.resource_type().as_str_name().to_string(),
+        resource_type: node.resource_type(),
         materialization: Some(base.materialized.to_string()),
         package_name: common.package_name.clone(),
         depends_on: base
@@ -1330,7 +1330,7 @@ mod tests {
         assert_eq!(info.unique_id, "model.shop.orders");
         assert_eq!(info.name, "orders");
         assert_eq!(info.package_name, "shop");
-        assert_eq!(info.resource_type, "NODE_TYPE_MODEL");
+        assert_eq!(info.resource_type, NodeType::Model);
         assert_eq!(info.depends_on.len(), 2);
         assert!(
             info.depends_on
@@ -1421,7 +1421,7 @@ mod tests {
 
         let info =
             build_node_info(&nodes, "test.shop.not_null_id").expect("test is in the registry");
-        assert_eq!(info.resource_type, "NODE_TYPE_TEST");
+        assert_eq!(info.resource_type, NodeType::Test);
         assert_eq!(info.on_error, None);
     }
 

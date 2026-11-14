@@ -215,11 +215,17 @@ impl<'a> ReadyQueueRun<'a> {
             // Once history asks for a continuation, nothing new starts: the
             // activities already outstanding finish and are recorded, so the
             // successor resumes from statuses that are all final.
-            draining |= should_continue_as_new(
-                completed_this_segment,
-                self.can_continue,
-                ctx.continue_as_new_suggested(),
-            );
+            // A cancelled workflow drains the same way. Its outstanding
+            // activities resolve promptly (cancelled, or with the result they
+            // had already reported), and each is recorded as what it was: a
+            // model that finished before the cancellation reached it must not
+            // be reported as cancelled.
+            draining |= was_cancelled
+                || should_continue_as_new(
+                    completed_this_segment,
+                    self.can_continue,
+                    ctx.continue_as_new_suggested(),
+                );
 
             // Read on every pass so a `set_fail_fast` update applies to the very
             // next scheduling decision (updates re-apply in history order, so
@@ -280,16 +286,15 @@ impl<'a> ReadyQueueRun<'a> {
                     status == NodeStatus::Error
                 }
                 Err(ActivityExecutionError::Cancelled(_)) => {
-                    // The workflow was cancelled. Activities still outstanding
-                    // were cancelled with it and are closed out here, along
-                    // with everything that never started.
+                    // The workflow was cancelled. Nothing further starts; the
+                    // activities still outstanding are awaited so each reports
+                    // its own outcome.
                     was_cancelled = true;
                     self.record_cancellation(&done.node);
                     self.scheduler
                         .on_complete(&done.node, NodeStatus::Cancelled)
                         .map_err(scheduler_failure)?;
-                    self.cancel_remaining();
-                    break;
+                    false
                 }
                 Err(e) => {
                     self.record_activity_error(&done.node, &e);
@@ -304,6 +309,9 @@ impl<'a> ReadyQueueRun<'a> {
             }
         }
 
+        if was_cancelled {
+            self.cancel_remaining();
+        }
         Ok(self.into_outcome(was_cancelled))
     }
 

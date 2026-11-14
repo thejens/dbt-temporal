@@ -13,6 +13,16 @@ use super::FetchedProjects;
 /// answer surfaces as an error.
 const CLONE_TIMEOUT: Duration = Duration::from_mins(10);
 
+/// Transports a project source may use, in `GIT_ALLOW_PROTOCOL` syntax.
+///
+/// git also speaks transports that run a command (`ext::`) or reach
+/// unauthenticated daemons (`git://`); none of that belongs in a project
+/// source. `file` is the local-mirror case. The same list gates the URL up
+/// front (so a bad scheme is a configuration error, not git's stderr) and is
+/// handed to git itself, which also applies it to submodule and redirect
+/// transports the URL check cannot see.
+const ALLOWED_SCHEMES: [&str; 3] = ["https", "ssh", "file"];
+
 /// Parsed components of a git model store URL.
 struct GitUrl<'a> {
     repo_url: &'a str,
@@ -38,6 +48,26 @@ fn parse_git_url(url: &str) -> Result<GitUrl<'_>> {
         Some((r, s)) => (r, Some(s)),
         None => (fragment, None),
     };
+
+    // git reads a leading `-` as an option wherever it appears among
+    // positional arguments; `--` guards the argv, this refuses the value
+    // before it gets there.
+    for (what, value) in [("repository URL", repo_url), ("rev", rev)] {
+        if value.starts_with('-') {
+            anyhow::bail!("git model store {what} must not start with '-': {value}");
+        }
+    }
+    let scheme = url::Url::parse(repo_url)
+        .map(|u| u.scheme().to_string())
+        .with_context(|| {
+            format!("git model store URL must be an absolute URL such as https://host/repo.git: {repo_url}")
+        })?;
+    if !ALLOWED_SCHEMES.contains(&scheme.as_str()) {
+        anyhow::bail!(
+            "git model store URL scheme '{scheme}' is not allowed (use one of {}): {repo_url}",
+            ALLOWED_SCHEMES.join(", ")
+        );
+    }
 
     Ok(GitUrl {
         repo_url,
@@ -120,6 +150,7 @@ async fn checkout(parsed: &GitUrl<'_>, dest: &Path) -> Result<()> {
                 "1",
                 "--branch",
                 parsed.rev,
+                "--",
                 parsed.repo_url,
             ])
             .arg(dest);
@@ -138,6 +169,7 @@ async fn checkout(parsed: &GitUrl<'_>, dest: &Path) -> Result<()> {
         "--quiet",
         "--depth",
         "1",
+        "--",
         parsed.repo_url,
         parsed.rev,
     ]);
@@ -159,6 +191,7 @@ fn git_command(repo_url: &str) -> Result<tokio::process::Command> {
     // token leaves git waiting on a username prompt until something kills the
     // worker, which reads as a hang rather than an authentication failure.
     cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", ALLOWED_SCHEMES.join(":"))
         .env("GIT_ASKPASS", "")
         .env("SSH_ASKPASS", "")
         // Kill the child if its future is dropped — the checkout timeout does
@@ -259,8 +292,27 @@ fn token_rewrite_config(repo_url: &str) -> Result<Option<(String, String)>> {
 }
 
 /// Redact any git token from error output.
+///
+/// git echoes URLs in the form it was given them, and the token reaches it
+/// percent-encoded (`@` as `%40`), so both spellings are replaced. The encoded
+/// one goes first: encoding only lengthens a token, and replacing the raw form
+/// first could cut into the encoded one and leave a fragment behind.
 fn redact_token(msg: &str) -> String {
-    git_token().map_or_else(|| msg.to_string(), |token| msg.replace(&token, "***"))
+    let Some(token) = git_token() else {
+        return msg.to_string();
+    };
+    let mut redacted = msg.to_string();
+    if let Some(encoded) = url_encoded(&token) {
+        redacted = redacted.replace(&encoded, "***");
+    }
+    redacted.replace(&token, "***")
+}
+
+/// `value` as it is spelled once placed in a URL's userinfo.
+fn url_encoded(value: &str) -> Option<String> {
+    let mut url = url::Url::parse("https://host/").ok()?;
+    url.set_username(value).ok()?;
+    Some(url.username().to_string())
 }
 
 #[cfg(test)]
@@ -440,6 +492,16 @@ mod tests {
     }
 
     #[test]
+    fn redact_token_replaces_the_url_encoded_form() {
+        with_git_tokens(Some("p@ss w/rd%1"), None, || {
+            let msg = redact_token(
+                "fatal: unable to access 'https://p%40ss%20w%2Frd%1@host/r.git': raw p@ss w/rd%1",
+            );
+            assert_eq!(msg, "fatal: unable to access 'https://***@host/r.git': raw ***");
+        });
+    }
+
+    #[test]
     fn redact_token_noop_without_token() {
         with_git_tokens(None, None, || {
             let msg = redact_token("some error message");
@@ -472,6 +534,72 @@ mod tests {
         assert_eq!(parsed.rev, "v2.0");
         assert_eq!(parsed.subdir, Some("src"));
         Ok(())
+    }
+
+    #[test]
+    fn parse_git_url_refuses_values_git_would_read_as_options() {
+        for url in [
+            "git+--upload-pack=touch /tmp/x#main",
+            "git+-oProxyCommand=x#main",
+            "git+https://github.com/org/repo.git#--upload-pack=x",
+            "git+https://github.com/org/repo.git#-b:dir",
+        ] {
+            let Err(err) = parse_git_url(url) else {
+                panic!("{url} must be refused");
+            };
+            assert!(err.to_string().contains("must not start with '-'"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_git_url_refuses_transports_outside_the_allow_list() {
+        for url in [
+            "git+ext::sh -c touch% /tmp/x#main",
+            "git+git://github.com/org/repo.git#main",
+            "git+http://github.com/org/repo.git#main",
+            "git+ftp://github.com/org/repo.git#main",
+        ] {
+            let Err(err) = parse_git_url(url) else {
+                panic!("{url} must be refused");
+            };
+            assert!(err.to_string().contains("not allowed"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_git_url_refuses_scp_style_urls() {
+        let Err(err) = parse_git_url("git+git@github.com:org/repo.git#main") else {
+            panic!("an scp-style URL has no scheme to check");
+        };
+        assert!(err.to_string().contains("absolute URL"), "{err}");
+    }
+
+    #[test]
+    fn git_commands_restrict_the_transports() {
+        with_git_tokens(None, None, || {
+            let Ok(cmd) = git_command("https://github.com/org/repo.git") else {
+                panic!("git_command failed");
+            };
+            let allowed = cmd
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "GIT_ALLOW_PROTOCOL")
+                .and_then(|(_, v)| v)
+                .and_then(|v| v.to_str());
+            assert_eq!(allowed, Some("https:ssh:file"));
+        });
+    }
+
+    /// An option-looking value must be refused before git runs, so no fetch
+    /// directory is created for it either.
+    #[tokio::test]
+    async fn fetch_refuses_a_disallowed_scheme_before_running_git() {
+        let before = temp_model_dirs();
+        let err = fetch("git+ext::sh -c 'touch /tmp/dbtt-ext-ran'#main")
+            .await
+            .expect_err("ext:: must be refused");
+        assert!(err.to_string().contains("not allowed"), "{err}");
+        assert_eq!(temp_model_dirs(), before);
     }
 
     #[test]

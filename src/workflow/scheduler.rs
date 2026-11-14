@@ -55,6 +55,10 @@ pub enum SchedulerError {
     /// edges disagree with the levels.
     #[error("dependency cycle: {0} node(s) can never become ready")]
     Cycle(usize),
+    /// Nodes are unfinished, yet none is running or startable. Acyclic edges
+    /// rule this out; it is reported rather than waited on forever.
+    #[error("unfinished nodes remain but none can start")]
+    Stalled,
     /// A completion was reported for a node that was not running.
     #[error("node `{0}` is not running")]
     NotRunning(String),

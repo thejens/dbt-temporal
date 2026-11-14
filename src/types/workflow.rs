@@ -457,6 +457,13 @@ pub struct ProjectHooksInput {
     /// the activity does not have to re-read config on every attempt.
     #[serde(default)]
     pub retry_on_error: bool,
+    /// Checkpoints of every earlier segment of a continued run, oldest first,
+    /// for `on_run_end` only (empty for `on_run_start`). The activity reads
+    /// their results back and puts them ahead of `node_results`, so the
+    /// hook's `results` variable describes the whole run and not just its
+    /// last leg.
+    #[serde(default)]
+    pub prior_segments: Vec<String>,
 }
 
 /// Result of executing a single node.
@@ -613,6 +620,11 @@ pub struct DbtRunOutput {
     /// history. `run_results.json` still describes the complete run — the
     /// artifact activity collects each segment from its own checkpoint.
     pub node_results: Vec<NodeExecutionResult>,
+    /// Whether `node_results` is only the final segment of a continued run.
+    /// When true the complete set is in the `run_results.json` named by
+    /// `artifacts.run_results_path`.
+    #[serde(default)]
+    pub node_results_partial: bool,
     pub elapsed_time: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<StoreArtifactsOutput>,
@@ -1011,5 +1023,35 @@ mod tests {
         // Re-tallying replaces, not accumulates.
         snapshot.tally(&tree);
         assert_eq!(snapshot.succeeded, 2);
+    }
+
+    /// Outputs recorded before `node_results_partial` existed are complete
+    /// ones, so the flag defaults to false.
+    #[test]
+    fn old_output_without_partial_flag_deserializes_as_complete() {
+        let out: DbtRunOutput = serde_json::from_value(serde_json::json!({
+            "invocation_id": "inv",
+            "success": true,
+            "node_results": [],
+            "elapsed_time": 1.0,
+        }))
+        .unwrap();
+        assert!(!out.node_results_partial);
+    }
+
+    #[test]
+    fn partial_flag_round_trips() {
+        let out: DbtRunOutput = serde_json::from_value(serde_json::json!({
+            "invocation_id": "inv",
+            "success": true,
+            "node_results": [],
+            "node_results_partial": true,
+            "elapsed_time": 1.0,
+        }))
+        .unwrap();
+        assert!(out.node_results_partial);
+        let again: DbtRunOutput =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        assert!(again.node_results_partial);
     }
 }

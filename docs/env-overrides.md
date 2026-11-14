@@ -1,4 +1,8 @@
-# Per-Workflow Environment Variables
+# Per-Workflow Environment Variables and Multi-Tenant Runs
+
+Run one dbt project against many warehouses, schemas or tenants from a single
+worker: each workflow passes its own `env` map, which `env_var()` in models,
+macros and `profiles.yml` resolves against.
 
 Each workflow can provide its own environment variable overrides via the `env` field. These override `env_var()` calls in model SQL, macros, and (when profiles.yml uses `env_var()`) database connection configuration. Parallel workflows are fully isolated — no shared process-level state.
 
@@ -68,7 +72,7 @@ The per-workflow adapter engine rebuild happens when the workflow can resolve to
 
 If neither holds, the shared engines from worker startup are used with zero overhead.
 
-The second condition is by key, not by "did the workflow supply any overrides". Every run carries an `_` override — the serialized workflow input, so models can read `env_var('_')` — so the coarser test was always true, and any profile reading any env var re-read, re-rendered and rebuilt all of its engines once per node activity.
+The second condition is by key, not by "did the workflow supply any overrides". Every run carries an `_` override — the serialized workflow input, so models can read `env_var('_')` — so a test on "any override" would always hold, and any profile reading any env var would rebuild its engines once per node activity.
 
 The startup scan is deliberately generous in every uncertain case. It matches `env_var` followed by its opening paren with any whitespace between and counts mentions in comments; and if a key cannot be named — a computed `env_var(some_var)`, or a file that cannot be read — every override is assumed relevant. Naming one key too many costs a rebuild; missing one would silently pin the run to startup credentials.
 

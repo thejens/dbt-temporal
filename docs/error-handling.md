@@ -1,4 +1,8 @@
-# Error Handling
+# Error Handling, Retries and Timeouts
+
+How dbt-temporal classifies failures as retryable or permanent, retries
+transient warehouse errors, cancels running queries, bounds activity timeouts
+and keeps very large runs under Temporal's history limit.
 
 | Error Type | Retryable? | Examples |
 |-----------|-----------|----------|
@@ -39,9 +43,9 @@ artifact write) are tagged `ArtifactStore` and retried. That matters most for
 A node's compile-and-materialize phase is synchronous: once dbt is inside a
 query, nothing in that call stack yields. It therefore runs on a blocking
 thread, leaving the activity's own task free to heartbeat and to notice
-cancellation — previously a long query stalled both, so the server's heartbeat
-timeout could reschedule the node on another worker while the first attempt was
-still writing.
+cancellation. Were the query to block that task, the server's heartbeat timeout
+could reschedule the node on another worker while the first attempt was still
+writing.
 
 Each activity carries its own `CancellationTokenSource`, handed to the adapter
 through the render environment. Cancelling the activity cancels that source, so
@@ -92,8 +96,7 @@ A model configured with `{{ config(on_error='continue') }}` (or `on_error: conti
 ## Activity Timeouts
 
 Each activity's start-to-close and heartbeat timeouts are configurable in
-`dbt_temporal.yml` under `timeouts:`. Defaults reproduce the values these were
-previously hardcoded to:
+`dbt_temporal.yml` under `timeouts:`. The defaults:
 
 ```yaml
 timeouts:
@@ -126,9 +129,10 @@ Each node costs roughly three history events, plus one per retry and per memo
 upsert. Temporal warns around 10,240 events and hard-fails at 51,200, so a wide
 `build` over a large project can hit the ceiling mid-DAG.
 
-The workflow handles this itself. At each level boundary it checks Temporal's
-own `continue_as_new_suggested` signal, and when it trips it spills the run's
-state and restarts with a fresh history. The run keeps one identity across
+The workflow handles this itself. Each time a node finishes it checks Temporal's
+own `continue_as_new_suggested` signal. When it trips, no further nodes start,
+the activities already running finish, and the workflow spills the run's state
+and restarts with a fresh history. The run keeps one identity across
 every segment: the same `invocation_id`, one artifact set, continuous progress
 numbering in the log, and a single `run_results.json` at the end.
 
@@ -153,7 +157,6 @@ than failing — so a very large run on a worker without artifact storage can
 still hit the server limit. Configure a store if you build projects at that
 scale.
 
-Every segment executes at least one level before it may hand off. A run that
+Every segment completes at least one node before it may hand off. A run that
 arrives already over the threshold would otherwise continue forever without
-making progress — and since a resumed segment starts partway through the plan,
-that guard counts levels done *in the current segment*, not the level index.
+making progress, so the guard counts completions *in the current segment*.

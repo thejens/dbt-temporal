@@ -31,7 +31,7 @@ artifacts:
 worker:
   gracefulShutdownSeconds: 600
   tuning:
-    WORKER_TUNING_MODE: resource-based
+    WORKER_TUNER: resource-based
     WORKER_MAX_ACTIVITIES_PER_SECOND: 10
 metrics:
   enabled: true

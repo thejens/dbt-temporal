@@ -735,3 +735,40 @@ async fn function_bodies_reach_the_warehouse_through_model_compiled_code() {
         "the function body must have been compiled into the macro"
     );
 }
+
+/// The manifest a worker shares between runs must equal, byte for byte, the
+/// one built and serialized from scratch for that run — on a real resolved
+/// project, where nodes, macros and docs all go through the cached body.
+#[tokio::test]
+async fn cached_manifest_matches_a_manifest_built_from_scratch_for_each_run() {
+    let harness = Harness::build(&[
+        ("base", "select 1 as id"),
+        ("downstream", "select id from {{ ref('base') }}"),
+    ])
+    .await;
+    let state = harness.state();
+    let resolver_state = &state.resolver_state;
+
+    let template = state
+        .manifest
+        .get_or_build(|| dbt_schemas::schemas::manifest::build_manifest("", resolver_state))
+        .await
+        .unwrap();
+
+    for (invocation_id, secs) in [("inv-a", 1_700_000_000), ("inv-b", 1_800_000_000)] {
+        let generated_at = chrono::DateTime::from_timestamp(secs, 0).unwrap();
+        let env =
+            std::collections::BTreeMap::from([("RUN".to_string(), invocation_id.to_string())]);
+
+        let mut scratch =
+            dbt_schemas::schemas::manifest::build_manifest(invocation_id, resolver_state);
+        scratch.metadata.__base__.generated_at = generated_at;
+        scratch.metadata.__base__.env = env.clone();
+
+        assert_eq!(
+            template.render(invocation_id, generated_at, env).unwrap(),
+            serde_json::to_string(&scratch).unwrap(),
+            "{invocation_id}"
+        );
+    }
+}

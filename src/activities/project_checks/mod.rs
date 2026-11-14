@@ -172,7 +172,6 @@ fn unevaluable(check: &Arc<DbtCheck>, message: String) -> CheckResult {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::worker::project_checks::without_metadata;

@@ -137,7 +137,6 @@ pub fn scan_for_projects(base: &Path) -> Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
 

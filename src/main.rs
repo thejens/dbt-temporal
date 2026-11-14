@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use dbt_temporal::{config, tracing_setup, worker};
 
 #[tokio::main]
-#[allow(clippy::large_futures)]
 async fn main() -> Result<()> {
     // `dbt-temporal healthcheck` — exit 0 if HEALTH_FILE is fresh, 1 otherwise.
     // Designed for use as a Kubernetes exec liveness probe (no shell needed).

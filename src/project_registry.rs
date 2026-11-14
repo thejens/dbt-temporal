@@ -85,7 +85,6 @@ impl<T> Registry<T> {
 
     /// Whether the registry contains no projects.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.projects.is_empty()
     }

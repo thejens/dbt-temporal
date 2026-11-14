@@ -22,6 +22,7 @@ use dbt_schemas::schemas::common::ResolvedQuoting;
 use dbt_schemas::schemas::profiles::{DbConfig, DuckDbConfig};
 use dbt_temporal::activities::DbtActivities;
 use dbt_temporal::activities::execute_node::execute_node_inner;
+use dbt_temporal::activities::node_telemetry::{invocation_span, node_execution_spans};
 use dbt_temporal::activities::project_checks::run_project_checks_inner;
 use dbt_temporal::activities::project_hooks::run_project_hooks_inner;
 use dbt_temporal::config::{
@@ -30,9 +31,12 @@ use dbt_temporal::config::{
 };
 use dbt_temporal::error::DbtTemporalError;
 use dbt_temporal::project_registry::ProjectRegistry;
-use dbt_temporal::types::{NodeExecutionResult, NodeStatus, ProjectChecksOutput};
+use dbt_temporal::types::{
+    NodeExecutionInput, NodeExecutionResult, NodeStatus, ProjectChecksOutput,
+};
 use dbt_temporal::worker::initialize_project;
 use tempfile::TempDir;
+use tracing::Instrument as _;
 
 use super::fault_engine::{FaultHandle, FaultInjectingEngine};
 
@@ -78,7 +82,11 @@ pub async fn raw_query_ok(engine: &Arc<dyn dbt_adapter::AdapterEngine>, sql: &st
 /// Run a harness query where dbt allows connections: on its pool. A test
 /// thread is not a pool worker, so opening one here directly panics.
 async fn on_dbt_pool<R: Send + 'static>(work: impl FnOnce() -> R + Send + 'static) -> R {
+    // dbt's data layer asserts every span descends from an `Invocation` root.
+    // Activities open one; a bare harness query has to as well.
+    let invocation = invocation_span(&uuid::Uuid::new_v4().to_string(), "dbt build");
     dbt_temporal::dbt_pool::run(work)
+        .instrument(invocation)
         .await
         .unwrap_or_else(|e| panic!("{e:#}"))
 }
@@ -148,6 +156,12 @@ impl Harness {
     }
 
     async fn build_inner(files: &[(String, String)], profile_mode: ProfileMode) -> Self {
+        // Run every scenario under the production tracing stack. Without a
+        // subscriber no log record is ever built, so the field expressions in
+        // `warn!` / `info!` calls go unexecuted and a formatter that panics
+        // would only show up in a deployed worker.
+        dbt_temporal::tracing_setup::init_for_tests();
+
         let project = TempDir::new().unwrap();
         let profiles = TempDir::new().unwrap();
         let db = TempDir::new().unwrap();
@@ -191,7 +205,7 @@ impl Harness {
         let config = build_config(project.path(), profiles.path());
         let mut state = initialize_project(project.path(), &config, None)
             .await
-            .expect("initialize duckdb project");
+            .unwrap_or_else(|e| panic!("initialize duckdb project: {e:#}"));
 
         // Wrap every declared engine so tests can inject warehouse faults
         // (connection drops, throttling, deadlocks) at the adapter boundary —
@@ -339,11 +353,14 @@ impl Harness {
             "command": "build",
         }))
         .unwrap();
+        let input: NodeExecutionInput = input;
+        let spans = node_execution_spans(&self.activities.registry, &input);
         dbt_temporal::activities::execute_node::execute_node_cancellable(
             &self.activities,
             input,
             cancellation,
         )
+        .instrument(spans.node.clone())
         .await
     }
 
@@ -363,7 +380,19 @@ impl Harness {
             "target": target,
         }))
         .unwrap();
-        execute_node_inner(&self.activities, input).await
+        self.execute(input).await
+    }
+
+    /// Run one node under the span pair the `execute_node` activity opens, so
+    /// the harness exercises the same tracing path a deployed worker does.
+    async fn execute(
+        &self,
+        input: NodeExecutionInput,
+    ) -> Result<NodeExecutionResult, anyhow::Error> {
+        let spans = node_execution_spans(&self.activities.registry, &input);
+        execute_node_inner(&self.activities, input)
+            .instrument(spans.node.clone())
+            .await
     }
 
     /// Like [`run_uid`](Self::run_uid), with the full set of per-workflow
@@ -385,7 +414,7 @@ impl Harness {
             "full_refresh": full_refresh,
         }))
         .unwrap();
-        execute_node_inner(&self.activities, input).await
+        self.execute(input).await
     }
 
     /// Run one model with `--vars` / `--full-refresh` applied, asserting success.

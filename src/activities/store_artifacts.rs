@@ -419,7 +419,7 @@ fn dbt_status(result: &crate::types::NodeExecutionResult) -> String {
     use crate::types::NodeStatus;
 
     if let Some(freshness) = result.freshness.as_ref() {
-        return freshness.status.clone();
+        return freshness.status.as_str().to_string();
     }
     let is_test =
         result.unique_id.starts_with("test.") || result.unique_id.starts_with("unit_test.");
@@ -518,7 +518,7 @@ fn build_freshness_json(
 mod tests {
     use super::*;
     use crate::artifact_store::LocalArtifactStore;
-    use crate::types::{NodeExecutionResult, NodeStatus};
+    use crate::types::{FreshnessGrade, NodeExecutionResult, NodeStatus};
     use std::collections::BTreeMap;
 
     fn sample_result(unique_id: &str, status: NodeStatus, time: f64) -> NodeExecutionResult {
@@ -537,13 +537,17 @@ mod tests {
         }
     }
 
-    fn with_freshness(unique_id: &str, resource_type: &str, status: &str) -> NodeExecutionResult {
+    fn with_freshness(
+        unique_id: &str,
+        resource_type: &str,
+        status: FreshnessGrade,
+    ) -> NodeExecutionResult {
         let mut result = sample_result(unique_id, NodeStatus::Success, 0.4);
         result.freshness = Some(crate::types::FreshnessOutcome {
             max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
             snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
             max_loaded_at_time_ago_in_s: 3600.0,
-            status: status.into(),
+            status,
             resource_type: resource_type.into(),
             criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
         });
@@ -575,8 +579,8 @@ mod tests {
         let input = freshness_input(
             "freshness",
             vec![
-                with_freshness("source.p.s.orders", "source", "pass"),
-                with_freshness("model.p.stg_orders", "model", "warn"),
+                with_freshness("source.p.s.orders", "source", FreshnessGrade::Pass),
+                with_freshness("model.p.stg_orders", "model", FreshnessGrade::Warn),
                 sample_result("model.p.m", NodeStatus::Success, 1.0),
             ],
         );
@@ -669,7 +673,7 @@ mod tests {
     /// here keeps only results that have one.
     #[test]
     fn sources_json_includes_a_stale_source() -> anyhow::Result<()> {
-        let mut stale = with_freshness("source.p.s.orders", "source", "error");
+        let mut stale = with_freshness("source.p.s.orders", "source", FreshnessGrade::Error);
         stale.status = NodeStatus::Error;
         let input = freshness_input("source-freshness", vec![stale]);
 
@@ -688,8 +692,8 @@ mod tests {
         let input = freshness_input(
             "freshness",
             vec![
-                with_freshness("source.p.s.orders", "source", "pass"),
-                with_freshness("model.p.stg_orders", "model", "warn"),
+                with_freshness("source.p.s.orders", "source", FreshnessGrade::Pass),
+                with_freshness("model.p.stg_orders", "model", FreshnessGrade::Warn),
                 sample_result("model.p.m", NodeStatus::Success, 1.0),
             ],
         );
@@ -794,7 +798,7 @@ mod tests {
                 sample_result("test.p.not_null_id", NodeStatus::Success, 0.1),
                 sample_result("test.p.unique_id", NodeStatus::Error, 0.1),
                 sample_result("model.p.m", NodeStatus::Success, 0.1),
-                with_freshness("source.p.s.orders", "source", "warn"),
+                with_freshness("source.p.s.orders", "source", FreshnessGrade::Warn),
             ],
             ..freshness_input("build", vec![])
         };

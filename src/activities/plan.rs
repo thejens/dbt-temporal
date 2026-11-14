@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use bytes::Bytes;
 use dbt_common::io_args::ClapResourceType;
+use dbt_schemas::schemas::common::{DbtMaterialization, OnError};
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
 
-use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo};
+use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo, RunOutcome};
 use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
@@ -57,12 +58,7 @@ pub fn select_command_node_ids(
         .iter()
         .filter(|(id, node)| {
             let rt = node.resource_type();
-            let is_ephemeral = node
-                .base()
-                .materialized
-                .to_string()
-                .eq_ignore_ascii_case("ephemeral");
-            if is_ephemeral {
+            if node.base().materialized == DbtMaterialization::Ephemeral {
                 return false;
             }
             if !command_includes_node_type(command, rt) {
@@ -147,10 +143,27 @@ pub fn select_command_node_ids(
 /// nodes is more useful than a blanket "vars may not work": it points at the
 /// exact models whose config would silently keep the startup value.
 fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json::Value>) {
-    if vars.is_empty() {
-        return;
+    let affected = nodes_reading_vars_in_config(state, vars);
+    if !affected.is_empty() {
+        warn!(
+            nodes = ?affected,
+            "workflow vars are referenced inside config() blocks, which are evaluated \
+             when the worker parses the project — those uses keep their startup value. \
+             Only render-time var() calls reflect the workflow's vars"
+        );
     }
-    let affected: Vec<String> = state
+}
+
+/// The nodes whose `config()` block reads one of `vars`, capped at 20: enough
+/// to name the pattern in a warning without flooding it on a large project.
+pub fn nodes_reading_vars_in_config(
+    state: &WorkerState,
+    vars: &BTreeMap<String, serde_json::Value>,
+) -> Vec<String> {
+    if vars.is_empty() {
+        return Vec::new();
+    }
+    state
         .resolver_state
         .nodes
         .iter()
@@ -162,16 +175,7 @@ fn warn_parse_time_vars(state: &WorkerState, vars: &BTreeMap<String, serde_json:
         })
         .map(|(id, _)| id.clone())
         .take(20)
-        .collect();
-
-    if !affected.is_empty() {
-        warn!(
-            nodes = ?affected,
-            "workflow vars are referenced inside config() blocks, which are evaluated \
-             when the worker parses the project — those uses keep their startup value. \
-             Only render-time var() calls reflect the workflow's vars"
-        );
-    }
+        .collect()
 }
 
 /// True if `raw_code` has a `config(...)` block mentioning `var('<name>')` for
@@ -734,7 +738,7 @@ fn build_search_attributes(
     }
     search_attributes
         .entry("DbtStatus".to_string())
-        .or_insert_with(|| "running".to_string());
+        .or_insert_with(|| RunOutcome::Running.as_str().to_string());
 
     if !registered.is_empty() {
         let before = search_attributes.len();
@@ -769,7 +773,7 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
     Some(NodeInfo {
         unique_id: common.unique_id.clone(),
         name: common.name.clone(),
-        resource_type: node.resource_type().as_str_name().to_string(),
+        resource_type: node.resource_type(),
         materialization: Some(base.materialized.to_string()),
         package_name: common.package_name.clone(),
         depends_on: base
@@ -783,19 +787,15 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
     })
 }
 
-/// Read a model's `on_error` config ("continue" or "skip_children"), if set.
+/// Read a model's `on_error` config, if set.
 /// Only `DbtModel` carries this field — every other resource type gets `None`.
 fn model_on_error(
     node: &dyn dbt_schemas::schemas::nodes::InternalDbtNodeAttributes,
-) -> Option<String> {
-    use dbt_schemas::schemas::common::OnError;
+) -> Option<OnError> {
     use dbt_schemas::schemas::nodes::DbtModel;
 
     let model = node.as_any().downcast_ref::<DbtModel>()?;
-    match model.deprecated_config.on_error.as_ref()? {
-        OnError::Continue => Some("continue".to_string()),
-        OnError::SkipChildren => Some("skip_children".to_string()),
-    }
+    model.deprecated_config.on_error.clone()
 }
 
 #[cfg(test)]
@@ -1322,7 +1322,7 @@ mod tests {
         assert_eq!(info.unique_id, "model.shop.orders");
         assert_eq!(info.name, "orders");
         assert_eq!(info.package_name, "shop");
-        assert_eq!(info.resource_type, "NODE_TYPE_MODEL");
+        assert_eq!(info.resource_type, NodeType::Model);
         assert_eq!(info.depends_on.len(), 2);
         assert!(
             info.depends_on
@@ -1335,34 +1335,36 @@ mod tests {
     }
 
     #[test]
-    fn build_node_info_extracts_on_error_continue() {
+    fn build_node_info_extracts_on_error() {
         use std::sync::Arc;
 
         use dbt_schemas::schemas::Nodes;
-        use dbt_schemas::schemas::common::OnError;
         use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
         use dbt_schemas::schemas::project::ModelConfig;
 
-        let mut nodes = Nodes::default();
-        nodes.models.insert(
-            "model.shop.flaky".to_string(),
-            Arc::new(DbtModel {
-                __common_attr__: CommonAttributes {
-                    unique_id: "model.shop.flaky".to_string(),
-                    name: "flaky".to_string(),
-                    package_name: "shop".to_string(),
-                    ..CommonAttributes::default()
-                },
-                deprecated_config: ModelConfig {
-                    on_error: Some(OnError::Continue),
-                    ..ModelConfig::default()
-                },
-                ..DbtModel::default()
-            }),
-        );
+        for on_error in [OnError::Continue, OnError::SkipChildren] {
+            let mut nodes = Nodes::default();
+            nodes.models.insert(
+                "model.shop.flaky".to_string(),
+                Arc::new(DbtModel {
+                    __common_attr__: CommonAttributes {
+                        unique_id: "model.shop.flaky".to_string(),
+                        name: "flaky".to_string(),
+                        package_name: "shop".to_string(),
+                        ..CommonAttributes::default()
+                    },
+                    deprecated_config: ModelConfig {
+                        on_error: Some(on_error.clone()),
+                        ..ModelConfig::default()
+                    },
+                    ..DbtModel::default()
+                }),
+            );
 
-        let info = build_node_info(&nodes, "model.shop.flaky").expect("flaky is in the registry");
-        assert_eq!(info.on_error.as_deref(), Some("continue"));
+            let info =
+                build_node_info(&nodes, "model.shop.flaky").expect("flaky is in the registry");
+            assert_eq!(info.on_error, Some(on_error));
+        }
     }
 
     #[test]
@@ -1413,7 +1415,7 @@ mod tests {
 
         let info =
             build_node_info(&nodes, "test.shop.not_null_id").expect("test is in the registry");
-        assert_eq!(info.resource_type, "NODE_TYPE_TEST");
+        assert_eq!(info.resource_type, NodeType::Test);
         assert_eq!(info.on_error, None);
     }
 

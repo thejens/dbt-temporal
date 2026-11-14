@@ -8,7 +8,7 @@
 mod common;
 
 use common::duckdb::Harness;
-use dbt_temporal::activities::plan::select_command_node_ids;
+use dbt_temporal::activities::plan::{nodes_reading_vars_in_config, select_command_node_ids};
 use dbt_temporal::types::DbtRunInput;
 
 fn build_input(command: &str) -> DbtRunInput {
@@ -262,4 +262,76 @@ async fn a_misspelled_command_says_so() {
     assert!(message.contains("unknown command"), "got: {message}");
     assert!(message.contains("materialize"), "should quote what was asked for: {message}");
     assert!(message.contains("build, run"), "should list what exists: {message}");
+}
+
+/// The worker parses a project once, so a `var()` inside `config()` is fixed
+/// at startup and a workflow's `vars` cannot change it. The planner names the
+/// nodes that pattern affects; a model reading the same var in its body is
+/// rendered per run and must not be named.
+#[tokio::test]
+async fn vars_read_inside_config_are_named_and_body_vars_are_not() {
+    let harness = Harness::build(&[
+        ("in_config", "{{ config(materialized=var('mat', 'view')) }}\nselect 1 as id"),
+        ("in_body", "select '{{ var('mat', 'view') }}' as mat"),
+        ("no_vars", "select 1 as id"),
+    ])
+    .await;
+
+    let mut input = build_input("build");
+    input
+        .vars
+        .insert("mat".to_string(), serde_json::json!("table"));
+
+    let affected = nodes_reading_vars_in_config(harness.state(), &input.vars);
+    assert_eq!(affected, vec!["model.spike.in_config".to_string()]);
+
+    // The pattern is reported, not rejected: the run still plans every model.
+    let ids = select_command_node_ids(harness.state(), &input).expect("selection should succeed");
+    assert_eq!(ids.len(), 3, "got: {ids:?}");
+
+    // A var the project never reads in config() names nothing.
+    let mut unrelated = build_input("build");
+    unrelated
+        .vars
+        .insert("other".to_string(), serde_json::json!(1));
+    assert_eq!(
+        nodes_reading_vars_in_config(harness.state(), &unrelated.vars),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        nodes_reading_vars_in_config(harness.state(), &build_input("build").vars),
+        Vec::<String>::new()
+    );
+}
+
+/// Exposures are parsed into the graph but have no execution path. A `build`
+/// must leave them out of the plan while still planning the models they
+/// depend on.
+#[tokio::test]
+async fn exposures_are_parsed_but_never_planned() {
+    let harness = Harness::build_files(&[
+        ("models/m.sql", "select 1 as id"),
+        (
+            "models/schema.yml",
+            "
+exposures:
+  - name: weekly_report
+    type: dashboard
+    owner:
+      name: Data Team
+    depends_on:
+      - ref('m')
+",
+        ),
+    ])
+    .await;
+    assert_eq!(
+        harness.state().resolver_state.nodes.exposures.len(),
+        1,
+        "the exposure must be in the parsed graph for this test to mean anything"
+    );
+
+    let ids = select_command_node_ids(harness.state(), &build_input("build"))
+        .expect("selection should succeed");
+    assert_eq!(ids, vec!["model.spike.m".to_string()]);
 }

@@ -30,6 +30,7 @@ mod waffle_hut {
     mod env_vars;
     mod failure;
     mod freshness;
+    mod gates;
     mod hooks;
     mod lifecycle_hooks;
     mod multi_project;

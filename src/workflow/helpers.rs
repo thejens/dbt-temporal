@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use dbt_schemas::schemas::common::OnError;
+use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_client::RetryPolicy;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{MemoValue, WorkflowTermination};
 
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
+    DbtRunInput, ExecutionPlan, FreshnessGrade, NodeExecutionResult, NodeStatus, NodeStatusTree,
+    RetryConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -107,6 +110,13 @@ pub struct NodeStatusSummary {
 }
 
 impl NodeStatusSummary {
+    /// Count the whole tree, nothing omitted. The tree covers every planned
+    /// node of every segment of a continued run, which a segment's own results
+    /// do not.
+    pub fn tally(tree: &NodeStatusTree) -> Self {
+        Self::of(tree, tree)
+    }
+
     /// `kept` is the trimmed tree written alongside, so `omitted` says how much
     /// of the run the `node_status` entry is not showing.
     fn of(tree: &NodeStatusTree, kept: &NodeStatusTree) -> Self {
@@ -227,54 +237,19 @@ fn bounded_node_status(tree: &NodeStatusTree) -> NodeStatusTree {
 }
 
 pub fn skipped_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Skipped,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Skipped, Some(message.to_string()))
 }
 
 pub fn cancelled_result(unique_id: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Cancelled,
-        execution_time: 0.0,
-        message: Some("cancelled".to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(
+        unique_id,
+        NodeStatus::Cancelled,
+        Some("cancelled".to_string()),
+    )
 }
 
 pub fn error_result(unique_id: &str, message: &str) -> NodeExecutionResult {
-    NodeExecutionResult {
-        unique_id: unique_id.to_string(),
-        status: NodeStatus::Error,
-        execution_time: 0.0,
-        message: Some(message.to_string()),
-        adapter_response: BTreeMap::default(),
-        compiled_code: None,
-        timing: vec![],
-        failures: None,
-        freshness: None,
-        // Nothing ran, so nothing was written.
-        compiled_code_ref: None,
-        relation_name: None,
-    }
+    NodeExecutionResult::not_executed(unique_id, NodeStatus::Error, Some(message.to_string()))
 }
 
 /// English pluralisation suffix: empty for 1, "s" otherwise.
@@ -288,9 +263,11 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
     let mut log_lines = Vec::with_capacity(3);
     log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
 
-    let mut type_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
     for info in plan.nodes.values() {
-        *type_counts.entry(info.resource_type.as_str()).or_default() += 1;
+        *type_counts
+            .entry(resource_type_label(info.resource_type))
+            .or_default() += 1;
     }
     let parts: Vec<String> = type_counts
         .iter()
@@ -311,16 +288,16 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
 /// pass/error/skip tally so operators can read the outcome without opening the
 /// run. Cancelled nodes are folded into the skip count (matching
 /// `RunStatusSnapshot::tally`).
-pub fn format_final_details(
-    results: &[NodeExecutionResult],
-    success: bool,
-    elapsed_secs: f64,
-) -> String {
-    let count = |s: NodeStatus| results.iter().filter(|r| r.status == s).count();
-    let pass = count(NodeStatus::Success);
-    let error = count(NodeStatus::Error);
-    let skip = count(NodeStatus::Skipped) + count(NodeStatus::Cancelled);
-    let total = results.len();
+///
+/// Tallied from the status tree rather than from result lists: a continued run
+/// keeps only its final segment's results in memory, while the tree describes
+/// every planned node.
+pub fn format_final_details(tree: &NodeStatusTree, success: bool, elapsed_secs: f64) -> String {
+    let summary = NodeStatusSummary::tally(tree);
+    let pass = summary.success;
+    let error = summary.error;
+    let skip = summary.skipped + summary.cancelled;
+    let total = tree.nodes.len();
     let outcome = if success { "passed" } else { "FAILED" };
     format!("{outcome} — {pass} ok, {error} error, {skip} skip of {total} in {elapsed_secs:.2}s")
 }
@@ -349,14 +326,14 @@ pub fn build_summary_lines(
 /// grading dbt gives each *measurement* (`pass` / `warn` / `error`) from the
 /// `FreshnessOutcome`, which is the number an SLA run exists to show.
 pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
-    let with_status = |status: &str| {
+    let with_status = |status: FreshnessGrade| {
         results
             .iter()
             .filter(|r| r.freshness.as_ref().is_some_and(|f| f.status == status))
             .count()
     };
-    let pass = with_status("pass");
-    let warn = with_status("warn");
+    let pass = with_status(FreshnessGrade::Pass);
+    let warn = with_status(FreshnessGrade::Warn);
     // A node past error_after fails its activity and produces no outcome, so
     // the error count comes from the node status rather than from the outcomes.
     let error = results
@@ -366,12 +343,6 @@ pub fn build_freshness_summary_line(results: &[NodeExecutionResult]) -> String {
     format!("Freshness. PASS={pass} WARN={warn} ERROR={error} TOTAL={}", results.len())
 }
 
-/// Seconds between two deterministic workflow timestamps, or 0.0 if either
-/// is missing (workflow_time() is None outside of an executing workflow).
-///
-/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
-/// stable across history replay; the workflow file's own docstring forbids
-/// wall-clock time for this reason.
 /// When the logical run began, and how long it has taken so far.
 ///
 /// One value rather than two loose parameters: they are only meaningful
@@ -398,6 +369,12 @@ pub struct RunFacts<'a> {
     pub target: Option<&'a str>,
 }
 
+/// Seconds between two deterministic workflow timestamps, or 0.0 if either
+/// is missing (workflow_time() is None outside of an executing workflow).
+///
+/// Using `ctx.workflow_time()` instead of `Instant::now()` keeps the value
+/// stable across history replay; the workflow file's own docstring forbids
+/// wall-clock time for this reason.
 pub fn elapsed_secs(
     start: Option<std::time::SystemTime>,
     end: Option<std::time::SystemTime>,
@@ -436,14 +413,18 @@ pub fn mark_remaining_level_as_cancelled(
 /// `NODE_TYPE_MODEL` → `model`. Returns `None` when the id isn't in the plan,
 /// matching the behaviour of `execute_activity` (no label).
 pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<String> {
-    plan.nodes.get(unique_id).map(|info| {
-        let rt = info
-            .resource_type
-            .strip_prefix("NODE_TYPE_")
-            .unwrap_or(&info.resource_type)
-            .to_ascii_lowercase();
-        format!("{rt}:{}", info.name)
-    })
+    plan.nodes
+        .get(unique_id)
+        .map(|info| format!("{}:{}", resource_type_label(info.resource_type), info.name))
+}
+
+/// The lower-case resource type as dbt's CLI spells it (`model`, `unit_test`):
+/// the protobuf enum name without its `NODE_TYPE_` prefix.
+fn resource_type_label(resource_type: NodeType) -> String {
+    let name = resource_type.as_str_name();
+    name.strip_prefix("NODE_TYPE_")
+        .unwrap_or(name)
+        .to_ascii_lowercase()
 }
 
 /// True if `unique_id` has any upstream dependency in `failed_nodes` whose
@@ -474,7 +455,7 @@ pub fn is_blocked_by_failed_upstream(
 /// model configured with `on_error: continue`.
 fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
     plan.nodes.get(dep_unique_id).is_some_and(|info| {
-        info.resource_type == "NODE_TYPE_MODEL" && info.on_error.as_deref() == Some("continue")
+        info.resource_type == NodeType::Model && info.on_error == Some(OnError::Continue)
     })
 }
 
@@ -484,13 +465,19 @@ fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
 /// internally but we're only interested in the success/error/skip trichotomy.
 pub const fn classify_result_status(status: NodeStatus) -> NodeStatus {
     match status {
-        NodeStatus::Error => NodeStatus::Error,
+        // Pending / Running: a finished activity cannot report itself as not
+        // yet finished. Counting it as a failure surfaces the defect instead
+        // of letting it pass.
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => NodeStatus::Error,
         NodeStatus::Skipped => NodeStatus::Skipped,
         // A warned node completed. It is not a failure and must not gate the
         // run — it is kept apart from `Success` only so the run can say it
         // found something.
         NodeStatus::Warn => NodeStatus::Warn,
-        _ => NodeStatus::Success,
+        // A cancelled activity reaches the scheduler as an `Err`, never as a
+        // result, so `Cancelled` is unreachable here in practice; it keeps the
+        // success class rather than inventing a fourth one for the trichotomy.
+        NodeStatus::Success | NodeStatus::Cancelled => NodeStatus::Success,
     }
 }
 
@@ -506,15 +493,15 @@ pub fn format_result_tag(status: NodeStatus, message: Option<&str>, execution_ti
             let detail = message.unwrap_or("warning");
             format!("WARN {detail} in {execution_time:.2}s")
         }
-        NodeStatus::Error => {
+        // Pending / Running are tagged like the error they are classified as
+        // (see `classify_result_status`).
+        NodeStatus::Error | NodeStatus::Pending | NodeStatus::Running => {
             let msg = message.unwrap_or("error");
             format!("ERROR {msg}")
         }
         NodeStatus::Skipped => "SKIP".to_string(),
-        // Pending / Running / Cancelled never appear on the result-tag path
-        // (results are only built from completed activities), so the Debug
-        // form is just a defensive default.
-        _ => format!("{status:?}"),
+        // Spelled as the scheduler's own line for a cancelled node.
+        NodeStatus::Cancelled => "CANCELLED".to_string(),
     }
 }
 
@@ -530,6 +517,14 @@ pub fn format_progress_line(num: usize, total: usize, verb: &str, label: &str) -
 pub fn format_running_details(level_idx: usize, total_levels: usize, running: &[&str]) -> String {
     format!("level {}/{}: {}", level_idx + 1, total_levels, running.join(", "))
 }
+
+/// Patch id for writing the terminal memo once.
+///
+/// A finished run publishes its terminal memo after the summary line is
+/// appended; a write straight after the last level would be superseded at
+/// once. Memo upserts are workflow commands, so a history recorded with both
+/// writes keeps both and replays cleanly.
+pub const SINGLE_TERMINAL_MEMO_PATCH: &str = "single-terminal-memo-upsert";
 
 /// Patch id for the bounded memo cadence.
 ///
@@ -576,11 +571,7 @@ pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     plan.nodes.get(unique_id).map_or_else(
         || unique_id.to_string(),
         |info| {
-            let rt = info
-                .resource_type
-                .strip_prefix("NODE_TYPE_")
-                .unwrap_or(&info.resource_type)
-                .to_ascii_lowercase();
+            let rt = resource_type_label(info.resource_type);
             let mat = info
                 .materialization
                 .as_deref()
@@ -590,10 +581,48 @@ pub fn node_label(plan: &ExecutionPlan, unique_id: &str) -> String {
     )
 }
 
+/// The full message of an activity error, including the activity's own reason.
+///
+/// The SDK's `Display` prints only the top-level failure — for a failed
+/// activity that is the generic "Activity task failed". What the activity
+/// actually returned ("no nodes matched after applying selectors", a
+/// warehouse error) travels in the failure's `cause` chain, which neither
+/// `Display` nor `{:#}` reaches. Without it a rejected run tells the operator
+/// nothing and sends them to the worker logs.
+pub fn activity_error_message(e: &temporalio_sdk::ActivityExecutionError) -> String {
+    let mut message = e.to_string();
+    if let Some(failure) = e.failure() {
+        for cause in failure_cause_messages(failure) {
+            message.push_str(": ");
+            message.push_str(cause);
+        }
+    }
+    message
+}
+
+/// The messages along a failure's `cause` chain, outermost first, skipping
+/// empty ones and any that repeat the message before them.
+pub fn failure_cause_messages(
+    failure: &temporalio_common::protos::temporal::api::failure::v1::Failure,
+) -> Vec<&str> {
+    let mut messages: Vec<&str> = Vec::new();
+    let mut previous = failure.message.as_str();
+    let mut next = failure.cause.as_deref();
+    while let Some(cause) = next {
+        let message = cause.message.as_str();
+        if !message.is_empty() && message != previous {
+            messages.push(message);
+        }
+        previous = message;
+        next = cause.cause.as_deref();
+    }
+    messages
+}
+
 /// Extract a concise error message from a Temporal activity execution error.
 pub fn short_activity_error(e: &temporalio_sdk::ActivityExecutionError) -> String {
     use crate::error::truncate_at_char_boundary;
-    let full = e.to_string();
+    let full = activity_error_message(e);
 
     // Truncate if very long.
     if full.len() > 200 {
@@ -649,7 +678,7 @@ mod tests {
                 NodeInfo {
                     unique_id: uid,
                     name: name.to_string(),
-                    resource_type: "model".to_string(),
+                    resource_type: NodeType::Model,
                     materialization: mat.map(ToString::to_string),
                     package_name: "waffle".to_string(),
                     depends_on: deps.iter().map(|d| format!("model.waffle.{d}")).collect(),
@@ -1110,9 +1139,8 @@ mod tests {
         let header = build_log_header(&plan);
         assert_eq!(header.len(), 3);
         assert!(header[0].starts_with("Running with dbt-temporal="));
-        // Resource types come from NodeInfo.resource_type which is "model" for everything
-        // built by `test_plan` — confirms plural-pluralisation works through the helper.
-        assert!(header[1].contains("3 model"));
+        // `test_plan` builds only models; the tally is pluralised through the helper.
+        assert_eq!(header[1], "Found 3 models");
         assert_eq!(header[2], "Concurrency: 2 parallel levels");
     }
 
@@ -1120,46 +1148,40 @@ mod tests {
     fn build_log_header_singular_for_single_level_and_node_type() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
         let header = build_log_header(&plan);
-        assert!(header[1].contains("1 model"), "got: {}", header[1]);
-        assert!(!header[1].contains("models"));
+        assert_eq!(header[1], "Found 1 model");
         assert_eq!(header[2], "Concurrency: 1 parallel level");
     }
 
     fn result_with_status(uid: &str, status: NodeStatus) -> NodeExecutionResult {
-        NodeExecutionResult {
-            unique_id: uid.to_string(),
-            status,
-            execution_time: 0.0,
-            message: None,
-            adapter_response: BTreeMap::new(),
-            compiled_code: None,
-            timing: vec![],
-            failures: None,
-            freshness: None,
-            compiled_code_ref: None,
-            relation_name: None,
+        NodeExecutionResult::not_executed(uid, status, None)
+    }
+
+    fn tree_from_statuses(statuses: &[NodeStatus]) -> NodeStatusTree {
+        NodeStatusTree {
+            nodes: statuses
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (format!("model.p.n{i:03}"), *s))
+                .collect(),
         }
     }
 
     #[test]
     fn format_final_details_passed_summarises_counts() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Success),
-            result_with_status("c", NodeStatus::Skipped),
-        ];
-        let details = format_final_details(&results, true, 3.456);
+        let tree = tree_from_statuses(&[
+            NodeStatus::Success,
+            NodeStatus::Success,
+            NodeStatus::Skipped,
+        ]);
+        let details = format_final_details(&tree, true, 3.456);
         assert_eq!(details, "passed — 2 ok, 0 error, 1 skip of 3 in 3.46s");
     }
 
     #[test]
     fn format_final_details_all_passed() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Success),
-        ];
+        let tree = tree_from_statuses(&[NodeStatus::Success, NodeStatus::Success]);
         assert_eq!(
-            format_final_details(&results, true, 0.5),
+            format_final_details(&tree, true, 0.5),
             "passed — 2 ok, 0 error, 0 skip of 2 in 0.50s"
         );
     }
@@ -1167,22 +1189,41 @@ mod tests {
     #[test]
     fn format_final_details_empty_run() {
         assert_eq!(
-            format_final_details(&[], true, 0.0),
+            format_final_details(&tree_from_statuses(&[]), true, 0.0),
             "passed — 0 ok, 0 error, 0 skip of 0 in 0.00s"
         );
     }
 
     #[test]
     fn format_final_details_failed_folds_cancelled_into_skip() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Error),
-            result_with_status("c", NodeStatus::Skipped),
-            result_with_status("d", NodeStatus::Cancelled),
-        ];
-        let details = format_final_details(&results, false, 12.0);
+        let tree = tree_from_statuses(&[
+            NodeStatus::Success,
+            NodeStatus::Error,
+            NodeStatus::Skipped,
+            NodeStatus::Cancelled,
+        ]);
+        let details = format_final_details(&tree, false, 12.0);
         // Cancelled nodes count toward skip, matching RunStatusSnapshot::tally.
         assert_eq!(details, "FAILED — 1 ok, 1 error, 2 skip of 4 in 12.00s");
+    }
+
+    /// A continued run holds only its last segment's results, but the tree
+    /// still names every node: the tally and its total must come from the tree.
+    #[test]
+    fn tally_and_total_agree_when_the_tree_outgrows_the_result_list() {
+        let mut statuses = vec![NodeStatus::Success; 5];
+        statuses.extend([NodeStatus::Warn, NodeStatus::Error, NodeStatus::Skipped]);
+        let tree = tree_from_statuses(&statuses);
+        let final_segment_results = [result_with_status("model.p.n007", NodeStatus::Skipped)];
+        assert!(tree.nodes.len() > final_segment_results.len());
+
+        let summary = NodeStatusSummary::tally(&tree);
+        assert_eq!((summary.success, summary.warn, summary.error, summary.skipped), (5, 1, 1, 1));
+        assert_eq!(summary.omitted, 0);
+        assert_eq!(
+            format_final_details(&tree, false, 1.0),
+            "FAILED — 5 ok, 1 error, 1 skip of 8 in 1.00s"
+        );
     }
 
     #[test]
@@ -1200,22 +1241,22 @@ mod tests {
 
     #[test]
     fn freshness_summary_separates_warn_from_pass() {
-        let measured = |unique_id: &str, status: &str| {
+        let measured = |unique_id: &str, status: FreshnessGrade| {
             let mut result = skipped_result(unique_id, "");
             result.status = NodeStatus::Success;
             result.freshness = Some(crate::types::FreshnessOutcome {
                 max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
                 snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
                 max_loaded_at_time_ago_in_s: 3600.0,
-                status: status.into(),
+                status,
                 resource_type: "source".into(),
                 criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
             });
             result
         };
         let results = vec![
-            measured("source.p.s.a", "pass"),
-            measured("source.p.s.b", "warn"),
+            measured("source.p.s.a", FreshnessGrade::Pass),
+            measured("source.p.s.b", FreshnessGrade::Warn),
             // A stale node fails its activity and carries no outcome.
             error_result("model.p.c", "stale"),
         ];
@@ -1224,6 +1265,57 @@ mod tests {
             "Freshness. PASS=1 WARN=1 ERROR=1 TOTAL=3"
         );
         assert_eq!(build_freshness_summary_line(&[]), "Freshness. PASS=0 WARN=0 ERROR=0 TOTAL=0");
+    }
+
+    // --- failure_cause_messages ---
+
+    fn failure(
+        message: &str,
+        cause: Option<temporalio_common::protos::temporal::api::failure::v1::Failure>,
+    ) -> temporalio_common::protos::temporal::api::failure::v1::Failure {
+        temporalio_common::protos::temporal::api::failure::v1::Failure {
+            message: message.to_string(),
+            cause: cause.map(Box::new),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failure_cause_messages_walks_the_chain_outermost_first() {
+        let chain = failure(
+            "Activity task failed",
+            Some(failure(
+                "no nodes matched after applying selectors",
+                Some(failure("selector: no_such_model", None)),
+            )),
+        );
+        assert_eq!(
+            failure_cause_messages(&chain),
+            vec![
+                "no nodes matched after applying selectors",
+                "selector: no_such_model"
+            ]
+        );
+    }
+
+    #[test]
+    fn failure_cause_messages_skips_empty_and_repeated_messages() {
+        let chain = failure(
+            "Activity task failed",
+            Some(failure(
+                "Activity task failed",
+                Some(failure("", Some(failure("permission denied", None)))),
+            )),
+        );
+        assert_eq!(failure_cause_messages(&chain), vec!["permission denied"]);
+    }
+
+    #[test]
+    fn failure_cause_messages_is_empty_without_a_cause() {
+        assert_eq!(
+            failure_cause_messages(&failure("Activity task failed", None)),
+            Vec::<&str>::new()
+        );
     }
 
     // --- short_activity_error ---
@@ -1295,22 +1387,25 @@ mod tests {
     #[test]
     fn format_activity_label_strips_node_type_prefix_and_lowercases() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
-        // test_plan sets resource_type to "model"; format_activity_label expects
-        // raw proto strings ("NODE_TYPE_MODEL"). Patch the entry to mirror the
-        // shape that the planner produces.
-        let mut plan = plan;
-        plan.nodes.get_mut("model.waffle.m1").unwrap().resource_type =
-            "NODE_TYPE_MODEL".to_string();
         assert_eq!(format_activity_label(&plan, "model.waffle.m1"), Some("model:m1".to_string()));
     }
 
     #[test]
-    fn format_activity_label_passes_unknown_types_through_lowercase() {
-        let plan = test_plan(vec![vec!["t1"]], &[("t1", None, vec![])]);
-        let mut plan = plan;
-        plan.nodes.get_mut("model.waffle.t1").unwrap().resource_type = "Test".to_string();
-        // No NODE_TYPE_ prefix — the raw value is just lowercased.
-        assert_eq!(format_activity_label(&plan, "model.waffle.t1"), Some("test:t1".to_string()));
+    fn format_activity_label_spells_multi_word_types_with_underscores() {
+        let mut plan = test_plan(vec![vec!["t1"]], &[("t1", None, vec![])]);
+        plan.nodes.get_mut("model.waffle.t1").unwrap().resource_type = NodeType::UnitTest;
+        assert_eq!(
+            format_activity_label(&plan, "model.waffle.t1"),
+            Some("unit_test:t1".to_string())
+        );
+    }
+
+    #[test]
+    fn node_label_prefixes_materialization_and_lowercases_the_type() {
+        let mut plan = test_plan(vec![vec!["m1"]], &[("m1", Some("table"), vec![])]);
+        assert_eq!(node_label(&plan, "model.waffle.m1"), "table model waffle.m1");
+        plan.nodes.get_mut("model.waffle.m1").unwrap().resource_type = NodeType::Seed;
+        assert_eq!(node_label(&plan, "model.waffle.m1"), "table seed waffle.m1");
     }
 
     #[test]
@@ -1352,19 +1447,19 @@ mod tests {
     fn set_on_error(
         plan: &mut ExecutionPlan,
         unique_id: &str,
-        resource_type: &str,
-        on_error: Option<&str>,
+        resource_type: NodeType,
+        on_error: Option<OnError>,
     ) {
         let info = plan.nodes.get_mut(unique_id).unwrap();
-        info.resource_type = resource_type.to_string();
-        info.on_error = on_error.map(ToString::to_string);
+        info.resource_type = resource_type;
+        info.on_error = on_error;
     }
 
     #[test]
     fn is_blocked_by_failed_upstream_false_when_failed_dep_continues_on_error() {
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1380,7 +1475,7 @@ mod tests {
                 ("c", None, vec!["a", "b"]),
             ],
         );
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         // b has no on_error override — its failure should still block c.
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
@@ -1394,7 +1489,7 @@ mod tests {
         // by our scheduler (dbt-core itself only wires up `continue` today).
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_MODEL", Some("skip_children"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::SkipChildren));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1406,7 +1501,7 @@ mod tests {
         // (e.g. a seed) always blocks, even if on_error happened to be set.
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", "NODE_TYPE_SEED", Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Seed, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1415,15 +1510,18 @@ mod tests {
     // --- classify_result_status ---
 
     #[test]
-    fn classify_result_status_collapses_to_three_terminals() {
-        assert_eq!(classify_result_status(NodeStatus::Error), NodeStatus::Error);
-        assert_eq!(classify_result_status(NodeStatus::Skipped), NodeStatus::Skipped);
-        // All other variants — including Pending/Running/Cancelled/Success —
-        // collapse to Success on the result-collection path.
-        assert_eq!(classify_result_status(NodeStatus::Success), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Pending), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Running), NodeStatus::Success);
-        assert_eq!(classify_result_status(NodeStatus::Cancelled), NodeStatus::Success);
+    fn classify_result_status_maps_every_status() {
+        for (status, expected) in [
+            (NodeStatus::Success, NodeStatus::Success),
+            (NodeStatus::Warn, NodeStatus::Warn),
+            (NodeStatus::Error, NodeStatus::Error),
+            (NodeStatus::Skipped, NodeStatus::Skipped),
+            (NodeStatus::Cancelled, NodeStatus::Success),
+            (NodeStatus::Pending, NodeStatus::Error),
+            (NodeStatus::Running, NodeStatus::Error),
+        ] {
+            assert_eq!(classify_result_status(status), expected, "{status}");
+        }
     }
 
     // --- format_result_tag ---
@@ -1452,15 +1550,19 @@ mod tests {
     }
 
     #[test]
-    fn format_result_tag_non_terminal_falls_back_to_debug() {
-        // Pending/Running/Cancelled never reach the result-tag path in practice,
-        // but the defensive `_` arm must still yield the Debug form.
-        for status in [
-            NodeStatus::Pending,
-            NodeStatus::Running,
-            NodeStatus::Cancelled,
+    fn format_result_tag_covers_every_status() {
+        for (status, message, expected) in [
+            (NodeStatus::Success, None, "OK in 2.50s"),
+            (NodeStatus::Warn, None, "WARN warning in 2.50s"),
+            (NodeStatus::Warn, Some("2 rows"), "WARN 2 rows in 2.50s"),
+            (NodeStatus::Error, None, "ERROR error"),
+            (NodeStatus::Skipped, Some("ignored"), "SKIP"),
+            (NodeStatus::Cancelled, None, "CANCELLED"),
+            // Tagged as the error `classify_result_status` makes of them.
+            (NodeStatus::Pending, None, "ERROR error"),
+            (NodeStatus::Running, Some("still going"), "ERROR still going"),
         ] {
-            assert_eq!(format_result_tag(status, None, 0.0), format!("{status:?}"));
+            assert_eq!(format_result_tag(status, message, 2.5), expected, "{status}");
         }
     }
 

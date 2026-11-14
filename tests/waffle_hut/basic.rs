@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use dbt_temporal::types::{CommandMemo, NodeStatus, NodeStatusTree};
+use dbt_temporal::types::{CommandMemo, NodeStatus, NodeStatusTree, RunPhase};
 
 use super::infra::*;
 
@@ -141,7 +141,7 @@ async fn test_waffle_hut_dbt_run() -> Result<()> {
             // Served by replay even after completion; reflects the final
             // snapshot taken before the workflow returned.
             let status = query_run_status(&client, &run.workflow_id).await?;
-            assert_eq!(status.phase, "finalizing", "final phase");
+            assert_eq!(status.phase, RunPhase::Finalizing, "final phase");
             assert_eq!(status.total_nodes, 5, "query total_nodes");
             assert_eq!(status.succeeded, 5, "query succeeded");
             assert_eq!(status.failed, 0, "query failed count");

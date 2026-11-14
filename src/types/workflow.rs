@@ -512,6 +512,29 @@ pub struct NodeExecutionResult {
     pub relation_name: Option<String>,
 }
 
+/// The grade dbt gives a freshness measurement in `sources.json` /
+/// `freshness.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshnessGrade {
+    /// Within `warn_after`, or no threshold was exceeded.
+    Pass,
+    /// Past `warn_after` but not `error_after`.
+    Warn,
+    /// Past `error_after`.
+    Error,
+}
+
+impl FreshnessGrade {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Detail of a completed freshness check, carried on the node result so
 /// `store_artifacts` can assemble `sources.json` / `freshness.json` without
 /// re-resolving the node's criteria.
@@ -523,10 +546,9 @@ pub struct FreshnessOutcome {
     pub snapshotted_at: String,
     /// Age of the freshest row in seconds (snapshotted_at - max_loaded_at).
     pub max_loaded_at_time_ago_in_s: f64,
-    /// `pass` | `warn` (dbt's FreshnessStatus; `error` aborts the activity
-    /// instead of producing an outcome). `NodeStatus` has no warning state, so
+    /// How the check graded. `NodeStatus` collapses a warn into success, so
     /// this field is where a warn survives — see also the node `message`.
-    pub status: String,
+    pub status: FreshnessGrade,
     /// `source` or `model` — dbt tags freshness.json rows with the resource
     /// type, and it is what separates the two artifacts.
     pub resource_type: String,
@@ -1157,6 +1179,37 @@ mod tests {
         assert_eq!(snapshot.phase, RunPhase::PreRunHooks);
         assert_eq!(serde_json::to_value(&snapshot).unwrap()["phase"], "pre_run_hooks");
         assert_eq!(RunStatusSnapshot::default().phase, RunPhase::Initializing);
+    }
+
+    #[test]
+    fn freshness_grade_serializes_to_dbts_strings() {
+        for (grade, wire) in [
+            (FreshnessGrade::Pass, "pass"),
+            (FreshnessGrade::Warn, "warn"),
+            (FreshnessGrade::Error, "error"),
+        ] {
+            assert_eq!(grade.as_str(), wire);
+            assert_eq!(serde_json::to_value(grade).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<FreshnessGrade>(serde_json::json!(wire)).unwrap(),
+                grade
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_outcome_with_a_string_status_deserializes() {
+        let outcome: FreshnessOutcome = serde_json::from_value(serde_json::json!({
+            "max_loaded_at": "2026-06-12T10:00:00+00:00",
+            "snapshotted_at": "2026-06-12T11:00:00+00:00",
+            "max_loaded_at_time_ago_in_s": 3600.0,
+            "status": "warn",
+            "resource_type": "source",
+            "criteria": {},
+        }))
+        .unwrap();
+        assert_eq!(outcome.status, FreshnessGrade::Warn);
+        assert_eq!(serde_json::to_value(&outcome).unwrap()["status"], "warn");
     }
 
     #[test]

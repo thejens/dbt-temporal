@@ -664,19 +664,8 @@ pub fn build_list_output(plan: &ExecutionPlan, elapsed: f64) -> DbtRunOutput {
     let node_results = plan
         .nodes
         .values()
-        .map(|node| NodeExecutionResult {
-            unique_id: node.unique_id.clone(),
-            status: NodeStatus::Success,
-            execution_time: 0.0,
-            message: None,
-            adapter_response: BTreeMap::new(),
-            compiled_code: None,
-            timing: vec![],
-            failures: None,
-            freshness: None,
-            // `list` executes nothing.
-            compiled_code_ref: None,
-            relation_name: None,
+        .map(|node| {
+            NodeExecutionResult::not_executed(node.unique_id.clone(), NodeStatus::Success, None)
         })
         .collect();
     DbtRunOutput {

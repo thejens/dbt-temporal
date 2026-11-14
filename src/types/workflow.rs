@@ -512,6 +512,34 @@ pub struct NodeExecutionResult {
     pub relation_name: Option<String>,
 }
 
+impl NodeExecutionResult {
+    /// The result for a node that never reached the warehouse: skipped,
+    /// cancelled, rejected before it started, or merely listed.
+    ///
+    /// Nothing ran, so there is no timing, SQL, adapter response, failure
+    /// count or freshness measurement, and nothing was written for
+    /// `relation_name` or `compiled_code_ref` to name.
+    pub fn not_executed(
+        unique_id: impl Into<String>,
+        status: NodeStatus,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            unique_id: unique_id.into(),
+            status,
+            execution_time: 0.0,
+            message,
+            adapter_response: BTreeMap::new(),
+            compiled_code: None,
+            timing: vec![],
+            failures: None,
+            freshness: None,
+            compiled_code_ref: None,
+            relation_name: None,
+        }
+    }
+}
+
 /// The grade dbt gives a freshness measurement in `sources.json` /
 /// `freshness.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1020,6 +1048,38 @@ mod tests {
         assert_eq!(back.status, NodeStatus::Success);
         assert!((back.execution_time - 1.23).abs() < f64::EPSILON);
         assert_eq!(back.timing.len(), 1);
+        Ok(())
+    }
+
+    /// The wire form of a result that never ran is fixed: the workflow
+    /// checkpoints these, so a field appearing or vanishing would change what
+    /// a continuation reads back.
+    #[test]
+    fn not_executed_serializes_the_same_for_every_status() -> anyhow::Result<()> {
+        let cases = [
+            (NodeStatus::Skipped, Some("upstream failed"), "skipped"),
+            (NodeStatus::Cancelled, Some("cancelled"), "cancelled"),
+            (NodeStatus::Error, Some("boom"), "error"),
+            (NodeStatus::Success, None, "success"),
+        ];
+        for (status, message, status_wire) in cases {
+            let result = NodeExecutionResult::not_executed(
+                "model.shop.a",
+                status,
+                message.map(str::to_string),
+            );
+            let expected = serde_json::json!({
+                "unique_id": "model.shop.a",
+                "status": status_wire,
+                "execution_time": 0.0,
+                "message": message,
+                "adapter_response": {},
+                "compiled_code": null,
+                "timing": [],
+                "failures": null,
+            });
+            assert_eq!(serde_json::to_value(&result)?, expected, "status {status_wire}");
+        }
         Ok(())
     }
 

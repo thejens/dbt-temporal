@@ -150,12 +150,6 @@ impl std::error::Error for DbtTemporalError {
     }
 }
 
-impl From<anyhow::Error> for DbtTemporalError {
-    fn from(err: anyhow::Error) -> Self {
-        Self::Adapter(err)
-    }
-}
-
 /// Compile user-configured error patterns from `dbt_temporal.yml` into regexes.
 ///
 /// Invalid patterns are logged at `warn!` and skipped. Done once at config-load
@@ -428,13 +422,6 @@ mod tests {
         let adapter = DbtTemporalError::Adapter(anyhow::anyhow!("connection refused"));
         assert!(adapter.to_string().contains("adapter error"));
         assert!(adapter.to_string().contains("connection refused"));
-    }
-
-    #[test]
-    fn from_anyhow_produces_adapter() {
-        let err: DbtTemporalError = anyhow::anyhow!("something broke").into();
-        assert!(err.is_retryable());
-        assert!(err.to_string().contains("adapter error"));
     }
 
     /// One value of every variant. The exhaustive match makes adding a variant

@@ -3,8 +3,10 @@ pub mod defer_cache;
 pub mod engines;
 pub mod profile;
 pub mod project_checks;
+pub mod relation_cache;
 pub mod schemas;
 pub mod shutdown;
+pub mod single_flight;
 pub mod temporal;
 
 use std::collections::BTreeMap;
@@ -31,7 +33,7 @@ use crate::workflow::DbtRunWorkflow;
 #[allow(clippy::redundant_pub_crate)]
 pub(crate) use self::adapter::build_artifact_store;
 #[allow(clippy::redundant_pub_crate)]
-pub(crate) use self::profile::rebuild_adapter_engines_with_env;
+pub(crate) use self::profile::rebuild_adapter_engines_shared;
 
 /// Build a fully configured Temporal worker (without starting it).
 ///
@@ -617,6 +619,8 @@ async fn initialize_project_inner(
 
     Ok(WorkerState {
         defer_manifests: defer_cache::DeferManifestCache::default(),
+        rebuilt_engines: profile::RebuildCache::default(),
+        naming: relation_cache::NamingCache::default(),
         created_schemas: schemas::CreatedSchemas::default(),
         adapter_settings,
         event_time_columns,

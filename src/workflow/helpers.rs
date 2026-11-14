@@ -107,6 +107,13 @@ pub struct NodeStatusSummary {
 }
 
 impl NodeStatusSummary {
+    /// Count the whole tree, nothing omitted. The tree covers every planned
+    /// node of every segment of a continued run, which a segment's own results
+    /// do not.
+    pub fn tally(tree: &NodeStatusTree) -> Self {
+        Self::of(tree, tree)
+    }
+
     /// `kept` is the trimmed tree written alongside, so `omitted` says how much
     /// of the run the `node_status` entry is not showing.
     fn of(tree: &NodeStatusTree, kept: &NodeStatusTree) -> Self {
@@ -311,16 +318,16 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
 /// pass/error/skip tally so operators can read the outcome without opening the
 /// run. Cancelled nodes are folded into the skip count (matching
 /// `RunStatusSnapshot::tally`).
-pub fn format_final_details(
-    results: &[NodeExecutionResult],
-    success: bool,
-    elapsed_secs: f64,
-) -> String {
-    let count = |s: NodeStatus| results.iter().filter(|r| r.status == s).count();
-    let pass = count(NodeStatus::Success);
-    let error = count(NodeStatus::Error);
-    let skip = count(NodeStatus::Skipped) + count(NodeStatus::Cancelled);
-    let total = results.len();
+///
+/// Tallied from the status tree rather than from result lists: a continued run
+/// keeps only its final segment's results in memory, while the tree describes
+/// every planned node.
+pub fn format_final_details(tree: &NodeStatusTree, success: bool, elapsed_secs: f64) -> String {
+    let summary = NodeStatusSummary::tally(tree);
+    let pass = summary.success;
+    let error = summary.error;
+    let skip = summary.skipped + summary.cancelled;
+    let total = tree.nodes.len();
     let outcome = if success { "passed" } else { "FAILED" };
     format!("{outcome} — {pass} ok, {error} error, {skip} skip of {total} in {elapsed_secs:.2}s")
 }
@@ -530,6 +537,14 @@ pub fn format_progress_line(num: usize, total: usize, verb: &str, label: &str) -
 pub fn format_running_details(level_idx: usize, total_levels: usize, running: &[&str]) -> String {
     format!("level {}/{}: {}", level_idx + 1, total_levels, running.join(", "))
 }
+
+/// Patch id for writing the terminal memo once.
+///
+/// A finished run publishes its terminal memo after the summary line is
+/// appended; a write straight after the last level would be superseded at
+/// once. Memo upserts are workflow commands, so a history recorded with both
+/// writes keeps both and replays cleanly.
+pub const SINGLE_TERMINAL_MEMO_PATCH: &str = "single-terminal-memo-upsert";
 
 /// Patch id for the bounded memo cadence.
 ///
@@ -1179,25 +1194,32 @@ mod tests {
         }
     }
 
+    fn tree_from_statuses(statuses: &[NodeStatus]) -> NodeStatusTree {
+        NodeStatusTree {
+            nodes: statuses
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (format!("model.p.n{i:03}"), *s))
+                .collect(),
+        }
+    }
+
     #[test]
     fn format_final_details_passed_summarises_counts() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Success),
-            result_with_status("c", NodeStatus::Skipped),
-        ];
-        let details = format_final_details(&results, true, 3.456);
+        let tree = tree_from_statuses(&[
+            NodeStatus::Success,
+            NodeStatus::Success,
+            NodeStatus::Skipped,
+        ]);
+        let details = format_final_details(&tree, true, 3.456);
         assert_eq!(details, "passed — 2 ok, 0 error, 1 skip of 3 in 3.46s");
     }
 
     #[test]
     fn format_final_details_all_passed() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Success),
-        ];
+        let tree = tree_from_statuses(&[NodeStatus::Success, NodeStatus::Success]);
         assert_eq!(
-            format_final_details(&results, true, 0.5),
+            format_final_details(&tree, true, 0.5),
             "passed — 2 ok, 0 error, 0 skip of 2 in 0.50s"
         );
     }
@@ -1205,22 +1227,41 @@ mod tests {
     #[test]
     fn format_final_details_empty_run() {
         assert_eq!(
-            format_final_details(&[], true, 0.0),
+            format_final_details(&tree_from_statuses(&[]), true, 0.0),
             "passed — 0 ok, 0 error, 0 skip of 0 in 0.00s"
         );
     }
 
     #[test]
     fn format_final_details_failed_folds_cancelled_into_skip() {
-        let results = vec![
-            result_with_status("a", NodeStatus::Success),
-            result_with_status("b", NodeStatus::Error),
-            result_with_status("c", NodeStatus::Skipped),
-            result_with_status("d", NodeStatus::Cancelled),
-        ];
-        let details = format_final_details(&results, false, 12.0);
+        let tree = tree_from_statuses(&[
+            NodeStatus::Success,
+            NodeStatus::Error,
+            NodeStatus::Skipped,
+            NodeStatus::Cancelled,
+        ]);
+        let details = format_final_details(&tree, false, 12.0);
         // Cancelled nodes count toward skip, matching RunStatusSnapshot::tally.
         assert_eq!(details, "FAILED — 1 ok, 1 error, 2 skip of 4 in 12.00s");
+    }
+
+    /// A continued run holds only its last segment's results, but the tree
+    /// still names every node: the tally and its total must come from the tree.
+    #[test]
+    fn tally_and_total_agree_when_the_tree_outgrows_the_result_list() {
+        let mut statuses = vec![NodeStatus::Success; 5];
+        statuses.extend([NodeStatus::Warn, NodeStatus::Error, NodeStatus::Skipped]);
+        let tree = tree_from_statuses(&statuses);
+        let final_segment_results = [result_with_status("model.p.n007", NodeStatus::Skipped)];
+        assert!(tree.nodes.len() > final_segment_results.len());
+
+        let summary = NodeStatusSummary::tally(&tree);
+        assert_eq!((summary.success, summary.warn, summary.error, summary.skipped), (5, 1, 1, 1));
+        assert_eq!(summary.omitted, 0);
+        assert_eq!(
+            format_final_details(&tree, false, 1.0),
+            "FAILED — 5 ok, 1 error, 1 skip of 8 in 1.00s"
+        );
     }
 
     #[test]

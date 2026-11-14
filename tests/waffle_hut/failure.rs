@@ -246,7 +246,7 @@ models:
 }
 
 /// Retry-from-failure: a second run with `retry_from` pointing at the failed
-/// run's `run_results.json` plans only the nodes that did not succeed.
+/// run's `run_results.json` plans only the nodes that errored or were skipped.
 ///
 /// Run 1 (fail_fast=false): stg_customers=error, customers=skipped, the other
 /// three models succeed. Run 2 with `retry_from` must re-plan exactly the

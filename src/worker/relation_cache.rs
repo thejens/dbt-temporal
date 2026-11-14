@@ -3,8 +3,8 @@
 //!
 //! When a run's env overrides move the profile schema or database, each node
 //! activity re-renders the naming macros for itself and for every ancestor its
-//! SQL can mention. Siblings share most of those ancestors, so a 300-node run
-//! rendered the same macro for the same node thousands of times. Within one run
+//! SQL can mention. Siblings share most of those ancestors, so without reuse a
+//! 300-node run renders the same macro for the same node thousands of times. Within one run
 //! the answer cannot change — the macros see only the node and the run's
 //! overrides — so it is computed once and reused.
 //!

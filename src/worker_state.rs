@@ -102,7 +102,7 @@ pub struct WorkerState {
     pub defer_manifests: crate::worker::defer_cache::DeferManifestCache,
     /// Engines rebuilt for per-workflow overrides, shared by every activity
     /// that resolves to the same target and profile-visible env. A run with
-    /// overrides otherwise rebuilt the full engine set once per node.
+    /// overrides would otherwise rebuild the full engine set once per node.
     pub rebuilt_engines: crate::worker::profile::RebuildCache,
     /// What the naming macros resolved to, per run, plus where those macros
     /// live. An ancestor shared by many nodes is rendered once per run.

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use dbt_schemas::schemas::common::OnError;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_client::RetryPolicy;
 use temporalio_sdk::error::ApplicationFailure;
@@ -488,7 +489,7 @@ pub fn is_blocked_by_failed_upstream(
 /// model configured with `on_error: continue`.
 fn dep_continues_on_error(plan: &ExecutionPlan, dep_unique_id: &str) -> bool {
     plan.nodes.get(dep_unique_id).is_some_and(|info| {
-        info.resource_type == NodeType::Model && info.on_error.as_deref() == Some("continue")
+        info.resource_type == NodeType::Model && info.on_error == Some(OnError::Continue)
     })
 }
 
@@ -1488,18 +1489,18 @@ mod tests {
         plan: &mut ExecutionPlan,
         unique_id: &str,
         resource_type: NodeType,
-        on_error: Option<&str>,
+        on_error: Option<OnError>,
     ) {
         let info = plan.nodes.get_mut(unique_id).unwrap();
         info.resource_type = resource_type;
-        info.on_error = on_error.map(ToString::to_string);
+        info.on_error = on_error;
     }
 
     #[test]
     fn is_blocked_by_failed_upstream_false_when_failed_dep_continues_on_error() {
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1515,7 +1516,7 @@ mod tests {
                 ("c", None, vec!["a", "b"]),
             ],
         );
-        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         // b has no on_error override — its failure should still block c.
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
@@ -1529,7 +1530,7 @@ mod tests {
         // by our scheduler (dbt-core itself only wires up `continue` today).
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some("skip_children"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::SkipChildren));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
@@ -1541,7 +1542,7 @@ mod tests {
         // (e.g. a seed) always blocks, even if on_error happened to be set.
         let mut plan =
             test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
-        set_on_error(&mut plan, "model.waffle.a", NodeType::Seed, Some("continue"));
+        set_on_error(&mut plan, "model.waffle.a", NodeType::Seed, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));

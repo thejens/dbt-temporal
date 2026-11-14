@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use bytes::Bytes;
 use dbt_common::io_args::ClapResourceType;
+use dbt_schemas::schemas::common::OnError;
 use dbt_schemas::schemas::telemetry::NodeType;
 use temporalio_sdk::activities::ActivityContext;
 use tracing::{info, warn};
@@ -791,19 +792,15 @@ fn build_node_info(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> Opti
     })
 }
 
-/// Read a model's `on_error` config ("continue" or "skip_children"), if set.
+/// Read a model's `on_error` config, if set.
 /// Only `DbtModel` carries this field — every other resource type gets `None`.
 fn model_on_error(
     node: &dyn dbt_schemas::schemas::nodes::InternalDbtNodeAttributes,
-) -> Option<String> {
-    use dbt_schemas::schemas::common::OnError;
+) -> Option<OnError> {
     use dbt_schemas::schemas::nodes::DbtModel;
 
     let model = node.as_any().downcast_ref::<DbtModel>()?;
-    match model.deprecated_config.on_error.as_ref()? {
-        OnError::Continue => Some("continue".to_string()),
-        OnError::SkipChildren => Some("skip_children".to_string()),
-    }
+    model.deprecated_config.on_error.clone()
 }
 
 #[cfg(test)]
@@ -1343,34 +1340,36 @@ mod tests {
     }
 
     #[test]
-    fn build_node_info_extracts_on_error_continue() {
+    fn build_node_info_extracts_on_error() {
         use std::sync::Arc;
 
         use dbt_schemas::schemas::Nodes;
-        use dbt_schemas::schemas::common::OnError;
         use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
         use dbt_schemas::schemas::project::ModelConfig;
 
-        let mut nodes = Nodes::default();
-        nodes.models.insert(
-            "model.shop.flaky".to_string(),
-            Arc::new(DbtModel {
-                __common_attr__: CommonAttributes {
-                    unique_id: "model.shop.flaky".to_string(),
-                    name: "flaky".to_string(),
-                    package_name: "shop".to_string(),
-                    ..CommonAttributes::default()
-                },
-                deprecated_config: ModelConfig {
-                    on_error: Some(OnError::Continue),
-                    ..ModelConfig::default()
-                },
-                ..DbtModel::default()
-            }),
-        );
+        for on_error in [OnError::Continue, OnError::SkipChildren] {
+            let mut nodes = Nodes::default();
+            nodes.models.insert(
+                "model.shop.flaky".to_string(),
+                Arc::new(DbtModel {
+                    __common_attr__: CommonAttributes {
+                        unique_id: "model.shop.flaky".to_string(),
+                        name: "flaky".to_string(),
+                        package_name: "shop".to_string(),
+                        ..CommonAttributes::default()
+                    },
+                    deprecated_config: ModelConfig {
+                        on_error: Some(on_error.clone()),
+                        ..ModelConfig::default()
+                    },
+                    ..DbtModel::default()
+                }),
+            );
 
-        let info = build_node_info(&nodes, "model.shop.flaky").expect("flaky is in the registry");
-        assert_eq!(info.on_error.as_deref(), Some("continue"));
+            let info =
+                build_node_info(&nodes, "model.shop.flaky").expect("flaky is in the registry");
+            assert_eq!(info.on_error, Some(on_error));
+        }
     }
 
     #[test]

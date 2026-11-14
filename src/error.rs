@@ -247,7 +247,6 @@ const TRANSIENT_MESSAGE_SIGNATURES: &[&str] = &[
     "backenderror",
     "internal error",
     "internalerror",
-    "request timeout",
     // HTTP status hints — precise phrases, not bare numbers
     "429 too many",
     "500 internal server",

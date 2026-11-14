@@ -590,8 +590,8 @@ mod tests {
         });
     }
 
-    /// An option-looking value must be refused before git runs, so no fetch
-    /// directory is created for it either.
+    /// A command-running transport must be refused before git runs, so no
+    /// fetch directory is created for it either.
     #[tokio::test]
     async fn fetch_refuses_a_disallowed_scheme_before_running_git() {
         let before = temp_model_dirs();

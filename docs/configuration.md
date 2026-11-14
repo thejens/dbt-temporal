@@ -318,7 +318,7 @@ The resource-based tuner is cgroup-aware: in containers with CPU/memory limits, 
 |----------|---------|-------------|
 | `TEMPORAL_PRIORITY_SCHEDULING` | off | Set to `1` to attach a priority key and fairness key to every node activity. |
 
-With the flag on, each node gets a priority key (1–5) derived from its critical-path height: nodes with long chains of dependents run first, so the DAG's longest path — which bounds total run time — is never starved by wide, shallow levels. Each activity also carries the run's `invocation_id` as a fairness key, so concurrent dbt runs sharing a task queue split worker capacity evenly instead of first-come-first-served.
+With the flag on, each node gets a priority key (1–5) derived from its critical-path height: nodes with long chains of dependents run first, so the DAG's longest path — which bounds total run time — is never starved by wide, shallow parts of the graph. The workflow also starts ready nodes in priority-key order. Each activity also carries the run's `invocation_id` as a fairness key, so concurrent dbt runs sharing a task queue split worker capacity evenly instead of first-come-first-served.
 
 Requires Temporal server ≥ 1.31; older servers silently ignore the fields, so the flag is safe to enable everywhere.
 
@@ -364,11 +364,11 @@ The workflow stores live metadata in [Temporal memos](https://docs.temporal.io/w
 | Memo key | Updated | Contents |
 |----------|---------|----------|
 | `command` | Once (at start) | Workflow input metadata: command, project, select, exclude, target, full_refresh, fail_fast, vars |
-| `node_status` | On a level cadence | Map of `unique_id` → status (`pending`, `running`, `success`, `warn`, `error`, `skipped`, `cancelled`) |
-| `node_status_summary` | On a level cadence | How many nodes are in each state, plus how many `node_status` left out |
-| `log` | On a level cadence | Tail of the CLI-style run log (last 200 lines) |
+| `node_status` | Periodically | Map of `unique_id` → status (`pending`, `running`, `success`, `warn`, `error`, `skipped`, `cancelled`) |
+| `node_status_summary` | Periodically | How many nodes are in each state, plus how many `node_status` left out |
+| `log` | Periodically | Tail of the CLI-style run log (last 200 lines) |
 
-The memo is written on the first level, then periodically, and whenever a level had a failure — one policy, rather than a write per level. A memo upsert is a workflow history event, so a deep DAG that wrote one per level paid for a full snapshot each time to show that the next level had started. The terminal flush publishes every node's final state, and the `run_status` query is free and refreshes at every level boundary.
+The memo is written once when the first nodes start, then about twenty times over a run regardless of its size, and sooner after a failure. A memo upsert is a workflow history event carrying a full snapshot, so it is not written per node. The terminal flush publishes every node's final state, and the `run_status` query is free and refreshes whenever a node starts or finishes.
 
 `node_status` and `log` are each capped in **bytes** (16 KB and 12 KB) to stay within Temporal memo size limits, because neither an entry count nor a line count bounds what is written: node ids are unique-id strings, and one adapter error can outweigh a hundred progress lines.
 
@@ -384,11 +384,11 @@ The workflow exposes handlers for live inspection and control — cheaper than `
 # Live progress: phase, per-status node counts, level progress, effective fail_fast
 temporal workflow query -w <workflow-id> --type run_status
 
-# Toggle fail-fast mid-run (applies from the next DAG level)
+# Toggle fail-fast mid-run (applies to the next scheduling decision)
 temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 ```
 
-`run_status` returns `{phase, total_nodes, total_levels, completed_levels, succeeded, warned, failed, skipped, running, fail_fast}`. The snapshot refreshes at every level boundary. `set_fail_fast` overrides the workflow input's `fail_fast` for the remainder of the run and returns the applied value.
+`run_status` returns `{phase, total_nodes, total_levels, completed_levels, succeeded, warned, failed, skipped, running, fail_fast}`. The snapshot refreshes whenever a node starts or finishes; `completed_levels` counts the leading plan levels whose nodes have all finished. `set_fail_fast` overrides the workflow input's `fail_fast` for the remainder of the run and returns the applied value.
 
 ### Per-Node Activity Names
 

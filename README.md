@@ -28,7 +28,7 @@
 
 It embeds [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite of dbt, as a library. There is no Python and no dbt CLI to install: the worker parses your project once at startup and then executes SQL against your warehouse through dbt's own adapters.
 
-![The jaffle_shop dbt project running as a Temporal workflow: the Temporal UI timeline shows every seed, model and test as its own execute_node activity, level by level](docs/temporal-ui.png)
+![The jaffle_shop dbt project running as a Temporal workflow: the Temporal UI timeline shows every seed, model and test as its own execute_node activity, each starting as soon as its dependencies finish](docs/temporal-ui.png)
 
 > [!NOTE]
 > **Project status: proof of concept, not production-ready.** dbt-temporal builds on two stable, generally available releases: [dbt v2](https://github.com/dbt-labs/dbt) (pinned to `v2.0.11`) and the [Temporal Rust SDK](https://github.com/temporalio/sdk-rust) (`1.2.0`). dbt v2's crates are an internal API rather than a published library, though, and several [workarounds](docs/workarounds.md) are needed to run them in a long-lived worker. The project is largely developed with [Claude Code](https://claude.ai/claude-code) and comes with no guarantees of code quality.
@@ -38,7 +38,7 @@ It embeds [dbt v2](https://github.com/dbt-labs/dbt), the Rust rewrite of dbt, as
 - **Runs that survive restarts.** A run's state lives in Temporal, not in a process. Kill a worker mid-build and the run continues on another one: finished nodes stay finished, and only the nodes that were in flight run again.
 - **Retries per node, not per job.** A transient warehouse error retries one model, with backoff, instead of failing the whole `dbt build`.
 - **One orchestrator.** Teams already on Temporal can schedule, trigger and chain dbt runs with the tooling they use for every other workflow, and hook any Temporal workflow, in any language, in before or after a run.
-- **Scale by adding workers.** Independent models in a DAG level run in parallel across every worker on the task queue. On Kubernetes, KEDA scales workers on queue backlog, down to zero.
+- **Scale by adding workers.** Models that do not depend on each other run in parallel across every worker on the task queue. On Kubernetes, KEDA scales workers on queue backlog, down to zero.
 - **See what is happening.** Each node is a named activity in the Temporal UI timeline, with live status, search attributes and a CLI-style run log.
 
 ## How it works
@@ -51,7 +51,7 @@ flowchart TD
     OnStart["on-run-start (dbt_project.yml)"] --> L1
 
     subgraph DAG["Parallel DAG Execution"]
-        L1["Level 1 — execute_node ×N"] --> L2["Level 2 — execute_node ×N"]
+        L1["Ready nodes — execute_node ×N"] --> L2["Their dependents, as each becomes ready"]
         L2 --> LN["…"]
     end
 
@@ -61,8 +61,8 @@ flowchart TD
 ```
 
 1. At startup the worker loads one or more dbt projects, from a local directory, a git repository, S3 or GCS, and parses them once.
-2. Starting a `dbt_run` workflow plans the run: it applies `--select` / `--exclude` and sorts the DAG into levels of independent nodes.
-3. Each level fans out as Temporal activities, one per node. An activity renders the node's materialization with dbt's Jinja engine, which executes the SQL in your warehouse.
+2. Starting a `dbt_run` workflow plans the run: it applies `--select` / `--exclude` and builds the dependency graph of the selected nodes.
+3. Each node runs as a Temporal activity, started as soon as its dependencies have finished. An activity renders the node's materialization with dbt's Jinja engine, which executes the SQL in your warehouse.
 4. Results, `run_results.json`, `manifest.json` and a run log are written to the artifact store.
 
 The full lifecycle, with hooks and project checks, is in [architecture](docs/architecture.md).
@@ -129,7 +129,7 @@ For production setups (Temporal Cloud, health checks, graceful shutdown, read-on
 
 ### Execution
 
-- **Parallel DAG execution.** Nodes at each dependency level run concurrently as Temporal activities, with automatic retries for transient adapter errors.
+- **Parallel DAG execution.** Every node whose dependencies have finished runs concurrently as a Temporal activity, with automatic retries for transient adapter errors.
 - **All the dbt commands a scheduler needs.** `build`, `run`, `test`, `seed`, `snapshot`, `compile`, `list`, `source-freshness` and `freshness`, with `--select` / `--exclude`, `--target`, `--vars`, `--full-refresh` and `--fail-fast` as [workflow input](docs/workflow-input.md).
 - **Slim CI, defer and retry.** `state:` selectors against a previous manifest, `--defer` to production relations, and re-running only the nodes that failed in an earlier run.
 - **Runs of any size.** A run that outgrows Temporal's history limit continues as a new execution on its own, keeping one identity and one set of artifacts.

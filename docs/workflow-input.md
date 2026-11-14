@@ -37,7 +37,7 @@ project.
 | `target` | `--target` | the profile's default | The `profiles.yml` target to run against. |
 | `vars` | `--vars` | `{}` | Project variables for this run. See [Vars and full refresh](#vars-and-full-refresh). |
 | `full_refresh` | `--full-refresh` | `false` | Rebuild incremental models from scratch. |
-| `fail_fast` | `--fail-fast` | `false` | Stop scheduling new DAG levels after the first failure. Can be toggled [while the run executes](#live-progress-and-control). |
+| `fail_fast` | `--fail-fast` | `false` | Stop starting new nodes after the first failure; nodes already running finish. Can be toggled [while the run executes](#live-progress-and-control). |
 | `env` | process environment | `{}` | Per-run `env_var()` values, including ones `profiles.yml` reads. See [per-workflow env overrides](env-overrides.md). |
 | `hooks` | none | from `dbt_temporal.yml` | Lifecycle hooks for this run; replaces the project's defaults. See [hooks](hooks.md). |
 | `defer_manifest_ref` | `--defer --state` | none | A previous `manifest.json`; refs to nodes this run does not build resolve to the relations it records. |
@@ -142,8 +142,8 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 ```
 
 `run_status` reports the phase, per-status node counts, level progress and the
-effective `fail_fast`. A `set_fail_fast` update applies from the next DAG
-level. See [observability](configuration.md#observability) for memos and
+effective `fail_fast`. A `set_fail_fast` update applies to the next
+scheduling decision. See [observability](configuration.md#observability) for memos and
 search attributes.
 
 ## Scheduling

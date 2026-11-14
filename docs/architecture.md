@@ -3,7 +3,7 @@
 dbt-temporal runs a dbt project as a Temporal workflow. The worker parses the
 project once at startup; each run is a `dbt_run` workflow that plans the DAG,
 then executes every model, test, seed and snapshot as its own Temporal
-activity, level by level. This page covers the run lifecycle, the module
+activity, each as soon as its dependencies finish. This page covers the run lifecycle, the module
 layout and the dependencies.
 
 ```mermaid
@@ -16,7 +16,7 @@ flowchart TD
         W2 --> W3["3. run_project_checks (if the project has checks)"]
         W3 --> W4["4. Run pre_run lifecycle hooks"]
         W4 --> W5["5. run_project_hooks (on-run-start)"]
-        W5 --> W6["6. For each topological level:\n   fan-out execute_node"]
+        W5 --> W6["6. As each node becomes ready:\n   execute_node"]
         W6 --> W7["7. store_artifacts activity"]
         W7 --> W8["8. run_project_hooks (on-run-end)"]
         W8 --> W9["9. Run on_success / on_failure lifecycle hooks"]
@@ -52,7 +52,7 @@ flowchart TD
 
 6. **`run_project_hooks` activity (`on-run-start`)**: If `dbt_project.yml` declares `on-run-start`, render those Jinja templates against the full compile+run context (with `execute=true` and per-workflow env overrides applied). Failure aborts the run before any node executes.
 
-7. **`execute_node` activity** (per node, per level): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter. A periodic heartbeat ticker runs alongside the work so the Temporal UI's last-heartbeat stays current and dead workers are detected within `heartbeat_timeout`.
+7. **`execute_node` activity** (per node): Clones the Jinja environment, configures it for the run phase with `execute=true`, renders the node's materialization template. The rendering itself triggers SQL execution through the BridgeAdapter. A periodic heartbeat ticker runs alongside the work so the Temporal UI's last-heartbeat stays current and dead workers are detected within `heartbeat_timeout`.
 
 8. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
 
@@ -60,7 +60,7 @@ flowchart TD
 
 10. **`on_success` / `on_failure` lifecycle hooks**: Child workflows that receive the run's output — notifications, downstream triggers. See [hooks](hooks.md).
 
-Parallel execution is natural: all nodes in the same topological level are independent, so Temporal dispatches them as concurrent activities.
+Parallel execution is natural: a node is started the moment its last dependency finishes, so every node that is ready runs as a concurrent activity and a slow model delays only the nodes that depend on it. At most 500 activities are pending at once. Workflow histories recorded before readiness scheduling replay on the level loop, which runs one topological level at a time.
 
 ## Project checks
 
@@ -128,7 +128,9 @@ nothing.
 | **Workflow** (`src/workflow/`) | |
 | [`mod.rs`](../src/workflow/mod.rs) | `dbt_run_workflow` |
 | [`phases.rs`](../src/workflow/phases.rs) | One helper per run phase (plan, hooks, checks, artifacts, continue-as-new) |
-| [`levels.rs`](../src/workflow/levels.rs) | The level loop: fan-out, fail-fast and dependency skipping |
+| [`scheduler.rs`](../src/workflow/scheduler.rs) | Pure readiness scheduler: which nodes to start or skip next |
+| [`ready_queue.rs`](../src/workflow/ready_queue.rs) | Workflow driver around the scheduler: activities, run log, memo, continue-as-new |
+| [`levels.rs`](../src/workflow/levels.rs) | The level loop, kept to replay histories it recorded |
 | [`search_attributes.rs`](../src/workflow/search_attributes.rs) | Typed search-attribute updates |
 | [`helpers.rs`](../src/workflow/helpers.rs) | Node status tree, retry policy, log helpers |
 | **Activities** (`src/activities/`) | |

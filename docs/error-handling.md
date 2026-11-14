@@ -129,9 +129,10 @@ Each node costs roughly three history events, plus one per retry and per memo
 upsert. Temporal warns around 10,240 events and hard-fails at 51,200, so a wide
 `build` over a large project can hit the ceiling mid-DAG.
 
-The workflow handles this itself. At each level boundary it checks Temporal's
-own `continue_as_new_suggested` signal, and when it trips it spills the run's
-state and restarts with a fresh history. The run keeps one identity across
+The workflow handles this itself. Each time a node finishes it checks Temporal's
+own `continue_as_new_suggested` signal. When it trips, no further nodes start,
+the activities already running finish, and the workflow spills the run's state
+and restarts with a fresh history. The run keeps one identity across
 every segment: the same `invocation_id`, one artifact set, continuous progress
 numbering in the log, and a single `run_results.json` at the end.
 
@@ -156,7 +157,6 @@ than failing — so a very large run on a worker without artifact storage can
 still hit the server limit. Configure a store if you build projects at that
 scale.
 
-Every segment executes at least one level before it may hand off. A run that
+Every segment completes at least one node before it may hand off. A run that
 arrives already over the threshold would otherwise continue forever without
-making progress — and since a resumed segment starts partway through the plan,
-that guard counts levels done *in the current segment*, not the level index.
+making progress, so the guard counts completions *in the current segment*.

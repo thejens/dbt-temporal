@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use temporalio_sdk::error::ApplicationFailure;
 use tracing::info;
 
 use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
@@ -68,21 +67,15 @@ pub async fn run_project_hooks_outer(
                 // An untyped hook failure is a template or SQL problem, not a
                 // blip, so it stays permanent even when retry is enabled.
                 let dbt_err = retry::downcast_or_default(e, retry::Unclassified::Permanent);
-                match hook_retry_decision(
+                let decision = hook_retry_decision(
                     &dbt_err,
                     retry_on_error,
                     patterns.as_deref().unwrap_or(&[]),
-                ) {
-                    RetryDecision::Retry => {
-                        info!(phase = %phase, error = %dbt_err, "hook failed, retrying");
-                        ActivityError::application(ApplicationFailure::new(anyhow::anyhow!(
-                            "{dbt_err}"
-                        )))
-                    }
-                    RetryDecision::NoRetry => ActivityError::application(
-                        ApplicationFailure::non_retryable(anyhow::anyhow!("{dbt_err}")),
-                    ),
+                );
+                if decision == RetryDecision::Retry {
+                    info!(phase = %phase, error = %dbt_err, "hook failed, retrying");
                 }
+                retry::failure_for(&dbt_err, decision)
             })
         }
         () = ctx.cancelled() => {

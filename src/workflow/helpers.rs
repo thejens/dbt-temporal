@@ -5,6 +5,7 @@ use temporalio_client::RetryPolicy;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{MemoValue, WorkflowTermination};
 
+use crate::error::DbtTemporalError;
 use crate::types::{
     DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
 };
@@ -648,16 +649,9 @@ pub fn build_retry_policy(config: &RetryConfig) -> RetryPolicy {
         .backoff_coefficient(config.backoff_coefficient)
         .maximum_interval(Duration::from_secs(config.max_interval_secs))
         .maximum_attempts(config.max_attempts)
-        // Must mirror `DbtTemporalError::is_retryable` — every variant that
-        // returns false belongs here.
-        .non_retryable_error_types([
-            "DbtTemporalError::Compilation",
-            "DbtTemporalError::Configuration",
-            "DbtTemporalError::ProjectNotFound",
-            "DbtTemporalError::TestFailure",
-            "DbtTemporalError::UnitTestFailure",
-            "DbtTemporalError::StaleSource",
-        ])
+        // Matched against the failure type `DbtTemporalError::type_name` stamps
+        // on every activity failure.
+        .non_retryable_error_types(DbtTemporalError::NON_RETRYABLE_TYPE_NAMES)
         .build()
 }
 
@@ -864,17 +858,7 @@ mod tests {
         assert_eq!(policy.backoff_coefficient(), config.backoff_coefficient);
         assert_eq!(policy.maximum_interval(), Some(Duration::from_secs(config.max_interval_secs)));
         assert_eq!(policy.maximum_attempts(), config.max_attempts);
-        assert_eq!(
-            policy.non_retryable_error_types(),
-            [
-                "DbtTemporalError::Compilation",
-                "DbtTemporalError::Configuration",
-                "DbtTemporalError::ProjectNotFound",
-                "DbtTemporalError::TestFailure",
-                "DbtTemporalError::UnitTestFailure",
-                "DbtTemporalError::StaleSource",
-            ]
-        );
+        assert_eq!(policy.non_retryable_error_types(), DbtTemporalError::NON_RETRYABLE_TYPE_NAMES);
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod defer_cache;
 pub mod engines;
 pub mod profile;
 pub mod project_checks;
+pub mod relation_cache;
 pub mod schemas;
 pub mod shutdown;
 pub mod single_flight;
@@ -619,6 +620,7 @@ async fn initialize_project_inner(
     Ok(WorkerState {
         defer_manifests: defer_cache::DeferManifestCache::default(),
         rebuilt_engines: profile::RebuildCache::default(),
+        naming: relation_cache::NamingCache::default(),
         created_schemas: schemas::CreatedSchemas::default(),
         adapter_settings,
         event_time_columns,

@@ -104,6 +104,9 @@ pub struct WorkerState {
     /// that resolves to the same target and profile-visible env. A run with
     /// overrides otherwise rebuilt the full engine set once per node.
     pub rebuilt_engines: crate::worker::profile::RebuildCache,
+    /// What the naming macros resolved to, per run, plus where those macros
+    /// live. An ancestor shared by many nodes is rendered once per run.
+    pub naming: crate::worker::relation_cache::NamingCache,
     /// Optional auth override for the adapter engine.
     /// When set, `rebuild_adapter_engines_shared` uses this instead of the default auth.
     pub auth_override: Option<Arc<dyn dbt_auth::Auth>>,

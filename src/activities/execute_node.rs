@@ -816,18 +816,15 @@ fn execute_node_body(
     // run's default otherwise, so routing on it needs no fallback of its own —
     // and an adapter the target does not declare fails here rather than running
     // against the wrong warehouse.
-    let mut render_env = render_env::prepare_render_env(
-        state,
-        &render_env::RenderOverrides {
-            cancellation,
-            env: &input.env,
-            target: input.target.as_deref(),
-            vars: &input.vars,
-            full_refresh: input.full_refresh,
-        },
-        base.adapter,
-        unique_id,
-    )?;
+    let overrides = render_env::RenderOverrides {
+        cancellation,
+        env: &input.env,
+        target: input.target.as_deref(),
+        vars: &input.vars,
+        full_refresh: input.full_refresh,
+    };
+    let mut render_env =
+        render_env::prepare_render_env(state, &overrides, base.adapter, unique_id)?;
     let jinja_env = &mut render_env.jinja_env;
     let env_schema = render_env.env_schema.clone();
     let env_database = render_env.env_database.clone();
@@ -944,6 +941,8 @@ fn execute_node_body(
     let resolved = resolve_relations(
         state,
         jinja_env,
+        &input.invocation_id,
+        &overrides,
         unique_id,
         env_schema.as_deref(),
         env_database.as_deref(),

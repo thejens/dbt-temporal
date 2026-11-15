@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::{Component, Path, PathBuf};
 
-use super::ArtifactStore;
+use super::{ArtifactStore, InvalidArtifactPath};
 
 /// Stores artifacts on the local filesystem.
 #[derive(Debug)]
@@ -43,10 +43,12 @@ impl LocalArtifactStore {
             .canonicalize()
             .with_context(|| format!("resolving artifact {reference}"))?;
 
-        anyhow::ensure!(
-            resolved.starts_with(&base),
-            "artifact reference resolves outside the artifact store: {reference}"
-        );
+        if !resolved.starts_with(&base) {
+            return Err(InvalidArtifactPath(format!(
+                "artifact reference resolves outside the artifact store: {reference}"
+            ))
+            .into());
+        }
         Ok(resolved)
     }
 }
@@ -66,12 +68,20 @@ fn confined_join(base: &Path, parts: &[&str]) -> Result<PathBuf> {
                 Component::Normal(segment) => out.push(segment),
                 Component::CurDir => {}
                 Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    anyhow::bail!("artifact path escapes the artifact store: {part}")
+                    return Err(InvalidArtifactPath(format!(
+                        "artifact path escapes the artifact store: {part}"
+                    ))
+                    .into());
                 }
             }
         }
     }
-    anyhow::ensure!(out != base, "artifact path names the artifact store root itself: {parts:?}");
+    if out == base {
+        return Err(InvalidArtifactPath(format!(
+            "artifact path names the artifact store root itself: {parts:?}"
+        ))
+        .into());
+    }
     Ok(out)
 }
 

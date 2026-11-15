@@ -1126,6 +1126,36 @@ mod tests {
         );
     }
 
+    /// A checkpoint that does not exist will not appear on a later attempt, so
+    /// the failure must reach Temporal as non-retryable under its own type.
+    #[tokio::test]
+    async fn a_missing_checkpoint_is_not_retried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let activities = activities_with_local_store(dir.path().to_path_buf(), false);
+        let input = StoreArtifactsInput {
+            prior_segments: vec!["inv-multi/run_segment_state_1.json".to_string()],
+            invocation_id: "inv-multi".into(),
+            project: None,
+            command: None,
+            node_results: Vec::new(),
+            manifest_json: Some("{}".to_string()),
+            manifest_ref: None,
+            run_log: None,
+            env: BTreeMap::new(),
+            target: None,
+            started_at: None,
+            elapsed_time: 0.0,
+        };
+
+        let err = store_artifacts_inner(&activities, input)
+            .await
+            .expect_err("a missing checkpoint must be reported");
+
+        let classified = retry::downcast_or_default(err, retry::Unclassified::Permanent);
+        assert!(!classified.is_retryable(), "{classified}");
+        assert_eq!(classified.type_name(), "DbtTemporalError::ArtifactStorePermanent");
+    }
+
     #[tokio::test]
     async fn store_artifacts_inner_writes_run_results_and_inline_manifest() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

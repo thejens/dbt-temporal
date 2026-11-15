@@ -10,6 +10,7 @@ and keeps very large runs under Temporal's history limit.
 | `Configuration` | No | Missing profile, bad config, invalid selector |
 | `Adapter` | Yes | Connection timeout, rate limit, transient DB error |
 | `ArtifactStore` | Yes | Object-store 5xx or throttle while reading/writing run artifacts |
+| `ArtifactStorePermanent` | No | A store failure no retry can fix: missing bucket or object, access denied, invalid path (read from the typed `std::io::Error` / `object_store::Error` in the cause chain) |
 | `TestFailure` | n/a | A dbt test query returned failing rows |
 | `UnitTestFailure` | n/a | A unit test's output differed from its fixture |
 | `StaleSource` | n/a | A source exceeded its `error_after` freshness threshold |
@@ -37,6 +38,24 @@ a bad selector or a bug, not a blip. Only their object-store round-trips (the
 artifact write) are tagged `ArtifactStore` and retried. That matters most for
 `store_artifacts`, which runs after every node has finished: without it a single
 5xx would discard a completed run's results.
+
+Every activity the workflow schedules outside the node loop (`plan_project`,
+`store_artifacts`, the segment-state checkpoint read and write, the project
+checks) carries an explicit retry policy with the same non-retryable types the
+node activities use, so none retries without bound. `store_artifacts` uses the
+project's `retry` settings; the others, which run before those are resolved or
+touch one object, use the defaults shown below.
+
+## Runs that end outside the node loop
+
+A failure in any phase after planning ends the run through one place that sets
+`DbtStatus` to `failed`, fires the `on_failure` hooks (when the project's
+configuration was resolved) and leaves the reason on the workflow's details
+line. A cancellation that arrives during such a phase ends the workflow as
+cancelled and sets `DbtStatus` to `cancelled`. A failure before planning
+completes has no invocation and no `running` status to replace, so it only
+fails the workflow. A `pre_run` hook failure is reported by the child-workflow
+machinery as an ordinary failure, so a cancellation during one ends as failed.
 
 ## Cancellation
 

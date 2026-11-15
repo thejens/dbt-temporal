@@ -591,6 +591,17 @@ pub const UNIQUE_ACTIVITY_ID_PATCH: &str = "unique-node-activity-ids";
 /// record the marker and skip every descendant of a failure.
 pub const TRANSITIVE_SKIP_PATCH: &str = "transitive-upstream-skip";
 
+/// Patch id for ending a run that fails or is cancelled outside the node loop.
+///
+/// A run that failed in a phase other than the node loop used to end the
+/// workflow on the spot. Ending it properly — failure hooks, the terminal
+/// `DbtStatus`, a cancellation reported as one — adds workflow commands after
+/// the point where a history recorded without the patch simply ends in
+/// failure, so replaying that history has to keep taking the short path. The
+/// marker is checked only where the new path would start, so a run that never
+/// reaches such an exit records nothing.
+pub const FAILURE_FINALIZATION_PATCH: &str = "finalize-runs-that-fail-outside-the-node-loop";
+
 /// How many running node labels the workflow details line spells out before
 /// summarising the rest, so the line stays short on a wide run.
 const DETAILS_MAX_RUNNING_LABELS: usize = 10;

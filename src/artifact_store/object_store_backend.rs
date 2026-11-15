@@ -4,7 +4,7 @@ use bytes::Bytes;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _};
 
-use super::ArtifactStore;
+use super::{ArtifactStore, InvalidArtifactPath};
 
 /// Parse an object store URL (`gs://bucket/prefix`, `s3://bucket/prefix`) and return
 /// the backend + prefix. Shared by both artifact store and model store.
@@ -92,10 +92,12 @@ impl ObjectStoreArtifactStore {
     fn resolve_for_read(&self, reference: &str) -> Result<Path> {
         let path = Path::from(reference);
         let prefix = Path::from(self.prefix.as_str());
-        anyhow::ensure!(
-            path.prefix_matches(&prefix),
-            "artifact reference resolves outside the artifact store: {reference}"
-        );
+        if !path.prefix_matches(&prefix) {
+            return Err(InvalidArtifactPath(format!(
+                "artifact reference resolves outside the artifact store: {reference}"
+            ))
+            .into());
+        }
         Ok(path)
     }
 }

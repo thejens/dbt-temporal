@@ -28,7 +28,9 @@ use temporalio_sdk_core::ephemeral_server::{
 };
 
 use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
-use dbt_temporal::types::{DbtRunInput, DbtRunOutput, RunStatusSnapshot};
+use dbt_temporal::types::{
+    DbtRunInput, DbtRunOutput, HookConfig, HookErrorMode, HooksConfig, RunStatusSnapshot,
+};
 
 /// History length at which the dev server suggests continue-as-new. Low enough
 /// that a run of a hundred-odd nodes crosses it.
@@ -75,12 +77,18 @@ struct Project {
 }
 
 fn write_project(models: &[(String, String)]) -> Result<Project> {
+    write_project_with("", models)
+}
+
+/// Like [`write_project`], with `extra_project_yml` appended to `dbt_project.yml`
+/// (for settings such as `on-run-start`).
+fn write_project_with(extra_project_yml: &str, models: &[(String, String)]) -> Result<Project> {
     let dir = tempfile::TempDir::new()?;
     let profiles = tempfile::TempDir::new()?;
     let artifacts = tempfile::TempDir::new()?;
     std::fs::write(
         dir.path().join("dbt_project.yml"),
-        format!("name: {PROJECT}\nversion: \"1.0.0\"\nprofile: {PROJECT}\n"),
+        format!("name: {PROJECT}\nversion: \"1.0.0\"\nprofile: {PROJECT}\n{extra_project_yml}\n"),
     )?;
     std::fs::create_dir_all(dir.path().join("models"))?;
     for (name, sql) in models {
@@ -215,10 +223,18 @@ async fn start(
     task_queue: &str,
     fail_fast: bool,
 ) -> Result<WorkflowHandle<Client, UntypedWorkflow>> {
+    start_with(client, task_queue, run_input(fail_fast)).await
+}
+
+async fn start_with(
+    client: &Client,
+    task_queue: &str,
+    input: DbtRunInput,
+) -> Result<WorkflowHandle<Client, UntypedWorkflow>> {
     client
         .start_workflow(
             UntypedWorkflow::new("dbt_run"),
-            RawValue::new(vec![run_input(fail_fast).as_json_payload()?]),
+            RawValue::new(vec![input.as_json_payload()?]),
             WorkflowStartOptions::new(task_queue, format!("e2e-{}", uuid::Uuid::new_v4())).build(),
         )
         .await
@@ -439,4 +455,165 @@ fn cancelling_a_running_workflow_ends_it_as_cancelled() -> Result<()> {
         );
         Ok(())
     })
+}
+
+/// A fire-and-forget `on_failure` hook, which shows in the history as a child
+/// workflow start without needing a worker for it.
+fn failure_hook_input() -> DbtRunInput {
+    let mut input = run_input(false);
+    input.hooks = Some(HooksConfig {
+        on_failure: vec![HookConfig {
+            workflow_type: "notify_failure".to_string(),
+            task_queue: "no-worker-listens-here".to_string(),
+            timeout_secs: None,
+            on_error: HookErrorMode::default(),
+            input: None,
+            fire_and_forget: true,
+        }],
+        ..HooksConfig::default()
+    });
+    input
+}
+
+async fn history_events(
+    handle: &WorkflowHandle<Client, UntypedWorkflow>,
+) -> Result<Vec<temporalio_common::protos::temporal::api::history::v1::HistoryEvent>> {
+    Ok(handle
+        .fetch_history(WorkflowFetchHistoryOptions::default())
+        .into_events()
+        .await?)
+}
+
+/// Every value `DbtStatus` took, in order, as the history recorded it.
+fn status_values(
+    events: &[temporalio_common::protos::temporal::api::history::v1::HistoryEvent],
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event.attributes.as_ref()? {
+            Attributes::UpsertWorkflowSearchAttributesEventAttributes(a) => {
+                let payload = a
+                    .search_attributes
+                    .as_ref()?
+                    .indexed_fields
+                    .get("DbtStatus")?;
+                serde_json::from_slice::<String>(&payload.data).ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn child_workflow_types(
+    events: &[temporalio_common::protos::temporal::api::history::v1::HistoryEvent],
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event.attributes.as_ref()? {
+            Attributes::StartChildWorkflowExecutionInitiatedEventAttributes(a) => {
+                Some(a.workflow_type.as_ref()?.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const FAILING_ON_RUN_START: &str = "on-run-start:\n  - \"select from from\"";
+
+/// A phase outside the node loop that fails ends the run as failed: the status
+/// attribute leaves `running`, and the `on_failure` hooks fire.
+#[test]
+fn a_failure_outside_the_node_loop_ends_the_run_as_failed() -> Result<()> {
+    let project = write_project_with(
+        FAILING_ON_RUN_START,
+        &[("ok".to_string(), "select 1 as id".to_string())],
+    )?;
+
+    let events = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, failure_hook_input()).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Failed(_))),
+            "the run should fail: {result:?}"
+        );
+        history_events(&handle).await
+    })?;
+
+    assert_eq!(status_values(&events), ["running", "failed"]);
+    assert_eq!(child_workflow_types(&events), ["notify_failure"]);
+    Ok(())
+}
+
+/// Cancelling while a phase outside the node loop runs ends the workflow as
+/// cancelled, marks it so, and does not treat it as a failure to report.
+#[test]
+fn cancelling_outside_the_node_loop_ends_the_run_as_cancelled() -> Result<()> {
+    // A DDL statement, so the warehouse has to finish the query rather than
+    // hand back a stream nobody reads.
+    let slow_hook = "on-run-start:\n  - \"create table slow_hook as select \
+                     sum(a.range * b.range) as total \
+                     from range(120000) as a, range(120000) as b\"";
+    let project =
+        write_project_with(slow_hook, &[("ok".to_string(), "select 1 as id".to_string())])?;
+
+    let events = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, failure_hook_input()).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        handle.cancel(WorkflowCancelOptions::default()).await?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_mins(1),
+            handle.get_result(WorkflowGetResultOptions::default()),
+        )
+        .await
+        .context("the cancelled workflow did not end")?;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Cancelled { .. })),
+            "expected cancellation: {result:?}"
+        );
+        history_events(&handle).await
+    })?;
+
+    assert_eq!(status_values(&events), ["running", "cancelled"]);
+    assert_eq!(child_workflow_types(&events), Vec::<String>::new());
+    Ok(())
+}
+
+/// Activities outside the node loop are scheduled with a bounded retry policy
+/// that treats permanent failure types as final.
+#[test]
+fn activities_outside_the_node_loop_carry_a_bounded_retry_policy() -> Result<()> {
+    let project = write_project(&[("ok".to_string(), "select 1 as id".to_string())])?;
+
+    let events = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, false).await?;
+        handle
+            .get_result(WorkflowGetResultOptions::default())
+            .await?;
+        history_events(&handle).await
+    })?;
+
+    for activity in ["plan_project", "store_artifacts"] {
+        let policy = events
+            .iter()
+            .find_map(|event| match event.attributes.as_ref()? {
+                Attributes::ActivityTaskScheduledEventAttributes(a)
+                    if a.activity_type.as_ref().is_some_and(|t| t.name == activity) =>
+                {
+                    Some(a.retry_policy.clone())
+                }
+                _ => None,
+            })
+            .with_context(|| format!("{activity} was not scheduled"))?
+            .with_context(|| format!("{activity} was scheduled without a retry policy"))?;
+        assert_eq!(policy.maximum_attempts, 3, "{activity}");
+        assert!(
+            policy
+                .non_retryable_error_types
+                .iter()
+                .any(|name| name == "DbtTemporalError::ArtifactStorePermanent"),
+            "{activity}: {:?}",
+            policy.non_retryable_error_types
+        );
+    }
+    Ok(())
 }

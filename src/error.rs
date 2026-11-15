@@ -78,7 +78,7 @@ impl DbtTemporalError {
     /// `non_retryable_error_types`: Temporal matches that list against the
     /// failure type that `type_name` stamps onto every activity failure. A test
     /// asserts the list agrees with `is_retryable` for every variant.
-    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 7] = [
+    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 8] = [
         "DbtTemporalError::Compilation",
         "DbtTemporalError::Configuration",
         "DbtTemporalError::ProjectNotFound",
@@ -106,6 +106,7 @@ impl DbtTemporalError {
             Self::Compilation(_)
             | Self::Configuration(_)
             | Self::ProjectNotFound(_)
+            | Self::MissingAdapterResponse(_)
             | Self::TestFailure { .. }
             | Self::UnitTestFailure { .. }
             | Self::StaleSource { .. } => false,

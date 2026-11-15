@@ -211,6 +211,8 @@ fn run_project_hooks_body(
             target: input.target.as_deref(),
             vars: &input.vars,
             full_refresh: input.full_refresh,
+            invocation_id: &input.invocation_id,
+            run_started_at: input.run_started_at,
         },
         state.adapter_engines.default_type(),
         &phase,
@@ -234,9 +236,6 @@ fn run_project_hooks_body(
         namespace_keys,
         None,
     );
-
-    // Ensure invocation_id is in the context — hook macros commonly use {{ invocation_id }}.
-    context.insert("invocation_id".to_owned(), minijinja::Value::from(input.invocation_id.clone()));
 
     // Inject `model` as an empty-attribute placeholder. Project-level hooks run before
     // any node executes (on-run-start) or after all finish (on-run-end), so `model` is
@@ -752,6 +751,7 @@ pass={{ ns.pass }} error={{ ns.error }}",
                 full_refresh: false,
                 retry_on_error: false,
                 prior_segments,
+                run_started_at: None,
             }
         }
 

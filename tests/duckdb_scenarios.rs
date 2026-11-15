@@ -685,6 +685,94 @@ async fn transitive_ephemeral_chain_is_inlined() {
     harness.run_ok("downstream").await;
 }
 
+// --- the run's identity in rendered SQL ---
+
+const FIRST_RUN: (&str, &str) =
+    ("11111111-1111-4111-8111-111111111111", "2026-03-04T05:06:07.250Z");
+const SECOND_RUN: (&str, &str) = ("22222222-2222-4222-8222-222222222222", "2027-08-09T10:11:12Z");
+
+/// The worker parses the project once and serves many runs, so a model that
+/// renders `run_started_at` or `invocation_id` must see the run it executes
+/// in, not the values the worker started with. `strftime` has to work on it,
+/// as it does in dbt.
+#[tokio::test]
+async fn a_model_renders_the_run_it_executes_in() {
+    let harness = Harness::build(&[(
+        "stamp",
+        "select '{{ run_started_at }}' as started, \
+         '{{ run_started_at.strftime(\"%Y-%m-%d\") }}' as day, \
+         '{{ invocation_id }}' as inv",
+    )])
+    .await;
+
+    let first = harness
+        .run_in_run("stamp", FIRST_RUN.0, FIRST_RUN.1)
+        .await
+        .compiled_code
+        .expect("compiled sql");
+    let second = harness
+        .run_in_run("stamp", SECOND_RUN.0, SECOND_RUN.1)
+        .await
+        .compiled_code
+        .expect("compiled sql");
+
+    assert!(
+        first.contains("2026-03-04 05:06:07.250000+00:00")
+            && first.contains("'2026-03-04' as day")
+            && first.contains(FIRST_RUN.0),
+        "first run saw the wrong identity: {first}"
+    );
+    assert!(
+        second.contains("2027-08-09 10:11:12+00:00")
+            && second.contains("'2027-08-09' as day")
+            && second.contains(SECOND_RUN.0),
+        "second run saw the wrong identity: {second}"
+    );
+    assert!(!second.contains(FIRST_RUN.0) && !first.contains(SECOND_RUN.0));
+}
+
+/// A macro reads the same globals as the model that calls it, so the values
+/// have to be set where cross-template calls see them, not just in the node's
+/// own context.
+#[tokio::test]
+async fn a_macro_called_from_a_model_sees_the_run_it_executes_in() {
+    let harness = Harness::build_files(&[
+        ("macros/stamp.sql", "{% macro stamp() %}{{ run_started_at.strftime('%Y') }}/{{ invocation_id }}{% endmacro %}"),
+        ("models/m.sql", "select '{{ stamp() }}' as s"),
+    ])
+    .await;
+
+    let compiled = harness
+        .run_in_run("m", SECOND_RUN.0, SECOND_RUN.1)
+        .await
+        .compiled_code
+        .expect("compiled sql");
+    assert!(compiled.contains(&format!("2027/{}", SECOND_RUN.0)), "{compiled}");
+}
+
+/// Project hooks render with the run's identity too, once per phase.
+#[tokio::test]
+async fn project_hooks_render_the_run_they_execute_in() {
+    let yml = "name: spike\nversion: \"1.0.0\"\nprofile: spike\n\
+               on-run-start:\n  \
+               - \"create or replace table seen_at_start as select '{{ run_started_at.strftime('%Y-%m-%d') }}' as day, '{{ invocation_id }}' as inv\"\n\
+               on-run-end:\n  \
+               - \"create or replace table seen_at_end as select '{{ run_started_at.strftime('%Y-%m-%d') }}' as day, '{{ invocation_id }}' as inv\"\n";
+    let harness = Harness::build_files(&[("dbt_project.yml", yml)]).await;
+
+    harness
+        .run_hooks_in_run("on_run_start", FIRST_RUN.0, FIRST_RUN.1)
+        .await;
+    assert_eq!(harness.query_scalar("select day from seen_at_start").await, "2026-03-04");
+    assert_eq!(harness.query_scalar("select inv from seen_at_start").await, FIRST_RUN.0);
+
+    harness
+        .run_hooks_in_run("on_run_end", SECOND_RUN.0, SECOND_RUN.1)
+        .await;
+    assert_eq!(harness.query_scalar("select day from seen_at_end").await, "2027-08-09");
+    assert_eq!(harness.query_scalar("select inv from seen_at_end").await, SECOND_RUN.0);
+}
+
 // --- re-running a model against an existing relation ---
 
 /// A worker outlives the run, and dbt-fusion's relation cache is

@@ -13,7 +13,6 @@
 //! scheduler's fixed order, and when several activities have completed by the
 //! time the workflow wakes, they are consumed in the order they were started.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
@@ -174,7 +173,7 @@ impl<'a> ReadyQueueRun<'a> {
         input: &'a DbtRunInput,
         retry_config: &'a RetryConfig,
         timeouts: &'a TimeoutConfig,
-        effective_env: &'a BTreeMap<String, String>,
+        run_scope: &RunScope,
         resume: &ResumePoint,
     ) -> Result<Self, SchedulerError> {
         // A node that finished in an earlier segment is already terminal in the
@@ -187,7 +186,7 @@ impl<'a> ReadyQueueRun<'a> {
             input,
             retry_config,
             timeouts,
-            run_scope: RunScope::new(input, effective_env),
+            run_scope: run_scope.clone(),
             scheduler,
             total_nodes: plan.levels.iter().map(Vec::len).sum(),
             log_lines: resume.log_lines.clone(),

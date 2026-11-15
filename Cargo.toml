@@ -109,6 +109,10 @@ dbt-runtime = { git = "https://github.com/dbt-labs/dbt", rev = "32b858a762d6d41c
 dbt-metadata = { git = "https://github.com/dbt-labs/dbt", rev = "32b858a762d6d41c4b254f837fc926587a14c8a2" }
 dbt-index-core = { git = "https://github.com/dbt-labs/dbt", rev = "32b858a762d6d41c4b254f837fc926587a14c8a2" }
 minijinja = { git = "https://github.com/dbt-labs/dbt", rev = "32b858a762d6d41c4b254f837fc926587a14c8a2" }
+# `run_started_at` is dbt's own timezone-aware datetime object, built the way
+# dbt's parse phase builds it.
+minijinja-contrib = { git = "https://github.com/dbt-labs/dbt", rev = "32b858a762d6d41c4b254f837fc926587a14c8a2", features = ["datetime", "timezone"] }
+chrono-tz = "0.10"
 dbt-yaml = "0.9.6"
 
 # Standard

@@ -395,6 +395,30 @@ impl Harness {
         self.execute(input).await
     }
 
+    /// Run a model as part of the run named `invocation_id` that started at
+    /// `run_started_at` (RFC 3339), the way the workflow dispatches it.
+    pub async fn run_in_run(
+        &self,
+        model: &str,
+        invocation_id: &str,
+        run_started_at: &str,
+    ) -> NodeExecutionResult {
+        let input = serde_json::from_value(serde_json::json!({
+            "unique_id": format!("model.{PROJECT}.{model}"),
+            "invocation_id": invocation_id,
+            "project": PROJECT,
+            "command": "build",
+            "run_started_at": run_started_at,
+        }))
+        .unwrap();
+        let result = self
+            .execute(input)
+            .await
+            .unwrap_or_else(|e| panic!("model {model} should succeed: {e:#}"));
+        assert_eq!(result.status, NodeStatus::Success, "{result:?}");
+        result
+    }
+
     /// Run one node under the span pair the `execute_node` activity opens, so
     /// the harness exercises the same tracing path a deployed worker does.
     async fn execute(
@@ -532,6 +556,21 @@ impl Harness {
         }))
         .unwrap();
         run_project_hooks_inner(&self.activities, input).await
+    }
+
+    /// Run the hooks for `phase` as part of the run named `invocation_id` that
+    /// started at `run_started_at` (RFC 3339).
+    pub async fn run_hooks_in_run(&self, phase: &str, invocation_id: &str, run_started_at: &str) {
+        let input = serde_json::from_value(serde_json::json!({
+            "phase": phase,
+            "project": PROJECT,
+            "invocation_id": invocation_id,
+            "run_started_at": run_started_at,
+        }))
+        .unwrap();
+        run_project_hooks_inner(&self.activities, input)
+            .await
+            .unwrap_or_else(|e| panic!("{phase} hooks should succeed: {e:#}"));
     }
 
     /// Run hooks for `phase`, expecting failure, returning the classified error.

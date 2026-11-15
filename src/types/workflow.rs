@@ -425,6 +425,11 @@ pub struct NodeExecutionInput {
     /// which dbt's incremental materialization branches on.
     #[serde(default)]
     pub full_refresh: bool,
+    /// When the run started, for the `run_started_at` Jinja global. Absent in
+    /// an input recorded by an earlier release, in which case the render keeps
+    /// the worker's parse-time value.
+    #[serde(default)]
+    pub run_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Phase of a `dbt_project.yml` lifecycle hook.
@@ -486,6 +491,11 @@ pub struct ProjectHooksInput {
     /// last leg.
     #[serde(default)]
     pub prior_segments: Vec<String>,
+    /// When the run started, for the `run_started_at` Jinja global. Absent in
+    /// an input recorded by an earlier release, in which case the render keeps
+    /// the worker's parse-time value.
+    #[serde(default)]
+    pub run_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Result of executing a single node.

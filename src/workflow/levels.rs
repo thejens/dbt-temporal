@@ -9,7 +9,7 @@
 // this same lint for the same reason.
 #![allow(clippy::future_not_send)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use temporalio_common::protos::coresdk::workflow_commands::ActivityCancellationType;
@@ -97,14 +97,11 @@ pub async fn execute_levels(
     plan: &ExecutionPlan,
     retry_config: &RetryConfig,
     timeouts: &TimeoutConfig,
-    effective_env: &BTreeMap<String, String>,
+    run_scope: &RunScope,
     resume: ResumePoint,
 ) -> Result<LevelExecutionOutcome, WorkflowTermination> {
     let mut node_status = resume.node_status;
     upsert_node_status(ctx, &node_status)?;
-
-    // Stated once per run: every node's activity input carries a copy.
-    let run_scope = RunScope::new(input, effective_env);
 
     let total_nodes: usize = plan.levels.iter().map(Vec::len).sum();
     let mut log_lines = resume.log_lines;
@@ -137,7 +134,7 @@ pub async fn execute_levels(
             input,
             retry_config,
             timeouts,
-            run_scope: &run_scope,
+            run_scope,
             total_nodes,
             log_lines: &mut log_lines,
             all_results: &mut all_results,

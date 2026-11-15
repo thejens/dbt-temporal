@@ -845,6 +845,8 @@ fn execute_node_body(
         target: input.target.as_deref(),
         vars: &input.vars,
         full_refresh: input.full_refresh,
+        invocation_id: &input.invocation_id,
+        run_started_at: input.run_started_at,
     };
     let mut render_env =
         render_env::prepare_render_env(state, &overrides, base.adapter, unique_id)?;

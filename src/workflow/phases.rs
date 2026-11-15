@@ -24,11 +24,11 @@ use temporalio_sdk::{
 use crate::activities::DbtActivities;
 use crate::hooks::execute_hooks;
 use crate::types::{
-    CommandMemo, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload,
-    HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus, ProjectChecksInput,
-    ProjectChecksOutput, ProjectHookPhase, ProjectHooksInput, ResolveConfigInput,
-    ResolvedProjectConfig, RetryConfig, RunOutcome, RunSegmentState, SaveSegmentStateInput,
-    StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
+    CommandMemo, CompactProjectHooksInput, DbtRunInput, DbtRunOutput, ExecutionPlan, HookError,
+    HookEvent, HookPayload, HooksConfig, LoadSegmentStateInput, NodeExecutionResult, NodeStatus,
+    ProjectChecksInput, ProjectChecksOutput, ProjectHookPhase, ProjectHooksActivityInput,
+    ResolveConfigInput, ResolvedProjectConfig, RetryConfig, RunOutcome, RunScope, RunSegmentState,
+    SaveSegmentStateInput, StoreArtifactsInput, StoreArtifactsOutput, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -163,19 +163,16 @@ pub fn build_project_hooks_input(
     node_results: &[NodeExecutionResult],
     prior_segments: &[String],
     retry_config: &RetryConfig,
-) -> ProjectHooksInput {
-    ProjectHooksInput {
+) -> ProjectHooksActivityInput {
+    ProjectHooksActivityInput::compact(CompactProjectHooksInput {
         phase,
         project: plan.project.clone(),
         invocation_id: plan.invocation_id.clone(),
-        env: effective_env.clone(),
-        target: input.target.clone(),
+        run: RunScope::new(input, effective_env),
         node_results: node_results.to_vec(),
-        vars: input.vars.clone(),
-        full_refresh: input.full_refresh,
         retry_on_error: retry_config.project_hooks.allows(phase),
         prior_segments: prior_segments.to_vec(),
-    }
+    })
 }
 
 /// Spill run state for a continue-as-new handover, returning its store path.
@@ -956,7 +953,8 @@ mod tests {
             &[], // on-run-start has no results yet
             &[],
             &RetryConfig::default(),
-        );
+        )
+        .resolve();
         assert_eq!(phs.phase, ProjectHookPhase::OnRunStart);
         assert_eq!(phs.project, "shop");
         assert_eq!(phs.invocation_id, "inv-1");
@@ -992,7 +990,8 @@ mod tests {
             &results,
             &[],
             &RetryConfig::default(),
-        );
+        )
+        .resolve();
         assert_eq!(phs.phase, ProjectHookPhase::OnRunEnd);
         assert_eq!(phs.node_results.len(), 1);
         assert_eq!(phs.prior_segments, Vec::<String>::new());
@@ -1011,7 +1010,8 @@ mod tests {
             &[],
             &prior,
             &RetryConfig::default(),
-        );
+        )
+        .resolve();
         assert_eq!(phs.prior_segments, prior);
     }
 
@@ -1364,7 +1364,8 @@ mod tests {
             &[],
             &[],
             &retry,
-        );
+        )
+        .resolve();
         assert!(start.retry_on_error);
 
         let end = build_project_hooks_input(
@@ -1375,7 +1376,8 @@ mod tests {
             &[],
             &[],
             &retry,
-        );
+        )
+        .resolve();
         assert!(!end.retry_on_error);
     }
 }

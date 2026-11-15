@@ -9,26 +9,10 @@ use temporalio_sdk::{MemoValue, WorkflowTermination};
 
 use crate::error::DbtTemporalError;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, FreshnessGrade, NodeExecutionResult, NodeStatus, NodeStatusTree,
-    RetryConfig,
+    ExecutionPlan, FreshnessGrade, NodeExecutionResult, NodeStatus, NodeStatusTree, RetryConfig,
 };
 
 use super::DbtRunWorkflow;
-
-/// Build the per-run effective env starting from `input.env` and exposing the
-/// workflow input itself as `_` (mirroring bash's `$_`) so models and macros
-/// can read the full payload via `env_var('_')`.
-///
-/// Always overrides any caller-supplied `_` because the only meaningful value
-/// here is the actual payload that started this workflow. `serde_json::to_string`
-/// is infallible on `DbtRunInput`.
-pub fn build_effective_env(input: &DbtRunInput) -> BTreeMap<String, String> {
-    let mut env = input.env.clone();
-    if let Ok(json) = serde_json::to_string(input) {
-        env.insert("_".to_string(), json);
-    }
-    env
-}
 
 /// Build the initial node status tree from the execution plan, with all nodes set to Pending.
 pub fn build_node_status_tree(plan: &ExecutionPlan) -> NodeStatusTree {
@@ -686,7 +670,7 @@ pub fn build_retry_policy(config: &RetryConfig) -> RetryPolicy {
 mod tests {
     use super::*;
     use crate::error::truncate_at_char_boundary;
-    use crate::types::NodeInfo;
+    use crate::types::{DbtRunInput, NodeInfo};
 
     fn test_plan(
         levels: Vec<Vec<&str>>,
@@ -922,7 +906,7 @@ mod tests {
             retry_from: None,
             state_manifest_ref: None,
         };
-        let env = build_effective_env(&input);
+        let env = input.base_env();
         assert_eq!(env.get("API_TOKEN").map(String::as_str), Some("secret-123"));
     }
 
@@ -952,7 +936,7 @@ mod tests {
             retry_from: None,
             state_manifest_ref: None,
         };
-        let env = build_effective_env(&input);
+        let env = input.base_env();
         let underscore = env
             .get("_")
             .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;
@@ -989,7 +973,7 @@ mod tests {
             retry_from: None,
             state_manifest_ref: None,
         };
-        let env = build_effective_env(&input);
+        let env = input.base_env();
         let underscore = env
             .get("_")
             .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;

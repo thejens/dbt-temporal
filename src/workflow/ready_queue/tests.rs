@@ -341,6 +341,26 @@ fn a_resumed_run_carries_statuses_failures_and_counter() {
     assert_eq!(run.scheduler.terminal_status("b"), Some(NodeStatus::Success));
 }
 
+/// The activity derives its env, command and vars from the run scope the
+/// scheduler captured, so what a node resolves to must be what the workflow
+/// holds — including entries a `pre_run` hook added after the input was built.
+#[test]
+fn a_nodes_activity_input_resolves_to_the_runs_effective_env() {
+    let mut f = fixture();
+    f.env = f.input.base_env();
+    f.env.insert("FROM_HOOK".to_string(), "1".to_string());
+    let run = run_of(&f);
+
+    let resolved =
+        crate::workflow::levels::node_execution_input(&f.plan, &run.run_scope, "a").resolve();
+
+    assert_eq!(resolved.unique_id, "a");
+    assert_eq!(resolved.invocation_id, f.plan.invocation_id);
+    assert_eq!(resolved.project, f.plan.project);
+    assert_eq!(resolved.command, "run");
+    assert_eq!(resolved.env, f.env);
+}
+
 #[test]
 fn a_plan_with_a_cycle_is_refused_so_the_caller_can_fall_back() {
     let mut f = fixture();

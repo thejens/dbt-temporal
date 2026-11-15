@@ -302,13 +302,15 @@ the determinism note below if the change touches `src/workflow/`.
 
 ### Workflow changes and in-flight runs
 
-A Temporal workflow is replayed against its recorded history. `dbt_run` carries
-no `patched()` / `deprecate_patch()` version markers, so any change to the
-*shape* of the workflow — the order of activities, adding or removing a phase,
-what gets scheduled per level — makes an in-flight run fail on replay with a
-non-determinism error once it lands on a worker running the new binary. Changes
-confined to activity bodies (`src/activities/`) are safe: activities are not
-replayed.
+A Temporal workflow is replayed against its recorded history. Changes to the
+*shape* of `dbt_run` that have shipped so far (readiness scheduling, memo
+cadence) are guarded by `patched()` markers, so a run recorded by an earlier
+release replays on the code path that recorded it. A change that is not guarded
+this way — reordering activities, adding or removing a phase — makes an
+in-flight run fail on replay with a non-determinism error once it lands on a
+worker running the new binary. The markers only protect upgrades: a run started
+on a newer release cannot be replayed by an older worker. Changes confined to
+activity bodies (`src/activities/`) are safe: activities are not replayed.
 
 Two ways to stay safe:
 
@@ -328,6 +330,23 @@ Two ways to stay safe:
 
    A wide `build` can run for hours, so option 1 is usually the better answer
    for anything but a hand-managed deployment.
+
+### Activity input shape and mixed-version workers
+
+The `execute_node` and `run_project_hooks` activities receive the run's input
+once (`{"compact": {"run": {"input": ..., "extra_env": ...}, ...}}`) and derive
+the env, vars, target and command from it, instead of repeating them per node in
+workflow history. An activity still accepts the flat shape that earlier
+releases recorded, so runs in flight across an upgrade finish normally.
+
+The reverse does not hold, by design: a worker from a release that predates the
+compact shape cannot parse it and fails the attempt with a missing-field error
+rather than running the node with an empty env. Temporal retries that attempt
+under the node's retry policy (`max_attempts`, default 3), so a node scheduled
+by a new worker and picked up by an old one succeeds only if a retry reaches an
+upgraded worker in time; otherwise the node fails and the run reports it. Keep
+old and new workers off the same task queue while rolling out, or use
+`TEMPORAL_DEPLOYMENT_NAME` so a run stays on the version that started it.
 
 **Model file changes** — two strategies:
 

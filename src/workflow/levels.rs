@@ -17,8 +17,8 @@ use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowTermination};
 
 use crate::activities::DbtActivities;
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionInput, NodeExecutionResult, NodeStatus,
-    NodeStatusTree, RetryConfig, TimeoutConfig,
+    CompactNodeInput, DbtRunInput, ExecutionPlan, NodeActivityInput, NodeExecutionResult,
+    NodeStatus, NodeStatusTree, RetryConfig, RunScope, TimeoutConfig,
 };
 
 use super::DbtRunWorkflow;
@@ -71,7 +71,7 @@ struct LevelState<'a> {
     input: &'a DbtRunInput,
     retry_config: &'a RetryConfig,
     timeouts: &'a TimeoutConfig,
-    effective_env: &'a BTreeMap<String, String>,
+    run_scope: &'a RunScope,
     total_nodes: usize,
     log_lines: &'a mut Vec<String>,
     all_results: &'a mut Vec<NodeExecutionResult>,
@@ -97,6 +97,9 @@ pub async fn execute_levels(
 ) -> Result<LevelExecutionOutcome, WorkflowTermination> {
     let mut node_status = resume.node_status;
     upsert_node_status(ctx, &node_status)?;
+
+    // Stated once per run: every node's activity input carries a copy.
+    let run_scope = RunScope::new(input, effective_env);
 
     let total_nodes: usize = plan.levels.iter().map(Vec::len).sum();
     let mut log_lines = resume.log_lines;
@@ -124,7 +127,7 @@ pub async fn execute_levels(
             input,
             retry_config,
             timeouts,
-            effective_env,
+            run_scope: &run_scope,
             total_nodes,
             log_lines: &mut log_lines,
             all_results: &mut all_results,
@@ -291,7 +294,7 @@ async fn execute_one_level(
     // First pass: classify each node as skip-due-to-upstream-failure or schedule.
     // Must collect schedule list before any execute_activity call (which borrows
     // ctx) so we can upsert memo first.
-    let mut nodes_to_schedule: Vec<(String, NodeExecutionInput, Option<String>)> = Vec::new();
+    let mut nodes_to_schedule: Vec<(String, NodeActivityInput, Option<String>)> = Vec::new();
     for unique_id in level {
         if is_blocked_by_failed_upstream(state.plan, unique_id, state.failed_nodes) {
             *state.node_counter += 1;
@@ -320,8 +323,7 @@ async fn execute_one_level(
 
         set_node_status(state.node_status, unique_id, NodeStatus::Running);
 
-        let node_input =
-            node_execution_input(state.plan, state.input, state.effective_env, unique_id);
+        let node_input = node_execution_input(state.plan, state.run_scope, unique_id);
 
         // Per-node labelling in Temporal UI: activity_id for event details,
         // summary for the Gantt chart display.
@@ -372,7 +374,7 @@ async fn execute_one_level(
 
     // Take the next node off the queue and start it, if the window has room.
     let fill_window =
-        |pending: &mut std::collections::VecDeque<(String, NodeExecutionInput, Option<String>)>,
+        |pending: &mut std::collections::VecDeque<(String, NodeActivityInput, Option<String>)>,
          futures: &mut std::collections::VecDeque<_>| {
             for (unique_id, node_input, activity_label) in take_startable(pending, futures.len()) {
                 let future = ctx.execute_activity(
@@ -477,26 +479,19 @@ async fn execute_one_level(
 /// The activity input for one node.
 ///
 /// Shared by every scheduling path so a node runs with the same inputs
-/// whichever order it was started in.
+/// whichever order it was started in. The run-level data travels once, inside
+/// `run_scope`; the activity derives env, vars, target and the rest from it.
 pub(super) fn node_execution_input(
     plan: &ExecutionPlan,
-    input: &DbtRunInput,
-    effective_env: &BTreeMap<String, String>,
+    run_scope: &RunScope,
     unique_id: &str,
-) -> NodeExecutionInput {
-    NodeExecutionInput {
-        unique_id: unique_id.to_string(),
-        invocation_id: plan.invocation_id.clone(),
-        project: plan.project.clone(),
-        env: effective_env.clone(),
-        target: input.target.clone(),
-        command: input.command.clone(),
-        defer_manifest_ref: input.defer_manifest_ref.clone(),
-        event_time_start: input.event_time_start.clone(),
-        event_time_end: input.event_time_end.clone(),
-        vars: input.vars.clone(),
-        full_refresh: input.full_refresh,
-    }
+) -> NodeActivityInput {
+    NodeActivityInput::compact(CompactNodeInput::new(
+        unique_id,
+        &plan.invocation_id,
+        &plan.project,
+        run_scope,
+    ))
 }
 
 /// Temporal options for one node's activity: timeouts, heartbeat, retry policy,

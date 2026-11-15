@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{PollerAutoscalingConfig, TemporalMetricsConfig, WorkerTuningConfig};
+use super::{PollerAutoscalingConfig, Secret, TemporalMetricsConfig, WorkerTuningConfig};
 
 /// Parse `TEMPORAL_SEARCH_ATTRIBUTES` env var as a JSON object of string key-value pairs.
 /// Example: `TEMPORAL_SEARCH_ATTRIBUTES={"env":"prod","team":"data-eng"}`
@@ -146,13 +146,13 @@ pub fn parse_temporal_metrics() -> Result<TemporalMetricsConfig> {
 }
 
 /// Parse comma-separated `key=value` pairs (e.g. OTLP auth headers).
-fn parse_header_pairs(raw: &str) -> Result<BTreeMap<String, String>> {
+fn parse_header_pairs(raw: &str) -> Result<BTreeMap<String, Secret>> {
     let mut headers = BTreeMap::new();
     for pair in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (k, v) = pair
             .split_once('=')
             .ok_or_else(|| anyhow!("invalid header pair '{pair}' (expected key=value)"))?;
-        headers.insert(k.trim().to_string(), v.trim().to_string());
+        headers.insert(k.trim().to_string(), Secret::new(v.trim()));
     }
     Ok(headers)
 }
@@ -658,8 +658,8 @@ mod tests {
                 assert_eq!(url, "http://collector:4317");
                 assert!(!use_http);
                 assert_eq!(headers.len(), 2);
-                assert_eq!(headers.get("x-auth").map(String::as_str), Some("secret"));
-                assert_eq!(headers.get("x-team").map(String::as_str), Some("data"));
+                assert_eq!(headers.get("x-auth").map(Secret::expose), Some("secret"));
+                assert_eq!(headers.get("x-team").map(Secret::expose), Some("data"));
                 Ok(())
             },
         )

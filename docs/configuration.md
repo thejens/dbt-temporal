@@ -94,12 +94,15 @@ Entries in `DBT_PROJECT_DIRS` can be local filesystem paths or remote URLs. Path
 |--------|-------------|---------|
 | `git+https://` | none | `git+https://github.com/org/dbt-models.git#main` |
 | `git+ssh://` | none | `git+ssh://git@github.com/org/dbt-models.git#main` |
+| `git+file://` | none | `git+file:///srv/mirrors/dbt-models.git#main` |
 | `gs://` | `gcs` | `gs://my-bucket/dbt-models` |
 | `s3://` | `aws` | `s3://my-bucket/dbt-models` |
 
 The feature flags apply only to builds from source; the released packages and container images include both.
 
 Git sources shell out to the `git` CLI (and `ssh` for `git+ssh://`), so the worker needs them on its `PATH`. The default container image includes both. The `-distroless` image does not; with it, bake the project into the image, mount it, or fetch it from `gs://` / `s3://`.
+
+Git URLs must be absolute (`scp`-style `git@host:path` is not accepted), and only the `https`, `ssh` and `file` transports are allowed: the worker validates the scheme at start-up and sets `GIT_ALLOW_PROTOCOL` for every git it runs, so `ext::`, `git://` and plain `http://` are refused. A repository URL or rev beginning with `-` is refused as well.
 
 The `#rev` suffix is required for git URLs and names what to check out: a branch, a tag, or a full 40-character commit id. A branch is read once, at worker start-up, so workers started at different times can run different commits; pin a tag or commit id to make a deploy reproducible and change it deliberately. Abbreviated commit ids are not accepted, because they are indistinguishable from branch names. An optional `:subdir` can be appended to point at a subdirectory within the repo:
 

@@ -186,8 +186,21 @@ const RETRYABLE_SQLSTATE_CLASSES: &[&str] = &[
     "08", // connection exception
     "40", // transaction rollback — deadlock (40P01), serialization failure (40001)
     "53", // insufficient resources
-    "57", // operator intervention — admin shutdown, cannot connect now, query canceled
+    "57", // operator intervention — admin/crash shutdown, cannot connect now; see NON_RETRYABLE_SQLSTATES
     "58", // system error (I/O)
+];
+
+/// SQLSTATEs inside a retryable class that are nonetheless permanent.
+///
+/// Checked before [`RETRYABLE_SQLSTATE_CLASSES`]. Class 57 (operator
+/// intervention) mixes server restarts, which a retry outlasts, with these:
+const NON_RETRYABLE_SQLSTATES: &[&str] = &[
+    // query_canceled — also what a statement timeout reports. The retry runs
+    // the same statement against the same limit and is cancelled at the same
+    // point, so it burns every attempt; a user-initiated cancel should not be
+    // re-issued either.
+    "57014", // database_dropped — the database is gone for good, not restarting.
+    "57P04",
 ];
 
 /// Azure SQL Database / SQL Server transient error numbers, surfaced as ADBC
@@ -234,10 +247,6 @@ const TRANSIENT_MESSAGE_SIGNATURES: &[&str] = &[
     "backenderror",
     "internal error",
     "internalerror",
-    "request timeout",
-    "operation timed out",
-    "timed out",
-    "timeout",
     // HTTP status hints — precise phrases, not bare numbers
     "429 too many",
     "500 internal server",
@@ -250,6 +259,43 @@ const TRANSIENT_MESSAGE_SIGNATURES: &[&str] = &[
     "http 503",
     "http 504",
 ];
+
+/// Lowercased phrases for a timeout while reaching or waiting on the service,
+/// as drivers and warehouses word it. Matched on word boundaries by
+/// [`contains_phrase`]: a bare `timeout` or `timed out` also appears inside
+/// identifiers (`timeout_ms`, `session_timed_out`) in otherwise permanent
+/// errors such as a syntax error or a missing column. Statement and query
+/// timeouts are left out on purpose: the retry would hit the same limit.
+const TRANSIENT_TIMEOUT_PHRASES: &[&str] = &[
+    "connection timed out",
+    "connection timeout",
+    "connect timed out",
+    "connect timeout",
+    "read timed out",
+    "read timeout",
+    "write timed out",
+    "write timeout",
+    "handshake timed out",
+    "handshake timeout",
+    "request timed out",
+    "request timeout",
+    "operation timed out",
+    "gateway timeout",
+    "i/o timeout",
+    "timeout expired",
+    "timed out waiting for",
+];
+
+/// Whether `phrase` occurs in `haystack` not embedded in a longer word or
+/// identifier (letters, digits and `_` count as word characters).
+fn contains_phrase(haystack: &str, phrase: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    haystack.match_indices(phrase).any(|(start, matched)| {
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[start + matched.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
 
 /// Decide whether a warehouse execution failure is transient (worth a Temporal
 /// retry). Pure over the fields recovered from an `AdapterError`, so it can be
@@ -276,12 +322,16 @@ fn adapter_failure_is_transient(
     if let Some(class) = sqlstate.get(..2)
         && class != "00"
     {
-        return RETRYABLE_SQLSTATE_CLASSES.contains(&class);
+        return !NON_RETRYABLE_SQLSTATES.contains(&sqlstate)
+            && RETRYABLE_SQLSTATE_CLASSES.contains(&class);
     }
     let lower = message.to_ascii_lowercase();
     TRANSIENT_MESSAGE_SIGNATURES
         .iter()
         .any(|sig| lower.contains(sig))
+        || TRANSIENT_TIMEOUT_PHRASES
+            .iter()
+            .any(|phrase| contains_phrase(&lower, phrase))
 }
 
 /// `dbt_error::ErrorCode` variants that represent an infrastructure-level,
@@ -598,6 +648,75 @@ mod tests {
                 classify_adapter_execution_error(&ae, "ctx").is_retryable(),
                 "sqlstate {} should retry",
                 std::str::from_utf8(ss).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn class_57_codes_that_a_retry_cannot_fix_do_not_retry() {
+        // 57014 is what a statement timeout reports: the retry hits the same
+        // limit. 57P04 means the database was dropped.
+        for ss in [b"57014", b"57P04"] {
+            let ae = adapter(
+                AdapterErrorKind::SqlExecution,
+                "canceling statement due to statement timeout",
+                *ss,
+                None,
+            );
+            assert!(
+                !classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "sqlstate {} should not retry",
+                std::str::from_utf8(ss).unwrap()
+            );
+        }
+        // The rest of the class is a server going away or not yet up.
+        for ss in [b"57000", b"57P01", b"57P02", b"57P03", b"57P05"] {
+            let ae = adapter(AdapterErrorKind::SqlExecution, "boom", *ss, None);
+            assert!(
+                classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "sqlstate {} should retry",
+                std::str::from_utf8(ss).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_messages_from_drivers_retry() {
+        for msg in [
+            "connection timed out",
+            "Connection timeout expired",
+            "dial tcp 10.0.0.1:5432: i/o timeout",
+            "java.net.SocketTimeoutException: Read timed out",
+            "Read timed out",
+            "Operation timed out after 30000 milliseconds",
+            "504 Gateway Timeout",
+            "Request Timeout",
+            "Timeout expired.  The timeout period elapsed prior to completion",
+            "timed out waiting for a connection from the pool",
+            "error: connect timeout (os error 110)",
+        ] {
+            let ae = adapter(AdapterErrorKind::Driver, msg, *b"00000", None);
+            assert!(
+                classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "{msg:?} should retry"
+            );
+        }
+    }
+
+    #[test]
+    fn identifiers_containing_timeout_do_not_make_an_error_transient() {
+        for msg in [
+            "syntax error at or near \"timeout_ms\"",
+            "Binder Error: Referenced column \"timeout\" not found in FROM clause",
+            "column session_timed_out does not exist",
+            "Catalog Error: Table with name connection_timeout_log does not exist",
+            "relation \"read_timeouts\" does not exist",
+            "Parser Error: unexpected token near timed out_at",
+        ] {
+            let ae = adapter(AdapterErrorKind::Driver, msg, *b"00000", None);
+            assert!(
+                !classify_adapter_execution_error(&ae, "ctx").is_retryable(),
+                "{msg:?} should not retry"
             );
         }
     }

@@ -56,7 +56,7 @@ pub fn build_telemetry_options(config: &DbtTemporalConfig) -> Result<TelemetryOp
                     .headers(
                         headers
                             .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .map(|(k, v)| (k.clone(), v.expose().to_string()))
                             .collect(),
                     )
                     .protocol(protocol)
@@ -307,6 +307,7 @@ fn build_tuner(config: &DbtTemporalConfig) -> WorkerTuner {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::config::Secret;
 
     #[test]
     fn identity_names_the_host() {
@@ -397,7 +398,7 @@ mod tests {
         config.temporal_metrics = TemporalMetricsConfig::Otlp {
             url: "http://127.0.0.1:4317".into(),
             use_http: false,
-            headers: std::collections::BTreeMap::from([("x-key".to_string(), "v".to_string())]),
+            headers: std::collections::BTreeMap::from([("x-key".to_string(), Secret::new("v"))]),
         };
         let opts = build_telemetry_options(&config)?;
         assert!(opts.metrics.is_some());
@@ -451,7 +452,7 @@ mod tests {
         // API-key auth still requires the encrypted transport, so we wrap it in
         // a TlsOptions even though no client cert is set.
         let mut config = test_config();
-        config.temporal_api_key = Some("secret".into());
+        config.temporal_api_key = Some(Secret::new("secret"));
         let opts = build_tls_options(&config)?;
         let opts = opts.expect("expected TlsOptions for api-key auth");
         assert!(opts.client_tls_options.is_none());

@@ -4,8 +4,9 @@
 //! `execute_node` and `run_project_hooks` both need the same thing: a private
 //! clone of the worker's Jinja environment with this workflow's overrides
 //! applied, bound to an adapter that may itself have been rebuilt from
-//! per-workflow credentials. They used to build it separately and had already
-//! drifted (only the hooks path registered the `execute` global).
+//! per-workflow credentials. Building it in one place keeps the two paths from
+//! drifting apart (a global registered on only one of them would behave
+//! differently in hooks and in models).
 //!
 //! Everything here is per-activity by construction — the worker's parsed
 //! project in `WorkerState` is never mutated, so concurrent workflows stay

@@ -616,7 +616,7 @@ async fn a_project_override_of_a_built_in_materialization_may_store_no_result() 
 async fn ephemeral_model_is_inlined_as_a_cte() {
     // Ephemeral models never materialize as their own relation — they're
     // inlined as a CTE into whatever references them (inject_ephemeral_ctes /
-    // persist_ephemeral_chain in node_helpers.rs). Only the referencing
+    // persist_ephemeral_chain in node_helpers/ephemeral). Only the referencing
     // model's result should exist; querying the ephemeral's own name directly
     // must fail since it was never created as a table/view.
     let harness = Harness::build(&[

@@ -39,7 +39,7 @@ use crate::types::{
     StoreArtifactsOutput,
 };
 
-/// Shared state for all dbt activities, replacing the old `app_data()` DI pattern.
+/// Shared state for all dbt activities.
 ///
 /// Created once at worker startup and registered via `worker.register_activities(Arc::new(..))`.
 /// Each `#[activity]` method accesses shared state through `self: Arc<Self>`.

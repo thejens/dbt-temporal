@@ -255,6 +255,18 @@ impl Harness {
             .expect("project registered")
     }
 
+    /// The `(schema, alias)` the project's parse gave a node.
+    pub fn node_relation(&self, unique_id: &str) -> (String, String) {
+        let node = self
+            .state()
+            .resolver_state
+            .nodes
+            .get_node(unique_id)
+            .unwrap_or_else(|| panic!("{unique_id} is not in the project"));
+        let base = node.base();
+        (base.schema.clone(), base.alias.clone())
+    }
+
     /// Run a statement for its effect — DDL, or seeding a table the project
     /// treats as a pre-existing source.
     pub async fn exec(&self, sql: &str) {

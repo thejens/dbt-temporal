@@ -54,7 +54,7 @@ Not planned:
 1. Read what dbt v2 does in its source at the pinned release, not in the
    documentation: the two disagree in places, and the worker embeds the source.
 2. Decide whether the feature changes the plan, the render context, or both.
-   Plan changes belong in `src/activities/plan.rs` and `selectors/`; render
+   Plan changes belong in `src/activities/plan/` and `selectors/`; render
    changes in `src/activities/render_env.rs` and `execute_node/`.
 3. A new input field goes on `DbtRunInput` and in
    [workflow input](workflow-input.md). The input does not reject unknown

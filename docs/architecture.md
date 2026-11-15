@@ -145,8 +145,8 @@ nothing.
 | [`helpers.rs`](../src/workflow/helpers.rs) | Re-exports the pure helpers in `helpers/`: `patches` (patch ids), `memo`, `status`, `labels`, `log_lines`, `blocking`, `results`, `clock`, `retry`, `activity_errors` |
 | **Activities** (`src/activities/`) | |
 | [`mod.rs`](../src/activities/mod.rs) | `DbtActivities` — `Arc<Self>` shared state, `#[activities]` registration |
-| [`plan.rs`](../src/activities/plan.rs) | `plan_project` — select nodes, build DAG levels, serialize manifest |
-| [`execute_node.rs`](../src/activities/execute_node.rs) | `execute_node` — compile + render a single node; [`execute_node/`](../src/activities/execute_node/) holds freshness, unit tests and SQL rewriting |
+| [`plan/`](../src/activities/plan/) | `plan_project` — select nodes, build DAG levels, serialize manifest; one module each for command-level selection, parse-time vars, retry-from-failure, priorities, node info and search attributes |
+| [`execute_node/`](../src/activities/execute_node/) | `execute_node` — compile + render a single node; `body.rs` lists the phases (`compile.rs`, `materialize.rs`, `verdict.rs`, `outcome.rs`), and the directory also holds freshness, unit tests (`unit_test/`) and SQL rewriting |
 | [`render_env.rs`](../src/activities/render_env.rs) | Per-activity Jinja environment + adapter setup |
 | [`retry.rs`](../src/activities/retry.rs) | Retry classification at the activity boundary |
 | [`project_checks/`](../src/activities/project_checks/) | `run_project_checks` — the project-check gate |
@@ -155,9 +155,9 @@ nothing.
 | [`catalog.rs`](../src/activities/catalog.rs) | `catalog.json` generation (`WRITE_CATALOG`) |
 | [`segment_state.rs`](../src/activities/segment_state.rs) | Run state handed across a continue-as-new boundary |
 | [`heartbeat.rs`](../src/activities/heartbeat.rs) | Periodic `record_heartbeat` ticker for long-running activities |
-| [`node_helpers.rs`](../src/activities/node_helpers.rs) | Materialization template lookup + rendering helpers |
+| [`node_helpers/`](../src/activities/node_helpers/) | Materialization template lookup + rendering, ephemeral CTE injection, result-store extraction, Jinja global patching |
 | [`node_serialization.rs`](../src/activities/node_serialization.rs) | Serialization helpers for passing nodes across activity boundaries |
-| [`dag.rs`](../src/activities/dag.rs) | DAG construction and topological level computation |
+| [`dag/`](../src/activities/dag/) | DAG construction and topological level computation |
 | [`selectors/`](../src/activities/selectors/) | Node selector evaluation (`--select` / `--exclude`) |
 | [`indirect.rs`](../src/activities/indirect.rs) | Indirect test selection (a selected model's tests join the run) |
 | [`node_telemetry.rs`](../src/activities/node_telemetry.rs) | dbt-native telemetry spans per node |

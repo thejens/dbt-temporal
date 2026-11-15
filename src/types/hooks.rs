@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::workflow::{DbtRunInput, DbtRunOutput, ExecutionPlan, ProjectHookPhase};
+use super::{DbtRunInput, DbtRunOutput, ExecutionPlan, ProjectHookPhase};
 
 /// Lifecycle event for a user-defined hook in `dbt_temporal.yml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

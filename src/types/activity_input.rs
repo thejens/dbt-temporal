@@ -32,7 +32,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
-use super::workflow::{
+use super::{
     DbtRunInput, NodeExecutionInput, NodeExecutionResult, ProjectHookPhase, ProjectHooksInput,
 };
 

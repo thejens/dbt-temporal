@@ -19,7 +19,7 @@ use super::dag::{
 };
 use super::execute_node::freshness;
 use super::indirect::{IndirectSelection, expand_indirect_selection};
-use super::selectors::apply_selectors;
+use super::selectors::{apply_selectors, selectors_use_state};
 
 mod manifest;
 pub use manifest::ManifestCache;
@@ -349,7 +349,8 @@ pub async fn plan_project_inner(
     // state: selectors compare against a previous manifest, loaded up front so
     // a missing state_manifest_ref fails with a clear error instead of
     // silently matching nothing.
-    let state_selector = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref()) {
+    let state_selector = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref())?
+    {
         let manifest_ref = input.state_manifest_ref.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "select/exclude use state: methods — set state_manifest_ref to a previous \
@@ -394,9 +395,10 @@ pub async fn plan_project_inner(
         input.select.as_deref(),
         input.exclude.as_deref(),
         state_selector.as_ref(),
-        &|ids| {
+        &|ids, maps| {
             let before = ids.len();
-            let expanded = expand_indirect_selection(ids, nodes, &command_eligible, indirect_mode);
+            let expanded =
+                expand_indirect_selection(ids, nodes, maps, &command_eligible, indirect_mode);
             if expanded.len() > before {
                 info!(
                     added = expanded.len() - before,
@@ -579,12 +581,6 @@ fn compute_priorities(
         .into_iter()
         .map(|(id, h)| (id, 5_u32.saturating_sub(h).max(1)))
         .collect()
-}
-
-/// Whether any select/exclude token uses a `state:` method.
-fn selectors_use_state(select: Option<&str>, exclude: Option<&str>) -> bool {
-    let uses = |s: Option<&str>| s.is_some_and(|s| s.contains("state:"));
-    uses(select) || uses(exclude)
 }
 
 /// Node ids a retry re-runs, parsed from a previous `run_results.json`: the

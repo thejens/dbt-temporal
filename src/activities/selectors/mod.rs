@@ -24,29 +24,33 @@ mod state;
 #[cfg(test)]
 mod test_support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use anyhow::Context;
-use dbt_common::node_selector::{SelectExpression, SelectionCriteria, parse_model_specifiers};
+use dbt_common::node_selector::{
+    SelectExpression, SelectionCriteria, parse_model_specifiers, selectors_require_manifest,
+};
 use dbt_schemas::schemas::Nodes;
 
-use super::dag::build_dependency_map;
 use criteria::{Criterion, MatchContext, criterion_support_error};
 
-pub use graph::reverse_dep_map;
+pub use graph::{DependencyMaps, LazyDependencyMaps, reverse_dep_map};
 pub use state::StateSelector;
 
 /// Apply --select and --exclude filters to a list of node IDs.
 ///
 /// `state` backs the `state:` methods; selectors using them match nothing when
 /// it is `None` (the planner validates this upfront).
+///
+/// `expand_indirect` receives the project's dependency maps, which are built at
+/// most once per call, on the first graph operator or expansion that reads them.
 pub fn apply_selectors(
     mut selected_ids: Vec<String>,
     nodes: &Nodes,
     select: Option<&str>,
     exclude: Option<&str>,
     state: Option<&StateSelector>,
-    expand_indirect: &dyn Fn(Vec<String>) -> Vec<String>,
+    expand_indirect: &dyn Fn(Vec<String>, &LazyDependencyMaps<'_>) -> Vec<String>,
 ) -> Result<Vec<String>, anyhow::Error> {
     let select_expr = parse_selector(select).context("invalid --select")?;
     let exclude_expr = parse_selector(exclude).context("invalid --exclude")?;
@@ -70,22 +74,13 @@ pub fn apply_selectors(
         project_name: nodes.project_name.as_deref(),
     };
 
-    // Graph operators (`+model`, `model+`, `@model`) walk the dependency maps;
-    // plain selectors never touch them. Building the maps clones every node id
-    // in the project twice, so skip it when nothing walks the graph.
-    let needs_graph = select_expr.as_ref().is_some_and(uses_graph_operators)
-        || exclude_expr.as_ref().is_some_and(uses_graph_operators);
-    let (full_deps, reverse_deps) = if needs_graph {
-        let all_ids: Vec<String> = nodes.iter().map(|(id, _)| id.clone()).collect();
-        let full_deps = build_dependency_map(nodes, &all_ids);
-        let reverse_deps = reverse_dep_map(&full_deps);
-        (full_deps, reverse_deps)
-    } else {
-        (BTreeMap::new(), BTreeMap::new())
-    };
+    // Graph operators (`+model`, `model+`, `@model`) and indirect selection walk
+    // the dependency maps; plain selectors never touch them, so they are built
+    // on first use and shared by every walk in this call.
+    let graph = LazyDependencyMaps::new(nodes);
 
     if let Some(expr) = select_expr {
-        let matched = resolve_expression(nodes, &full_deps, &reverse_deps, ctx, &expr)?;
+        let matched = resolve_expression(nodes, &graph, ctx, &expr)?;
         selected_ids.retain(|uid| matched.contains(uid.as_str()));
     }
 
@@ -97,17 +92,17 @@ pub fn apply_selectors(
     // exclusion instead lets a test that was named in `--exclude` come back in
     // through the model it hangs off — undoing the one thing the user asked
     // for by name.
-    selected_ids = expand_indirect(selected_ids);
+    selected_ids = expand_indirect(selected_ids, &graph);
 
     if let Some(expr) = exclude_expr {
-        let matched = resolve_expression(nodes, &full_deps, &reverse_deps, ctx, &expr)?;
+        let matched = resolve_expression(nodes, &graph, ctx, &expr)?;
         // The exclusion expands too. Upstream evaluates an exclude expression
         // through the same per-atom pipeline as a select expression, indirect
         // selection included, so `--exclude my_model` drops the model *and* the
         // tests hanging off it. Subtracting only the literal matches left those
         // tests in the run, querying a model the same command had declined to
         // build.
-        let excluded = expand_indirect(matched.into_iter().collect());
+        let excluded = expand_indirect(matched.into_iter().collect(), &graph);
         let excluded: BTreeSet<&str> = excluded.iter().map(String::as_str).collect();
         selected_ids.retain(|uid| !excluded.contains(uid.as_str()));
     }
@@ -128,11 +123,26 @@ fn parse_selector(spec: Option<&str>) -> Result<Option<SelectExpression>, anyhow
     Ok(Some(parse_model_specifiers(&tokens)?))
 }
 
+/// Whether the parsed selectors contain a `state:` method, i.e. whether the
+/// planner needs a previous manifest to evaluate them.
+///
+/// Decided from the parsed method rather than the text: `tag:my_state:thing` and
+/// a path containing `state:` mention the word without using the method.
+pub fn selectors_use_state(
+    select: Option<&str>,
+    exclude: Option<&str>,
+) -> Result<bool, anyhow::Error> {
+    let select_expr = parse_selector(select).context("invalid --select")?;
+    let exclude_expr = parse_selector(exclude).context("invalid --exclude")?;
+    Ok(selectors_require_manifest(select_expr.as_ref(), exclude_expr.as_ref()))
+}
+
 /// Reject every criterion in `expr` that [`Criterion::parse`] cannot read.
 ///
 /// Walking the whole tree up front means one error names every problem in the
 /// selector rather than the user fixing them one round-trip at a time.
 fn validate_selector_support(expr: &SelectExpression) -> Result<(), anyhow::Error> {
+    reject_expression_exclude(expr)?;
     let mut errors = Vec::new();
     collect_unsupported(expr, &mut errors);
     if errors.is_empty() {
@@ -140,6 +150,32 @@ fn validate_selector_support(expr: &SelectExpression) -> Result<(), anyhow::Erro
     }
     errors.dedup();
     Err(unsupported_methods_error(&errors))
+}
+
+/// Reject a [`SelectExpression::Exclude`] node anywhere in the tree.
+///
+/// `parse_model_specifiers` builds only atoms joined by `And`/`Or`; `Exclude`
+/// nodes come from `selectors.yml` definitions, which this planner does not
+/// read. Failing loudly keeps an exclude from being evaluated as an include if
+/// a tree ever reaches the planner some other way.
+fn reject_expression_exclude(expr: &SelectExpression) -> Result<(), anyhow::Error> {
+    match expr {
+        SelectExpression::Atom(criteria) => criteria
+            .exclude
+            .as_deref()
+            .map_or(Ok(()), reject_expression_exclude),
+        SelectExpression::And(exprs) | SelectExpression::Or(exprs) => {
+            exprs.iter().try_for_each(reject_expression_exclude)
+        }
+        SelectExpression::Exclude(_) => Err(expression_exclude_error()),
+    }
+}
+
+fn expression_exclude_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "exclude expressions nested inside a selector are not supported; they exist only in \
+         selectors.yml definitions, which are not read. Use --exclude"
+    )
 }
 
 /// The single phrasing for criteria this planner will not evaluate.
@@ -168,43 +204,24 @@ fn collect_unsupported(expr: &SelectExpression, errors: &mut Vec<String>) {
                 collect_unsupported(e, errors);
             }
         }
-        SelectExpression::Exclude(inner) => collect_unsupported(inner, errors),
-    }
-}
-
-/// True if any criterion in the expression walks the dependency graph
-/// (`+model`, `model+`, `@model`), including inside nested excludes.
-fn uses_graph_operators(expr: &SelectExpression) -> bool {
-    match expr {
-        SelectExpression::Atom(c) => {
-            c.childrens_parents
-                || c.parents_depth.is_some()
-                || c.children_depth.is_some()
-                || c.exclude.as_deref().is_some_and(uses_graph_operators)
-        }
-        SelectExpression::And(exprs) | SelectExpression::Or(exprs) => {
-            exprs.iter().any(uses_graph_operators)
-        }
-        SelectExpression::Exclude(inner) => uses_graph_operators(inner),
+        // Rejected by `reject_expression_exclude` before this walk runs.
+        SelectExpression::Exclude(_) => {}
     }
 }
 
 /// Resolve a selector expression to a set of matching node IDs, expanding graph operators.
 fn resolve_expression(
     nodes: &Nodes,
-    deps: &BTreeMap<String, BTreeSet<String>>,
-    reverse_deps: &BTreeMap<String, BTreeSet<String>>,
+    graph: &LazyDependencyMaps<'_>,
     ctx: MatchContext<'_>,
     expr: &SelectExpression,
 ) -> Result<BTreeSet<String>, anyhow::Error> {
     match expr {
-        SelectExpression::Atom(criteria) => {
-            resolve_criteria(nodes, deps, reverse_deps, ctx, criteria)
-        }
+        SelectExpression::Atom(criteria) => resolve_criteria(nodes, graph, ctx, criteria),
         SelectExpression::And(exprs) => {
             let mut result: Option<BTreeSet<String>> = None;
             for e in exprs {
-                let matched = resolve_expression(nodes, deps, reverse_deps, ctx, e)?;
+                let matched = resolve_expression(nodes, graph, ctx, e)?;
                 result = Some(match result {
                     Some(acc) => acc.intersection(&matched).cloned().collect(),
                     None => matched,
@@ -215,22 +232,19 @@ fn resolve_expression(
         SelectExpression::Or(exprs) => {
             let mut result = BTreeSet::new();
             for e in exprs {
-                result.extend(resolve_expression(nodes, deps, reverse_deps, ctx, e)?);
+                result.extend(resolve_expression(nodes, graph, ctx, e)?);
             }
             Ok(result)
         }
-        // For exclude, we collect what matches so the caller can subtract.
-        SelectExpression::Exclude(inner) => {
-            resolve_expression(nodes, deps, reverse_deps, ctx, inner)
-        }
+        // `validate_selector_support` rejects these before resolution starts.
+        SelectExpression::Exclude(_) => Err(expression_exclude_error()),
     }
 }
 
 /// Resolve a single selection criterion, including graph operator expansion.
 fn resolve_criteria(
     nodes: &Nodes,
-    deps: &BTreeMap<String, BTreeSet<String>>,
-    reverse_deps: &BTreeMap<String, BTreeSet<String>>,
+    graph: &LazyDependencyMaps<'_>,
     ctx: MatchContext<'_>,
     criteria: &SelectionCriteria,
 ) -> Result<BTreeSet<String>, anyhow::Error> {
@@ -247,38 +261,27 @@ fn resolve_criteria(
         .map(|(id, _)| id.clone())
         .collect();
 
-    // Apply nested exclude.
-    if let Some(excl) = &criteria.exclude {
-        let excluded = resolve_expression(nodes, deps, reverse_deps, ctx, excl)?;
-        matched.retain(|id| !excluded.contains(id));
+    // Graph operators expand every matched node at once. Each direction is one
+    // multi-source walk, so `tag:x+` over hundreds of matches costs one pass.
+    // When `+` depths are given they take precedence over `@`, as in dbt v2's
+    // scheduler: `@+model` is `+model`.
+    if criteria.parents_depth.is_some() || criteria.children_depth.is_some() {
+        let seeds = matched.clone();
+        if let Some(depth) = criteria.parents_depth {
+            matched.extend(graph::expand_from_seeds(&seeds, &graph.get().deps, depth));
+        }
+        if let Some(depth) = criteria.children_depth {
+            matched.extend(graph::expand_from_seeds(&seeds, &graph.get().reverse, depth));
+        }
+    } else if criteria.childrens_parents {
+        matched = graph::childrens_parents(graph.get(), &matched);
     }
 
-    // Expand with graph operators.
-    let has_graph_ops = criteria.parents_depth.is_some()
-        || criteria.children_depth.is_some()
-        || criteria.childrens_parents;
-
-    if has_graph_ops {
-        let seeds: BTreeSet<String> = matched.clone();
-        // +model: walk upstream (parents) through deps
-        if let Some(depth) = criteria.parents_depth {
-            for seed in &seeds {
-                graph::walk_graph(seed, deps, depth, &mut matched);
-            }
-        }
-        // model+: walk downstream (children) through reverse_deps
-        if let Some(depth) = criteria.children_depth {
-            for seed in &seeds {
-                graph::walk_graph(seed, reverse_deps, depth, &mut matched);
-            }
-        }
-        // @model: direct parents + children (depth 1 each direction)
-        if criteria.childrens_parents {
-            for seed in &seeds {
-                graph::walk_graph(seed, deps, 1, &mut matched);
-                graph::walk_graph(seed, reverse_deps, 1, &mut matched);
-            }
-        }
+    // A nested exclude removes from the fully expanded selection, so the nodes
+    // it names are dropped even when the graph operators pulled them in.
+    if let Some(excl) = &criteria.exclude {
+        let excluded = resolve_expression(nodes, graph, ctx, excl)?;
+        matched.retain(|id| !excluded.contains(id));
     }
 
     Ok(matched)
@@ -291,7 +294,7 @@ mod tests {
 
     /// Selection tests drive `--select`/`--exclude` alone; the expansion hook
     /// is exercised by the indirect-selection tests and by `plan_project`.
-    fn no_expansion(ids: Vec<String>) -> Vec<String> {
+    fn no_expansion(ids: Vec<String>, _: &LazyDependencyMaps<'_>) -> Vec<String> {
         ids
     }
 
@@ -979,19 +982,229 @@ mod tests {
         assert!(!set.contains("model.shop.ar_summary"));
     }
 
+    /// `@orders` is orders, everything downstream of it, and everything those
+    /// descendants are built from — not just one hop in each direction.
     #[test]
-    fn apply_selectors_at_operator_includes_direct_parents_and_children() {
+    fn apply_selectors_at_operator_selects_descendants_and_their_ancestors() {
         let (ids, nodes) = build_dag_project();
-        // `@orders` per the implementation: orders + direct parents + direct
-        // children (one hop in each direction). Multi-hop transitive expansion
-        // is intentionally not done here.
         let out = apply_selectors(ids, &nodes, Some("@orders"), None, None, &no_expansion).unwrap();
         let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
-        assert!(set.contains("model.shop.orders"));
-        assert!(set.contains("model.shop.stg_orders"), "direct parent");
-        assert!(set.contains("model.shop.ar_summary"), "direct child");
-        // stg_customers is two hops away (ar_summary's other parent) — not pulled in.
-        assert!(!set.contains("model.shop.stg_customers"));
+        assert_eq!(
+            set,
+            BTreeSet::from([
+                "model.shop.orders",
+                "model.shop.ar_summary",
+                "model.shop.stg_orders",
+                // ar_summary's other parent, two hops from the seed.
+                "model.shop.stg_customers",
+            ])
+        );
+    }
+
+    /// The seed's own ancestors that feed no descendant stay out: `@stg_customers`
+    /// takes ar_summary and what ar_summary needs, which includes orders.
+    #[test]
+    fn apply_selectors_at_operator_follows_every_matched_seed() {
+        let (ids, nodes) = build_dag_project();
+        let out = apply_selectors(
+            ids,
+            &nodes,
+            Some("@stg_customers"),
+            Some("stg_orders"),
+            None,
+            &no_expansion,
+        )
+        .unwrap();
+        let set: BTreeSet<&str> = out.iter().map(String::as_str).collect();
+        assert_eq!(
+            set,
+            BTreeSet::from([
+                "model.shop.stg_customers",
+                "model.shop.ar_summary",
+                "model.shop.orders",
+            ])
+        );
+    }
+
+    /// `@` composes with methods like any other graph operator.
+    #[test]
+    fn apply_selectors_at_operator_works_with_methods_and_intersection() {
+        let (ids, mut nodes) = build_dag_project();
+        let tagged = nodes
+            .models
+            .get_mut("model.shop.stg_orders")
+            .map(|m| {
+                let mut model = (**m).clone();
+                model.__common_attr__.tags = vec!["nightly".to_string()];
+                Arc::new(model)
+            })
+            .unwrap();
+        nodes
+            .models
+            .insert("model.shop.stg_orders".to_string(), tagged);
+
+        let by_tag =
+            apply_selectors(ids.clone(), &nodes, Some("@tag:nightly"), None, None, &no_expansion)
+                .unwrap();
+        assert_eq!(
+            by_tag.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "model.shop.stg_orders",
+                "model.shop.orders",
+                "model.shop.ar_summary",
+                "model.shop.stg_customers",
+            ])
+        );
+
+        let intersected = apply_selectors(
+            ids,
+            &nodes,
+            Some("@tag:nightly,stg_customers"),
+            None,
+            None,
+            &no_expansion,
+        )
+        .unwrap();
+        assert_eq!(intersected, vec!["model.shop.stg_customers".to_string()]);
+    }
+
+    /// With a `+` operator present the `@` is ignored, as dbt v2 does.
+    #[test]
+    fn apply_selectors_plus_operators_take_precedence_over_at() {
+        let (ids, nodes) = build_dag_project();
+        let out =
+            apply_selectors(ids, &nodes, Some("@+orders"), None, None, &no_expansion).unwrap();
+        assert_eq!(
+            out.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["model.shop.orders", "model.shop.stg_orders"])
+        );
+    }
+
+    /// Several matched seeds, depth limits and both directions through the
+    /// public entry point: `tag:`-style multi-seed selection agrees with the
+    /// union of the single-seed selections.
+    #[test]
+    fn apply_selectors_multi_seed_depth_limits_match_the_union_of_single_seeds() {
+        let (ids, nodes) = build_dag_project();
+        for spec in ["{}+1", "1+{}", "{}+", "+{}", "2+{}"] {
+            let single = |name: &str| {
+                apply_selectors(
+                    ids.clone(),
+                    &nodes,
+                    Some(&spec.replace("{}", name)),
+                    None,
+                    None,
+                    &no_expansion,
+                )
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+            };
+            let union: BTreeSet<String> = ["stg_orders", "stg_customers"]
+                .into_iter()
+                .flat_map(single)
+                .collect();
+            let combined = apply_selectors(
+                ids.clone(),
+                &nodes,
+                Some(&spec.replace("{}", "stg_*")),
+                None,
+                None,
+                &no_expansion,
+            )
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+            assert_eq!(combined, union, "{spec}");
+        }
+    }
+
+    /// The nested exclude removes from the expanded selection.
+    #[test]
+    fn a_nested_exclude_applies_after_graph_expansion() {
+        let (_, nodes) = build_dag_project();
+        let parsed = parse_selector(Some("orders+")).unwrap().unwrap();
+        let SelectExpression::Atom(mut criteria) = parsed else {
+            panic!("single selector parses to an atom");
+        };
+        criteria.exclude = parse_selector(Some("ar_summary")).unwrap().map(Box::new);
+
+        let graph = LazyDependencyMaps::new(&nodes);
+        let out = resolve_criteria(&nodes, &graph, NO_STATE, &criteria).unwrap();
+        assert_eq!(out, BTreeSet::from(["model.shop.orders".to_string()]));
+    }
+
+    const NO_STATE: MatchContext<'static> = MatchContext {
+        state: None,
+        project_name: None,
+    };
+
+    fn exclude_expression() -> SelectExpression {
+        let inner = parse_selector(Some("orders")).unwrap().unwrap();
+        SelectExpression::Exclude(Box::new(inner))
+    }
+
+    /// The text parser cannot build an `Exclude` node, so one reaching the
+    /// planner is refused rather than read as an include.
+    #[test]
+    fn an_exclude_expression_is_rejected_wherever_it_sits() {
+        let atom = parse_selector(Some("stg_orders")).unwrap().unwrap();
+        for expr in [
+            exclude_expression(),
+            SelectExpression::And(vec![atom.clone(), exclude_expression()]),
+            SelectExpression::Or(vec![atom, exclude_expression()]),
+        ] {
+            let err = validate_selector_support(&expr).unwrap_err().to_string();
+            assert!(err.contains("not supported"), "{err}");
+
+            let (_, nodes) = build_dag_project();
+            let graph = LazyDependencyMaps::new(&nodes);
+            if matches!(expr, SelectExpression::Exclude(_)) {
+                let err = resolve_expression(&nodes, &graph, NO_STATE, &expr)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("not supported"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_exclude_inside_an_atom_is_checked_for_expression_excludes() {
+        let parsed = parse_selector(Some("orders")).unwrap().unwrap();
+        let SelectExpression::Atom(mut criteria) = parsed else {
+            panic!("single selector parses to an atom");
+        };
+        criteria.exclude = Some(Box::new(exclude_expression()));
+        assert!(validate_selector_support(&SelectExpression::Atom(criteria)).is_err());
+    }
+
+    /// The text parser's output never contains an `Exclude` node.
+    #[test]
+    fn parsed_selector_text_never_yields_an_exclude_expression() {
+        let expr = parse_selector(Some("a,b c+ @d,e")).unwrap().unwrap();
+        assert!(validate_selector_support(&expr).is_ok());
+    }
+
+    #[test]
+    fn selectors_use_state_reads_the_parsed_method() {
+        assert!(selectors_use_state(Some("state:modified+"), None).unwrap());
+        assert!(selectors_use_state(None, Some("state:new")).unwrap());
+        assert!(selectors_use_state(Some("tag:nightly state:new"), None).unwrap());
+        assert!(selectors_use_state(Some("tag:a,state:modified"), None).unwrap());
+
+        // Mentions of the word that are not the method.
+        assert!(!selectors_use_state(Some("tag:my_state:thing"), None).unwrap());
+        assert!(!selectors_use_state(Some("models/state:dir"), None).unwrap());
+        assert!(!selectors_use_state(Some("tag:a_state:x"), Some("tag:state:y")).unwrap());
+        assert!(!selectors_use_state(None, None).unwrap());
+    }
+
+    #[test]
+    fn selectors_use_state_reports_which_flag_is_malformed() {
+        let err = format!("{:#}", selectors_use_state(Some("@a+"), None).unwrap_err());
+        assert!(err.contains("invalid --select"), "{err}");
+        let err = format!("{:#}", selectors_use_state(None, Some("@a+")).unwrap_err());
+        assert!(err.contains("invalid --exclude"), "{err}");
     }
 
     // --- state: selectors ---

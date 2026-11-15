@@ -77,6 +77,11 @@ dbt aborts the statement it is running, and the activity then **joins** the
 work rather than dropping it — an abandoned blocking thread would keep going
 against the warehouse with nothing waiting for it.
 
+`store_artifacts` works the same way when it builds `catalog.json`: the catalog's
+queries run under the activity's own source, so a cancellation, or the timeout
+reaching the worker at its next heartbeat, stops them and the activity waits
+for them to end.
+
 ## Retry Configuration
 
 The `execute_node` activity retries transient adapter errors with exponential backoff. Defaults can be overridden in `dbt_temporal.yml`:

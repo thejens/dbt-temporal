@@ -74,6 +74,8 @@ struct Project {
     dir: tempfile::TempDir,
     profiles: tempfile::TempDir,
     artifacts: tempfile::TempDir,
+    /// Whether the worker writes `catalog.json` with the other artifacts.
+    write_catalog: bool,
 }
 
 fn write_project(models: &[(String, String)]) -> Result<Project> {
@@ -107,6 +109,7 @@ fn write_project_with(extra_project_yml: &str, models: &[(String, String)]) -> R
         dir,
         profiles,
         artifacts,
+        write_catalog: false,
     })
 }
 
@@ -124,7 +127,7 @@ fn config(project: &Project, temporal_addr: &str, concurrency: u32) -> DbtTempor
         health_file: None,
         health_port: None,
         write_artifacts: true,
-        write_catalog: false,
+        write_catalog: project.write_catalog,
         artifact_store: project.artifacts.path().to_string_lossy().to_string(),
         search_attributes: BTreeMap::new(),
         write_run_log: true,
@@ -833,6 +836,31 @@ fn a_failed_run_leaves_run_results_that_retry_from_reads() -> Result<()> {
     // Whether `fine` ran before the failure depends on scheduling; the retry
     // re-runs it exactly when it did not succeed.
     assert_eq!(retried.contains("model.spike.fine"), statuses["model.spike.fine"] != "success");
+    Ok(())
+}
+
+/// The catalog is built under the artifact activity's own cancellation token;
+/// a run with it enabled still stores `catalog.json` describing what it built.
+#[test]
+fn a_run_with_the_catalog_enabled_stores_it() -> Result<()> {
+    let mut project = write_project(&[(
+        "orders".to_string(),
+        "{{ config(materialized='table') }}\nselect 1 as id, 'x' as label".to_string(),
+    )])?;
+    project.write_catalog = true;
+
+    let finished = run_workflow(&project, 2)?;
+
+    let artifacts = finished
+        .output
+        .artifacts
+        .context("the run should have stored artifacts")?;
+    let catalog_path = artifacts
+        .catalog_path
+        .context("catalog.json should have been stored")?;
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
+    let columns = &catalog["nodes"]["model.spike.orders"]["columns"];
+    assert!(columns.get("id").is_some() && columns.get("label").is_some(), "{catalog}");
     Ok(())
 }
 

@@ -13,7 +13,7 @@ use crate::types::{DbtCommand, StoreArtifactsInput, StoreArtifactsOutput};
 
 use super::DbtActivities;
 use super::artifact_status::ArtifactStatus;
-use super::heartbeat;
+use super::cancellable;
 use super::retry;
 
 /// Outer wrapper — cancellation, heartbeating, and retry classification.
@@ -22,35 +22,40 @@ use super::retry;
 /// finished, so a transient 5xx here would otherwise throw away a completed
 /// run's results. Store failures are tagged `ArtifactStore` and retry;
 /// everything else (missing store config, serialization bugs) is permanent.
+///
+/// The catalog queries the warehouse on the dbt pool, where dropping the future
+/// that awaits them would leave them running. So the activity holds its own
+/// cancellation source, the catalog's adapter takes its token, and a
+/// cancellation — which is also how the server's timeout reaches the worker, at
+/// the next heartbeat — stops those queries and waits for them to end.
 pub async fn store_artifacts_outer(
     activities: &DbtActivities,
     ctx: ActivityContext,
     input: StoreArtifactsInput,
 ) -> Result<StoreArtifactsOutput, ActivityError> {
     let project = input.project.clone();
-    tokio::select! {
-        result = store_artifacts_inner(activities, input) => {
-            result.map_err(|e| {
-                warn!(error = %format!("{e:#}"), "store_artifacts failed");
-                let patterns = project
-                    .as_deref()
-                    .and_then(|p| retry::registry_non_retryable_patterns(&activities.registry, p));
-                retry::classify(
-                    e,
-                    patterns.as_deref().unwrap_or(&[]),
-                    retry::Unclassified::Permanent,
-                )
-            })
-        }
-        () = ctx.cancelled() => {
-            info!("store_artifacts cancelled");
-            Err(ActivityError::cancelled())
-        }
-        // Uploading a large manifest to object storage can outlast the
-        // heartbeat timeout on a slow link; keep the tick alive so the server
-        // does not mistake a slow upload for a dead worker.
-        never = heartbeat::heartbeat_loop(&ctx) => match never {},
+    let cancel = dbt_common::cancellation::CancellationTokenSource::new();
+    let token = cancel.token();
+    // Heartbeats double as the server's liveness check: uploading a large
+    // manifest to object storage can outlast the heartbeat timeout on a slow
+    // link, and a slow upload must not look like a dead worker.
+    let (result, cancelled) = cancellable::run_in_activity(
+        &ctx,
+        &cancel,
+        || info!("store_artifacts cancelled — stopping warehouse work"),
+        store_artifacts_inner(activities, input, &token),
+    )
+    .await;
+    if cancelled {
+        return Err(ActivityError::cancelled());
     }
+    result.map_err(|e| {
+        warn!(error = %format!("{e:#}"), "store_artifacts failed");
+        let patterns = project
+            .as_deref()
+            .and_then(|p| retry::registry_non_retryable_patterns(&activities.registry, p));
+        retry::classify(e, patterns.as_deref().unwrap_or(&[]), retry::Unclassified::Permanent)
+    })
 }
 
 /// Prepend every earlier segment's results and log to this one's.
@@ -101,9 +106,14 @@ fn store_io_error(context: &'static str, e: anyhow::Error) -> anyhow::Error {
 /// `store_artifacts_outer` wraps this with cancellation, heartbeat and error
 /// classification. Also the entry point for integration tests that drive
 /// artifact writing without a Temporal activity context.
+///
+/// `cancellation` is the activity's own token: it is what the catalog's
+/// warehouse queries stop on. The caller keeps its source alive until this
+/// returns, because the adapter engine holds only a `Weak` reference to it.
 pub async fn store_artifacts_inner(
     activities: &DbtActivities,
     input: StoreArtifactsInput,
+    cancellation: &dbt_common::cancellation::CancellationToken,
 ) -> Result<StoreArtifactsOutput, anyhow::Error> {
     let store = activities.artifact_store.as_ref().ok_or_else(|| {
         anyhow::anyhow!("ArtifactStore not configured but store_artifacts was called")
@@ -161,7 +171,7 @@ pub async fn store_artifacts_inner(
     // relations). Catalog problems are logged, never fatal — the run's real
     // artifacts are already stored at this point.
     let catalog_path = if activities.write_catalog.0 {
-        match generate_and_store_catalog(activities, &input, store.as_ref()).await {
+        match generate_and_store_catalog(activities, &input, store.as_ref(), cancellation).await {
             Ok(path) => {
                 info!(path = %path, "stored catalog.json");
                 Some(path)
@@ -219,6 +229,7 @@ async fn generate_and_store_catalog(
     activities: &DbtActivities,
     input: &StoreArtifactsInput,
     store: &dyn ArtifactStore,
+    cancellation: &dbt_common::cancellation::CancellationToken,
 ) -> Result<String, anyhow::Error> {
     let state = Arc::clone(
         activities
@@ -232,6 +243,7 @@ async fn generate_and_store_catalog(
     let invocation_id = input.invocation_id.clone();
     let env = input.env.clone();
     let target = input.target.clone();
+    let token = cancellation.clone();
     let catalog_json = crate::dbt_pool::run(move || {
         // Catalog generation queries the warehouse through the adapter, which
         // emits dbt telemetry spans; those need an `Invocation` root above them.
@@ -241,7 +253,7 @@ async fn generate_and_store_catalog(
                 &node_results,
                 &invocation_id,
                 &crate::activities::render_env::RenderOverrides {
-                    cancellation: &state.cancellation_source.token(),
+                    cancellation: &token,
                     env: &env,
                     target: target.as_deref(),
                     // Neither reaches a `get_columns_in_relation` call.
@@ -545,6 +557,13 @@ mod tests {
     use crate::artifact_store::LocalArtifactStore;
     use crate::types::{FreshnessGrade, NodeExecutionResult, NodeStatus};
     use std::collections::BTreeMap;
+
+    /// A cancellation source nothing cancels, for tests that do not exercise
+    /// cancellation. Callers take its token within one statement, so the
+    /// source outlives the call as `store_artifacts_inner` requires.
+    fn no_cancellation() -> dbt_common::cancellation::CancellationTokenSource {
+        dbt_common::cancellation::CancellationTokenSource::new()
+    }
 
     fn sample_result(unique_id: &str, status: NodeStatus, time: f64) -> NodeExecutionResult {
         NodeExecutionResult {
@@ -1073,7 +1092,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let out = store_artifacts_inner(&activities, input).await?;
+        let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
         let run_results = std::fs::read_to_string(&out.run_results_path)?;
         let parsed: serde_json::Value = serde_json::from_str(&run_results)?;
         let ids: Vec<&str> = parsed["results"]
@@ -1117,7 +1136,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let err = store_artifacts_inner(&activities, input)
+        let err = store_artifacts_inner(&activities, input, &no_cancellation().token())
             .await
             .expect_err("a missing checkpoint must be reported");
         assert!(
@@ -1147,7 +1166,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let err = store_artifacts_inner(&activities, input)
+        let err = store_artifacts_inner(&activities, input, &no_cancellation().token())
             .await
             .expect_err("a missing checkpoint must be reported");
 
@@ -1176,7 +1195,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let out = store_artifacts_inner(&activities, input).await?;
+        let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
         assert!(out.run_results_path.contains("run_results.json"));
         assert!(out.manifest_path.contains("manifest.json"));
         assert!(out.log_path.is_none());
@@ -1211,7 +1230,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let out = store_artifacts_inner(&activities, input).await?;
+        let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
         assert_eq!(out.manifest_path, "/already/stored/manifest.json");
         Ok(())
     }
@@ -1236,7 +1255,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let err = store_artifacts_inner(&activities, input)
+        let err = store_artifacts_inner(&activities, input, &no_cancellation().token())
             .await
             .expect_err("absent manifest must error");
         assert!(err.to_string().contains("manifest"), "got: {err}");
@@ -1263,7 +1282,7 @@ mod tests {
             run_log: Some("line a\nline b".to_string()),
         };
 
-        let out = store_artifacts_inner(&activities, input).await?;
+        let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
         let log_path = out
             .log_path
             .expect("log_path should be set when run_log is on");
@@ -1295,7 +1314,7 @@ mod tests {
             run_log: Some("would-be-log".to_string()),
         };
 
-        let out = store_artifacts_inner(&activities, input).await?;
+        let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
         assert!(out.log_path.is_none());
         Ok(())
     }
@@ -1330,7 +1349,7 @@ mod tests {
             elapsed_time: 0.0,
         };
 
-        let err = store_artifacts_inner(&activities, input)
+        let err = store_artifacts_inner(&activities, input, &no_cancellation().token())
             .await
             .expect_err("missing ArtifactStore must error");
         assert!(err.to_string().contains("ArtifactStore not configured"));

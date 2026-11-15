@@ -131,18 +131,17 @@ async fn scheduled_activity_ids(history: WorkflowHistory) -> Result<Vec<String>>
 
 /// Histories without the unique-id marker schedule node activities under short
 /// `<type>:<name>` ids, and replay compares those ids. A fixture set holding
-/// only `unique_id`s (which contain dots) would leave that path unchecked.
+/// only `unique_id`s (which contain dots) would leave that path unchecked, so
+/// at least two fixtures must carry the short form.
 #[tokio::test(flavor = "current_thread")]
 async fn fixtures_cover_histories_recorded_with_short_activity_ids() -> Result<()> {
     let mut with_short_ids = 0;
-    for (name, history) in load_fixtures()? {
+    for (_name, history) in load_fixtures()? {
         let ids = scheduled_activity_ids(history).await?;
         let short = ids
             .iter()
             .filter(|id| id.contains(':') && !id.contains('.'))
             .count();
-        let unique = ids.iter().filter(|id| id.contains('.')).count();
-        assert_eq!(unique, 0, "{name} was recorded with unique ids: {ids:?}");
         if short > 0 {
             with_short_ids += 1;
         }

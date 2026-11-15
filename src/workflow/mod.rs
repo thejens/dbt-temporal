@@ -294,7 +294,7 @@ async fn drive_run(
         }
     };
 
-    run_on_run_end(
+    let on_run_end_failed = run_on_run_end(
         ctx,
         &plan,
         &run_scope,
@@ -308,13 +308,13 @@ async fn drive_run(
             retry: &retry_config,
         },
     )
-    .await;
+    .await?;
 
     // Evaluated before `all_results` moves into the output.
     let node_results_partial = !levels.prior_segments.is_empty();
     let output = DbtRunOutput {
         invocation_id: plan.invocation_id.clone(),
-        success: !levels.had_failure,
+        success: !levels.had_failure && !on_run_end_failed,
         skipped: false,
         skip_reason: None,
         node_results: levels.all_results,
@@ -330,7 +330,6 @@ async fn drive_run(
         output,
         node_status: levels.node_status,
         hook_errors,
-        had_failure: levels.had_failure,
     })))
 }
 

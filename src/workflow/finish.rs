@@ -50,11 +50,11 @@ pub struct ExecutedRun {
     pub plan: Arc<ExecutionPlan>,
     pub hooks: Arc<HooksConfig>,
     /// The run as it stands before the post-run hooks, which can still turn a
-    /// success into a failure.
+    /// success into a failure. `success` is false for a run whose nodes failed
+    /// or whose `on-run-end` hook failed.
     pub output: DbtRunOutput,
     pub node_status: NodeStatusTree,
     pub hook_errors: Vec<HookError>,
-    pub had_failure: bool,
 }
 
 /// Longest failure message put on the workflow's details line.
@@ -113,11 +113,10 @@ async fn finish_executed(
         mut output,
         node_status,
         mut hook_errors,
-        had_failure,
     } = run;
 
     let success =
-        run_post_hooks(ctx, input, &plan, &hooks, &output, !had_failure, &mut hook_errors).await;
+        run_post_hooks(ctx, input, &plan, &hooks, &output, output.success, &mut hook_errors).await;
 
     output.success = success;
     output.hook_errors = hook_errors;
@@ -140,10 +139,22 @@ async fn finish_executed(
         // Structured output is already persisted in memo for callers to inspect.
         let error_count = NodeStatusSummary::tally(&node_status).error;
         Err(WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-            anyhow::anyhow!(
-                "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"
-            ),
+            anyhow::anyhow!("{}", run_failure_message(error_count, &output.hook_errors)),
         )))
+    }
+}
+
+/// Why a completed run is reported as failed: the nodes that errored, or, when
+/// none did, the hook whose failure failed the run.
+fn run_failure_message(error_count: usize, hook_errors: &[HookError]) -> String {
+    match hook_errors.first() {
+        Some(hook) if error_count == 0 => {
+            let error = truncate_at_char_boundary(&hook.error, DETAILS_MAX_BYTES);
+            format!("dbt run failed: {} hook failed: {error}", hook.event)
+        }
+        _ => {
+            format!("dbt run failed: {error_count} node(s) errored (see workflow memo for details)")
+        }
     }
 }
 
@@ -220,6 +231,26 @@ mod tests {
         WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
             "{message}"
         )))
+    }
+
+    fn hook_error(event: &str, error: &str) -> HookError {
+        HookError {
+            hook_workflow_type: event.to_string(),
+            event: event.to_string(),
+            error: error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_run_failed_by_a_hook_names_the_hook() {
+        let message = run_failure_message(0, &[hook_error("on_run_end", "syntax error")]);
+        assert_eq!(message, "dbt run failed: on_run_end hook failed: syntax error");
+    }
+
+    #[test]
+    fn errored_nodes_are_what_a_failed_run_reports_when_there_are_any() {
+        let message = run_failure_message(2, &[hook_error("on_run_end", "syntax error")]);
+        assert_eq!(message, "dbt run failed: 2 node(s) errored (see workflow memo for details)");
     }
 
     #[test]

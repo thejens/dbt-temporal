@@ -33,7 +33,8 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    FAILURE_FINALIZATION_PATCH, activity_error_message, build_retry_policy, elapsed_secs, plural,
+    FAILURE_FINALIZATION_PATCH, ON_RUN_END_FAILS_RUN_PATCH, activity_error_message,
+    build_retry_policy, elapsed_secs, plural,
 };
 use super::search_attributes::build_search_attribute_updates;
 
@@ -605,9 +606,14 @@ pub struct OnRunEndRecord<'a> {
     pub prior_segments: &'a [String],
 }
 
-/// Failure here is non-fatal: appended to `hook_errors`, doesn't change the
-/// run outcome. Always fires when configured, even when the run failed
-/// (matches dbt-core behaviour).
+/// Run the `on-run-end` hooks; `true` when one failed and the run has failed
+/// with it.
+///
+/// As in dbt, a failing hook fails the invocation but leaves the nodes' own
+/// results alone: the failure is recorded in `hook_errors` and the node
+/// results and artifacts stay as the nodes produced them. The hooks fire even
+/// when the run's nodes failed. A cancellation that reaches the activity ends
+/// the workflow as cancelled rather than as a failed hook.
 pub async fn run_on_run_end(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
@@ -615,9 +621,9 @@ pub async fn run_on_run_end(
     record: OnRunEndRecord<'_>,
     hook_errors: &mut Vec<HookError>,
     policy: HookPolicy<'_>,
-) {
+) -> Result<bool, WorkflowTermination> {
     if !plan.has_on_run_end {
-        return;
+        return Ok(false);
     }
     ctx.set_current_details("running on-run-end hooks".to_string());
     let result = ctx
@@ -634,14 +640,22 @@ pub async fn run_on_run_end(
             hook_activity_options(ProjectHookPhase::OnRunEnd, policy),
         )
         .await;
-    if let Err(e) = result {
-        tracing::error!(error = %e, "on-run-end hook failed (non-fatal)");
-        hook_errors.push(HookError {
-            hook_workflow_type: "on_run_end".to_string(),
-            event: "on_run_end".to_string(),
-            error: e.to_string(),
-        });
+    let Err(e) = result else {
+        return Ok(false);
+    };
+    // Consulted only on this path, so a run whose hooks passed records no
+    // marker.
+    let fails_run = ctx.patched(ON_RUN_END_FAILS_RUN_PATCH);
+    if fails_run && matches!(e, temporalio_sdk::ActivityExecutionError::Cancelled(_)) {
+        return Err(WorkflowTermination::cancelled());
     }
+    tracing::error!(error = %e, fails_run, "on-run-end hook failed");
+    hook_errors.push(HookError {
+        hook_workflow_type: "on_run_end".to_string(),
+        event: "on_run_end".to_string(),
+        error: e.to_string(),
+    });
+    Ok(fails_run)
 }
 
 /// Runs the on_success or on_failure hooks. Returns the post-hook `success`

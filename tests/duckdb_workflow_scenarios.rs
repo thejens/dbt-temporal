@@ -578,6 +578,75 @@ fn cancelling_outside_the_node_loop_ends_the_run_as_cancelled() -> Result<()> {
     Ok(())
 }
 
+const FAILING_ON_RUN_END: &str = "on-run-end:\n  - \"select from from\"";
+
+/// A fire-and-forget hook of `workflow_type`, which needs no worker to listen.
+fn fire_and_forget(workflow_type: &str) -> HookConfig {
+    HookConfig {
+        workflow_type: workflow_type.to_string(),
+        task_queue: "no-worker-listens-here".to_string(),
+        timeout_secs: None,
+        on_error: HookErrorMode::default(),
+        input: None,
+        fire_and_forget: true,
+    }
+}
+
+/// The first file called `name` anywhere under `root`.
+fn find_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|n| n == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn read_run_results(project: &Project) -> Result<serde_json::Value> {
+    let path = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+/// As in dbt, a failing `on-run-end` hook fails the run: the workflow fails,
+/// `DbtStatus` ends `failed`, and the failure hooks fire in place of the success
+/// hooks. The nodes' own results are still written.
+#[test]
+fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
+    let project = write_project_with(
+        FAILING_ON_RUN_END,
+        &[("ok".to_string(), "select 1 as id".to_string())],
+    )?;
+    let mut input = run_input(false);
+    input.hooks = Some(HooksConfig {
+        on_success: vec![fire_and_forget("notify_success")],
+        on_failure: vec![fire_and_forget("notify_failure")],
+        ..HooksConfig::default()
+    });
+
+    let events = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Failed(_))),
+            "the run should fail: {result:?}"
+        );
+        history_events(&handle).await
+    })?;
+
+    assert_eq!(status_values(&events), ["running", "failed"]);
+    assert_eq!(child_workflow_types(&events), ["notify_failure"]);
+    let results = read_run_results(&project)?;
+    assert_eq!(results["results"][0]["unique_id"], "model.spike.ok");
+    assert_eq!(results["results"][0]["status"], "success");
+    Ok(())
+}
+
 /// Activities outside the node loop are scheduled with a bounded retry policy
 /// that treats permanent failure types as final.
 #[test]

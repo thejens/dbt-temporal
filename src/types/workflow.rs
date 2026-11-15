@@ -1371,4 +1371,103 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
         assert!(again.node_results_partial);
     }
+
+    #[test]
+    fn effective_env_carries_input_env_through() {
+        let input = DbtRunInput {
+            project: None,
+            indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
+            resume_from: None,
+            command: "build".into(),
+            select: None,
+            exclude: None,
+            vars: BTreeMap::new(),
+            target: None,
+            full_refresh: false,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::from([("API_TOKEN".into(), "secret-123".into())]),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
+            retry_from: None,
+            state_manifest_ref: None,
+        };
+        let env = input.base_env();
+        assert_eq!(env.get("API_TOKEN").map(String::as_str), Some("secret-123"));
+    }
+
+    #[test]
+    fn effective_env_injects_underscore_with_serialised_input() -> anyhow::Result<()> {
+        // The workflow exposes the full payload via env_var('_'),
+        // mirroring bash's `$_`. Macros parse this JSON to read the original
+        // command, so the field must round-trip the input verbatim.
+        let input = DbtRunInput {
+            project: Some("waffle".into()),
+            indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
+            resume_from: None,
+            command: "compile".into(),
+            select: Some("+stg_customers".into()),
+            exclude: None,
+            vars: BTreeMap::from([("env_label".into(), serde_json::json!("dev"))]),
+            target: Some("dev".into()),
+            full_refresh: true,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::new(),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
+            retry_from: None,
+            state_manifest_ref: None,
+        };
+        let env = input.base_env();
+        let underscore = env
+            .get("_")
+            .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;
+        let parsed: DbtRunInput = serde_json::from_str(underscore)?;
+        assert_eq!(parsed.command, "compile");
+        assert_eq!(parsed.project.as_deref(), Some("waffle"));
+        assert_eq!(parsed.select.as_deref(), Some("+stg_customers"));
+        assert!(parsed.full_refresh);
+        Ok(())
+    }
+
+    #[test]
+    fn effective_env_overrides_caller_supplied_underscore() -> anyhow::Result<()> {
+        // The whole point of `_` is "the payload that started this workflow",
+        // so an explicit `_` in input.env must be replaced, not preserved.
+        let input = DbtRunInput {
+            project: None,
+            indirect_selection: None,
+            resource_types: Vec::new(),
+            exclude_resource_types: Vec::new(),
+            resume_from: None,
+            command: "run".into(),
+            select: None,
+            exclude: None,
+            vars: BTreeMap::new(),
+            target: None,
+            full_refresh: false,
+            fail_fast: false,
+            hooks: None,
+            env: BTreeMap::from([("_".into(), "garbage caller value".into())]),
+            defer_manifest_ref: None,
+            event_time_start: None,
+            event_time_end: None,
+            retry_from: None,
+            state_manifest_ref: None,
+        };
+        let env = input.base_env();
+        let underscore = env
+            .get("_")
+            .ok_or_else(|| anyhow::anyhow!("`_` must be set"))?;
+        assert_ne!(underscore, "garbage caller value");
+        assert!(underscore.contains("\"command\":\"run\""));
+        Ok(())
+    }
 }

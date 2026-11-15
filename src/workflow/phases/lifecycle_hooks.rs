@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn apply_post_run_outcome_err_marks_workflow_failed() {
-        // post-hook itself errored — even on a previously-successful run, the
+        // post-hook itself errored — even on a run whose nodes all succeeded, the
         // workflow is marked failed. (dbt-core: a failed on_success turns the
         // run red.)
         let mut hook_errors = Vec::new();

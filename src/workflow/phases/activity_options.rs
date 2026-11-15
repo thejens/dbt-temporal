@@ -27,8 +27,8 @@ pub(super) fn activity_failure(
     what: &str,
     e: &temporalio_sdk::ActivityExecutionError,
 ) -> WorkflowTermination {
-    // Histories recorded before cancellation was reported as such ended in
-    // failure here; the marker is only consulted on this path.
+    // A history recorded without the marker ended in failure here; the marker
+    // is only consulted on this path.
     if matches!(e, temporalio_sdk::ActivityExecutionError::Cancelled(_))
         && ctx.patched(FAILURE_FINALIZATION_PATCH)
     {

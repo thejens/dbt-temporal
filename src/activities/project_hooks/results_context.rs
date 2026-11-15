@@ -85,8 +85,8 @@ fn timing_value(timing: &crate::types::TimingEntry) -> minijinja::Value {
 /// The `node` of a result: the resolved node as dbt serializes it, so
 /// `node.config`, `node.tags` and the rest read as they do in dbt.
 ///
-/// A result whose node is not in the resolver (a node of another project, or a
-/// run planned by an older worker) carries only its `unique_id`.
+/// A result whose node is not in the resolver (a node of another project, or one
+/// the resolver does not hold) carries only its `unique_id`.
 fn node_value(unique_id: &str, nodes: &dbt_schemas::schemas::Nodes) -> minijinja::Value {
     let Some(node) = nodes.get_node(unique_id) else {
         let mut minimal = BTreeMap::<String, minijinja::Value>::new();

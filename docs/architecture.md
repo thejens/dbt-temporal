@@ -128,15 +128,18 @@ nothing.
 | [`adapter.rs`](../src/worker/adapter.rs) | `build_adapter_engine`, `build_adapter_engines`, `build_artifact_store` |
 | [`engines.rs`](../src/worker/engines.rs) | `AdapterEngines` — the per-adapter engine registry nodes route through |
 | [`profile/mod.rs`](../src/worker/profile/mod.rs) | `rebuild_adapter_engines_with_env` (per-workflow env overrides) |
-| [`profile/render.rs`](../src/worker/profile/render.rs) | Re-rendering `profiles.yml` with a workflow's env map |
+| [`profile/render/`](../src/worker/profile/render/) | Re-rendering `profiles.yml` with a workflow's env map |
 | [`temporal.rs`](../src/worker/temporal.rs) | TLS options, worker identity, worker config construction |
 | [`shutdown.rs`](../src/worker/shutdown.rs) | Graceful shutdown on `SIGTERM` / `SIGINT` |
 | [`project_checks.rs`](../src/worker/project_checks.rs) | Writes the metadata project checks read, once per project at startup |
 | [`defer_cache.rs`](../src/worker/defer_cache.rs) | Decoded `--defer` manifests, shared across a run's activities |
-| [`schemas.rs`](../src/worker/schemas.rs) | Target schemas already created, per run |
+| [`schemas/`](../src/worker/schemas/) | Target schemas already created, per run |
 | **Workflow** (`src/workflow/`) | |
-| [`mod.rs`](../src/workflow/mod.rs) | `dbt_run_workflow` |
-| [`phases.rs`](../src/workflow/phases.rs) | One helper per run phase (plan, hooks, checks, artifacts, continue-as-new) |
+| [`mod.rs`](../src/workflow/mod.rs) | `dbt_run_workflow`: state, query and update handlers, the run entry point |
+| [`drive.rs`](../src/workflow/drive.rs) | `drive_run`: the run's phases in order, and node scheduling |
+| [`continuation.rs`](../src/workflow/continuation.rs) | Resume from a checkpoint and continue-as-new |
+| [`run_summary.rs`](../src/workflow/run_summary.rs) | The CLI-style summary appended to the run log |
+| [`phases.rs`](../src/workflow/phases.rs) | Re-exports the per-phase helpers in `phases/`: `planning`, `project_checks`, `lifecycle_hooks` (pre_run / on_success / on_failure), `project_hooks` (on-run-start / on-run-end), `segment_state`, `artifacts`, `terminal_status`, and the shared `activity_options` |
 | [`scheduler.rs`](../src/workflow/scheduler.rs) | Pure readiness scheduler: which nodes to start or skip next |
 | [`ready_queue.rs`](../src/workflow/ready_queue.rs) | Workflow driver around the scheduler: activities, run log, memo, continue-as-new |
 | [`levels.rs`](../src/workflow/levels.rs) | The level loop, kept to replay histories it recorded |
@@ -150,8 +153,8 @@ nothing.
 | [`render_env.rs`](../src/activities/render_env.rs) | Per-activity Jinja environment + adapter setup |
 | [`retry.rs`](../src/activities/retry.rs) | Retry classification at the activity boundary |
 | [`project_checks/`](../src/activities/project_checks/) | `run_project_checks` — the project-check gate |
-| [`project_hooks.rs`](../src/activities/project_hooks.rs) | `run_project_hooks` — render `on-run-start` / `on-run-end` from `dbt_project.yml` |
-| [`store_artifacts.rs`](../src/activities/store_artifacts.rs) | `store_artifacts` — write run results + manifest |
+| [`project_hooks/`](../src/activities/project_hooks/) | `run_project_hooks` — render `on-run-start` / `on-run-end` from `dbt_project.yml`; one module each for the `results`, `schemas` and `model` contexts and for loading prior segments |
+| [`store_artifacts/`](../src/activities/store_artifacts/) | `store_artifacts` — write run results + manifest; one module each for `run_results.json`, the freshness artifacts, compiled-SQL read-back, prior-segment collection, the catalog hand-off and the artifact metadata |
 | [`catalog.rs`](../src/activities/catalog.rs) | `catalog.json` generation (`WRITE_CATALOG`) |
 | [`segment_state.rs`](../src/activities/segment_state.rs) | Run state handed across a continue-as-new boundary |
 | [`heartbeat.rs`](../src/activities/heartbeat.rs) | Periodic `record_heartbeat` ticker for long-running activities |

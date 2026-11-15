@@ -175,8 +175,8 @@ pub(super) async fn drive_run(
 
     // A finished run's memo is written once, after the summary line. Only
     // the cancelled path returns before that write, so it publishes its
-    // terminal state here. Replays of histories recorded before the patch
-    // keep the unconditional write.
+    // terminal state here. A history recorded without the patch marker
+    // replays the unconditional write.
     if levels.was_cancelled || !ctx.patched(SINGLE_TERMINAL_MEMO_PATCH) {
         upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
     }

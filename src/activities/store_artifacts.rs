@@ -12,6 +12,7 @@ use crate::error::DbtTemporalError;
 use crate::types::{DbtCommand, StoreArtifactsInput, StoreArtifactsOutput};
 
 use super::DbtActivities;
+use super::artifact_status::ArtifactStatus;
 use super::heartbeat;
 use super::retry;
 
@@ -441,26 +442,18 @@ fn run_result_output(
     }
 }
 
-/// dbt's status vocabulary for one node.
-///
-/// dbt does not use one set of words for everything: a data test passes or
-/// fails, a freshness check reports the status it measured, and a model
-/// succeeds or errors. Emitting `success` for a passing test made every test
-/// row unreadable to a consumer expecting `pass`.
+/// dbt's status word for one node: a freshness check reports the grade it
+/// measured, an assertion passes or fails, anything else keeps its own word.
 fn dbt_status(result: &crate::types::NodeExecutionResult) -> String {
-    use crate::types::NodeStatus;
-
-    if let Some(freshness) = result.freshness.as_ref() {
-        return freshness.status.as_str().to_string();
-    }
-    let is_test =
-        result.unique_id.starts_with("test.") || result.unique_id.starts_with("unit_test.");
-    match (is_test, result.status) {
-        (true, NodeStatus::Success) => "pass".to_string(),
-        (true, NodeStatus::Error) => "fail".to_string(),
-        // `warn` is already dbt's word for it, for a test and a model alike.
-        (_, status) => status.as_str().to_string(),
-    }
+    result
+        .freshness
+        .as_ref()
+        .map_or_else(
+            || ArtifactStatus::for_node(&result.unique_id, result.status),
+            |freshness| ArtifactStatus::for_freshness(freshness.status),
+        )
+        .as_str()
+        .to_string()
 }
 
 /// Adapter responses arrive as JSON and leave as YAML values — the same data,
@@ -899,6 +892,44 @@ mod tests {
         assert_eq!(results[1]["status"], "fail", "test.p.unique_id: {parsed}");
         assert_eq!(results[2]["status"], "success", "a model still succeeds");
         assert_eq!(results[3]["status"], "warn", "freshness reports what it measured");
+        Ok(())
+    }
+
+    /// The artifact this worker writes is the input `retry_from` reads, so the
+    /// two must agree on every kind of result a run can contain.
+    #[test]
+    fn written_run_results_select_exactly_the_nodes_retry_reruns() -> anyhow::Result<()> {
+        let input = freshness_input(
+            "build",
+            vec![
+                sample_result("model.p.ok", NodeStatus::Success, 0.1),
+                sample_result("model.p.bad", NodeStatus::Error, 0.1),
+                sample_result("model.p.blocked", NodeStatus::Skipped, 0.0),
+                sample_result("model.p.killed", NodeStatus::Cancelled, 0.0),
+                sample_result("test.p.passes", NodeStatus::Success, 0.1),
+                sample_result("test.p.fails", NodeStatus::Error, 0.1),
+                sample_result("test.p.warns", NodeStatus::Warn, 0.1),
+                sample_result("unit_test.p.m.fails", NodeStatus::Error, 0.1),
+                with_freshness("source.p.s.fresh", "source", FreshnessGrade::Pass),
+                with_freshness("source.p.s.aging", "source", FreshnessGrade::Warn),
+                with_freshness("source.p.s.stale", "source", FreshnessGrade::Error),
+            ],
+        );
+
+        let written = build_run_results_json(&input, &BTreeMap::new())?;
+        let ids = crate::activities::plan::parse_retry_node_ids(written.as_bytes())?;
+
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            [
+                "model.p.bad",
+                "model.p.blocked",
+                "model.p.killed",
+                "source.p.s.stale",
+                "test.p.fails",
+                "unit_test.p.m.fails",
+            ]
+        );
         Ok(())
     }
 

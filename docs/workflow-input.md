@@ -42,7 +42,7 @@ project.
 | `hooks` | none | from `dbt_temporal.yml` | Lifecycle hooks for this run; replaces the project's defaults. See [hooks](hooks.md). |
 | `defer_manifest_ref` | `--defer --state` | none | A previous `manifest.json`; refs to nodes this run does not build resolve to the relations it records. |
 | `state_manifest_ref` | `--state` | none | A previous `manifest.json` for the `state:` selector methods (`modified`, `new`, `old`, `unmodified`). |
-| `retry_from` | `dbt retry` | none | A previous run's `run_results.json`; the plan keeps only the nodes that did not succeed in it. |
+| `retry_from` | `dbt retry` | none | A previous run's `run_results.json`; the plan keeps only the nodes that errored, failed, were skipped or never finished in it, as `dbt retry` does. Nodes that warned are not re-run. |
 | `event_time_start`, `event_time_end` | `--event-time-start`, `--event-time-end` | none | Microbatch window, RFC 3339. Both or neither, and the start must precede the end. |
 
 The manifest and run-results references are paths or URIs in the worker's

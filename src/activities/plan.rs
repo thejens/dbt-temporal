@@ -12,6 +12,7 @@ use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan, NodeInfo, RunOutcome}
 use crate::worker_state::WorkerState;
 
 use super::DbtActivities;
+use super::artifact_status::ArtifactStatus;
 use super::dag::{
     build_dependency_map, independent_nodes, inject_test_gates, inject_unit_test_gates,
     topological_levels,
@@ -411,9 +412,9 @@ pub async fn plan_project_inner(
         anyhow::bail!("no nodes matched after applying selectors");
     }
 
-    // Retry-from-failure: narrow the selection to nodes that did not succeed
-    // in a previous run. Skipped nodes are included because they were blocked
-    // by failures, mirroring `dbt retry`.
+    // Retry-from-failure: narrow the selection to the nodes `dbt retry` would
+    // re-run from a previous run (errored, failed and skipped ones; skipped
+    // nodes were blocked by a failure).
     let selected_ids = if let Some(ref retry_ref) = input.retry_from {
         let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -431,12 +432,12 @@ pub async fn plan_project_inner(
             .collect();
         anyhow::ensure!(
             !filtered.is_empty(),
-            "retry_from: every selected node succeeded in the previous run — nothing to retry"
+            "retry_from: no selected node errored, failed or was skipped in the previous run — nothing to retry"
         );
         warn!(
             retrying = filtered.len(),
             from = %retry_ref,
-            "retry_from: narrowed plan to nodes that did not succeed previously"
+            "retry_from: narrowed plan to nodes that errored, failed or were skipped previously"
         );
         filtered
     } else {
@@ -586,12 +587,17 @@ fn selectors_use_state(select: Option<&str>, exclude: Option<&str>) -> bool {
     uses(select) || uses(exclude)
 }
 
-/// Node ids eligible for retry, parsed from a previous `run_results.json`:
-/// everything whose status is not `success`. Tolerates extra fields so it can
-/// read both our artifacts and dbt-core-shaped run results.
-fn parse_retry_node_ids(bytes: &[u8]) -> Result<std::collections::BTreeSet<String>, anyhow::Error> {
-    use crate::types::NodeStatus;
-
+/// Node ids a retry re-runs, parsed from a previous `run_results.json`: the
+/// nodes `dbt retry` would pick (see [`ArtifactStatus::is_retryable`]).
+///
+/// Reads the status as a plain string, so both this worker's artifacts and the
+/// dbt CLI's parse. A status word this worker does not know is retried: it
+/// cannot be shown to be an outcome that finished well, and re-running a
+/// node whose materialization is idempotent costs less than silently leaving
+/// a failed one behind.
+pub(super) fn parse_retry_node_ids(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeSet<String>, anyhow::Error> {
     #[derive(serde::Deserialize)]
     struct RunResults {
         results: Vec<ResultEntry>,
@@ -599,7 +605,7 @@ fn parse_retry_node_ids(bytes: &[u8]) -> Result<std::collections::BTreeSet<Strin
     #[derive(serde::Deserialize)]
     struct ResultEntry {
         unique_id: String,
-        status: NodeStatus,
+        status: String,
     }
 
     let parsed: RunResults =
@@ -607,7 +613,17 @@ fn parse_retry_node_ids(bytes: &[u8]) -> Result<std::collections::BTreeSet<Strin
     Ok(parsed
         .results
         .into_iter()
-        .filter(|r| r.status != NodeStatus::Success)
+        .filter(|r| {
+            let known = ArtifactStatus::parse(&r.status);
+            if known.is_none() {
+                warn!(
+                    unique_id = %r.unique_id,
+                    status = %r.status,
+                    "retry_from: unrecognised status in previous run_results, retrying the node"
+                );
+            }
+            known.is_none_or(ArtifactStatus::is_retryable)
+        })
         .map(|r| r.unique_id)
         .collect())
 }
@@ -1069,23 +1085,49 @@ mod tests {
 
     // --- parse_retry_node_ids ---
 
+    /// Written the way the dbt CLI writes it, with its vocabulary.
     #[test]
-    fn parse_retry_node_ids_keeps_non_success_only() -> anyhow::Result<()> {
+    fn parse_retry_node_ids_reads_dbt_written_results() -> anyhow::Result<()> {
         let json = serde_json::json!({
-            "metadata": {"invocation_id": "x"},
+            "metadata": {"invocation_id": "x", "dbt_version": "1.9.0"},
+            "elapsed_time": 3.2,
+            "args": {"which": "build"},
             "results": [
                 {"unique_id": "model.p.ok", "status": "success", "execution_time": 1.0},
                 {"unique_id": "model.p.bad", "status": "error", "execution_time": 0.5},
                 {"unique_id": "model.p.blocked", "status": "skipped", "execution_time": 0.0},
-                {"unique_id": "model.p.killed", "status": "cancelled", "execution_time": 0.0},
+                {"unique_id": "model.p.batched", "status": "partial success"},
+                {"unique_id": "model.p.noop", "status": "no-op"},
+                {"unique_id": "model.p.reused", "status": "reused"},
+                {"unique_id": "test.p.passes", "status": "pass", "failures": 0},
+                {"unique_id": "test.p.fails", "status": "fail", "failures": 4},
+                {"unique_id": "test.p.warns", "status": "warn", "failures": 1},
+                {"unique_id": "source.p.s.t", "status": "runtime error"},
             ],
         });
         let ids = parse_retry_node_ids(serde_json::to_vec(&json)?.as_slice())?;
-        assert_eq!(ids.len(), 3);
-        assert!(!ids.contains("model.p.ok"));
-        assert!(ids.contains("model.p.bad"));
-        assert!(ids.contains("model.p.blocked"));
-        assert!(ids.contains("model.p.killed"));
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            [
+                "model.p.bad",
+                "model.p.blocked",
+                "source.p.s.t",
+                "test.p.fails"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_retry_node_ids_retries_an_unrecognised_status() -> anyhow::Result<()> {
+        let json = serde_json::json!({
+            "results": [
+                {"unique_id": "model.p.ok", "status": "success"},
+                {"unique_id": "model.p.odd", "status": "exploded"},
+            ],
+        });
+        let ids = parse_retry_node_ids(serde_json::to_vec(&json)?.as_slice())?;
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["model.p.odd"]);
         Ok(())
     }
 

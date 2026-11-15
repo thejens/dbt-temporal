@@ -1,6 +1,7 @@
 // The `#[activities]` macro generates per-activity definition types without Debug impls.
 #![allow(missing_debug_implementations)]
 
+pub mod artifact_status;
 pub mod cancellable;
 mod catalog;
 pub mod dag;

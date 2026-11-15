@@ -23,7 +23,7 @@
 //! run (see `worker::relation_cache`): an ancestor shared by many nodes is
 //! rendered once, not once per descendant.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dbt_schemas::schemas::InternalDbtNodeAttributes;
@@ -31,8 +31,10 @@ use dbt_schemas::schemas::nodes::NodeBaseAttributes;
 use dbt_schemas::schemas::telemetry::NodeType;
 
 mod naming_macro;
+mod scope;
 
 use naming_macro::{custom_name, naming_macro_node, naming_template, render_naming_macro};
+use scope::{project_edges, rewrite_scope};
 
 use super::sql_rewrite::{RelationMove, RelationRewrite};
 use crate::activities::render_env::RenderOverrides;
@@ -53,12 +55,9 @@ pub struct ResolvedRelations {
 /// Resolve the relations the executing node can name, under this workflow's
 /// env overrides.
 ///
-/// The scope is the node itself plus everything it transitively depends on:
-/// exactly the set a compiled statement can mention, through its own `ref()`s,
-/// through the CTEs an ephemeral ancestor injects, and — for a unit test —
-/// through the SQL of the model under test. Resolving the whole project would
-/// mean a macro render per project node per activity to answer questions
-/// nobody asked.
+/// The scope is the node itself plus the relations its compiled SQL can name
+/// (see [`scope::rewrite_scope`]). Resolving more would mean a macro render per
+/// extra node per activity to answer questions nobody asked.
 ///
 /// `invocation_id` and `overrides` identify the run whose earlier answers may be
 /// reused; `jinja_env` must be the environment those overrides were applied to.
@@ -90,7 +89,7 @@ pub fn resolve_relations(
             ))
         });
 
-    for id in rewrite_scope(&state.resolver_state.nodes, unique_id) {
+    for id in rewrite_scope(unique_id, project_edges(&state.resolver_state.nodes)) {
         let Some(node) = state.resolver_state.nodes.get_node(&id) else {
             continue;
         };
@@ -219,21 +218,6 @@ fn resolve_one(
 /// the ordinary case in a dev project — is exactly when that bites.
 fn takes_part_in_the_rewrite(node: &dyn InternalDbtNodeAttributes) -> bool {
     node.resource_type() != NodeType::Source
-}
-
-/// The node itself plus everything it transitively depends on.
-fn rewrite_scope(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) -> BTreeSet<String> {
-    let mut seen = BTreeSet::new();
-    let mut queue = vec![unique_id.to_owned()];
-    while let Some(id) = queue.pop() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        if let Some(node) = nodes.get_node(&id) {
-            queue.extend(node.base().depends_on.nodes.iter().cloned());
-        }
-    }
-    seen
 }
 
 fn compute_patched_relation_inner(

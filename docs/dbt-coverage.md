@@ -43,8 +43,8 @@ Not planned:
 | `manifest.json` | Written from the invocation's own parse. | Written from the start-up parse, with the run's selection. | Same cause. |
 | Microbatch models | One batch per period in the window, each retried on its own. | One activity covers the window given by `event_time_start` and `event_time_end`. | Per-batch activities are the natural Temporal shape and are not built yet. |
 | `run_results.json` `thread_id` | The dbt thread name. | Always `main`. | There are no dbt threads. Nothing in dbt reads the field. |
-| Artifacts of a failed or cancelled run | Written with whatever finished. | Not always written. | To be aligned: artifacts should be stored on every exit path. |
-| `on-run-end` failure | dbt Core fails the run. | Reported, and the run's outcome is unchanged. | To be aligned with dbt. |
+| Nodes the run never reached, in `run_results.json` | A node skipped after a failure is `skipped`. An interrupted dbt Core run has no row for the nodes it did not reach. | A cancelled run records them as `cancelled`, which dbt has no word for; a run that fails after some nodes ran records them as `skipped`. `retry_from` re-runs both. | `cancelled` tells an operator the node was stopped, not that something upstream failed. |
+| Failed `on-run-end` hook in `run_results.json` | A failed hook adds an `operation.<project>.<hook>` row. | No row. The failure is in `hook_errors` and fails the run. | `run_results.json` is stored before the hooks run. |
 | `generate_alias_name` under an env override | Every invocation calls it. | Called at start-up only. An override recomputes database and schema, not the alias. | To be aligned. Matters only to an alias macro that reads the environment or `node.schema`. |
 | Snapshot `target_schema` / `target_database` under an env override | dbt skips the naming macros for a snapshot that sets them. | The naming macros run for it. | To be aligned. |
 | `@` with `+` (`@+model`) | dbt Core applies both. dbt v2 lets the `+` win. | Follows dbt v2. | The worker embeds dbt v2. |

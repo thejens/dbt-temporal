@@ -52,7 +52,12 @@ A failure in any phase after planning ends the run through one place that sets
 `DbtStatus` to `failed`, fires the `on_failure` hooks (when the project's
 configuration was resolved) and leaves the reason on the workflow's details
 line. A cancellation that arrives during such a phase ends the workflow as
-cancelled and sets `DbtStatus` to `cancelled`. A failure before planning
+cancelled and sets `DbtStatus` to `cancelled`. If the nodes had already run,
+the same ending stores the run's artifacts first, so a cancelled or failed run
+leaves a `run_results.json` that `retry_from` can read: the nodes that finished
+as they finished, the rest as `cancelled` (cancellation) or `skipped`
+(failure). That write is detached from the cancellation and best effort; if it
+fails, the failure is logged and the run ends as it would have. A failure before planning
 completes has no invocation and no `running` status to replace, so it only
 fails the workflow. A `pre_run` hook failure is reported by the child-workflow
 machinery as an ordinary failure, so a cancellation during one ends as failed.
@@ -71,6 +76,11 @@ through the render environment. Cancelling the activity cancels that source, so
 dbt aborts the statement it is running, and the activity then **joins** the
 work rather than dropping it — an abandoned blocking thread would keep going
 against the warehouse with nothing waiting for it.
+
+`store_artifacts` works the same way when it builds `catalog.json`: the catalog's
+queries run under the activity's own source, so a cancellation, or the timeout
+reaching the worker at its next heartbeat, stops them and the activity waits
+for them to end.
 
 ## Retry Configuration
 

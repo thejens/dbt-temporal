@@ -74,6 +74,8 @@ struct Project {
     dir: tempfile::TempDir,
     profiles: tempfile::TempDir,
     artifacts: tempfile::TempDir,
+    /// Whether the worker writes `catalog.json` with the other artifacts.
+    write_catalog: bool,
 }
 
 fn write_project(models: &[(String, String)]) -> Result<Project> {
@@ -107,6 +109,7 @@ fn write_project_with(extra_project_yml: &str, models: &[(String, String)]) -> R
         dir,
         profiles,
         artifacts,
+        write_catalog: false,
     })
 }
 
@@ -124,7 +127,7 @@ fn config(project: &Project, temporal_addr: &str, concurrency: u32) -> DbtTempor
         health_file: None,
         health_port: None,
         write_artifacts: true,
-        write_catalog: false,
+        write_catalog: project.write_catalog,
         artifact_store: project.artifacts.path().to_string_lossy().to_string(),
         search_attributes: BTreeMap::new(),
         write_run_log: true,
@@ -575,6 +578,289 @@ fn cancelling_outside_the_node_loop_ends_the_run_as_cancelled() -> Result<()> {
 
     assert_eq!(status_values(&events), ["running", "cancelled"]);
     assert_eq!(child_workflow_types(&events), Vec::<String>::new());
+    Ok(())
+}
+
+const FAILING_ON_RUN_END: &str = "on-run-end:\n  - \"select from from\"";
+
+/// A fire-and-forget hook of `workflow_type`, which needs no worker to listen.
+fn fire_and_forget(workflow_type: &str) -> HookConfig {
+    HookConfig {
+        workflow_type: workflow_type.to_string(),
+        task_queue: "no-worker-listens-here".to_string(),
+        timeout_secs: None,
+        on_error: HookErrorMode::default(),
+        input: None,
+        fire_and_forget: true,
+    }
+}
+
+/// The first file called `name` anywhere under `root`.
+fn find_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|n| n == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn read_run_results(project: &Project) -> Result<serde_json::Value> {
+    let path = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
+/// As in dbt, a failing `on-run-end` hook fails the run: the workflow fails,
+/// `DbtStatus` ends `failed`, and the failure hooks fire in place of the success
+/// hooks. The nodes' own results are still written.
+#[test]
+fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
+    let project = write_project_with(
+        FAILING_ON_RUN_END,
+        &[("ok".to_string(), "select 1 as id".to_string())],
+    )?;
+    let mut input = run_input(false);
+    input.hooks = Some(HooksConfig {
+        on_success: vec![fire_and_forget("notify_success")],
+        on_failure: vec![fire_and_forget("notify_failure")],
+        ..HooksConfig::default()
+    });
+
+    let events = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Failed(_))),
+            "the run should fail: {result:?}"
+        );
+        history_events(&handle).await
+    })?;
+
+    assert_eq!(status_values(&events), ["running", "failed"]);
+    assert_eq!(child_workflow_types(&events), ["notify_failure"]);
+    let results = read_run_results(&project)?;
+    assert_eq!(results["results"][0]["unique_id"], "model.spike.ok");
+    assert_eq!(results["results"][0]["status"], "success");
+    Ok(())
+}
+
+/// Run two models with `hook` as the project's `on-run-end`, and report
+/// whether the run succeeded.
+///
+/// A hook cannot hand a value back, so the scenarios make it render invalid SQL
+/// when what it sees is not what is expected. That fails the run, because a
+/// failing `on-run-end` hook does.
+fn on_run_end_passes(hook: &str) -> Result<bool> {
+    let project = write_project_with(
+        &format!("on-run-end:\n  - \"{hook}\""),
+        &[
+            ("a".to_string(), "select 1 as id".to_string()),
+            ("b".to_string(), "select id from {{ ref('a') }}".to_string()),
+        ],
+    )?;
+    scenario(&project, 2, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, false).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        Ok(result.is_ok())
+    })
+}
+
+/// Fails the run (invalid SQL) unless `expected` holds.
+fn fail_unless(expected: &str) -> String {
+    format!("{{% if not ({expected}) %}}select from from{{% endif %}}")
+}
+
+/// `results` is dbt's list of result objects: each has the executed `node` and
+/// a status in dbt's words.
+#[test]
+fn on_run_end_results_carry_the_node_and_dbt_statuses() -> Result<()> {
+    let names_and_statuses = fail_unless(
+        "results | map(attribute='node') | map(attribute='name') | sort | join(',') == 'a,b' \
+         and results | map(attribute='status') | unique | list == ['success'] \
+         and results | map(attribute='node') | map(attribute='resource_type') | unique | list \
+             == ['model']",
+    );
+    assert!(on_run_end_passes(&names_and_statuses)?);
+
+    // The same hook refuses what it should: the check is not vacuous.
+    let wrong_name = fail_unless(
+        "results | map(attribute='node') | map(attribute='name') \
+                                  | join(',') == 'nobody'",
+    );
+    assert!(!on_run_end_passes(&wrong_name)?);
+    Ok(())
+}
+
+/// `schemas` and `database_schemas` name where the run built its relations.
+#[test]
+fn on_run_end_sees_the_schemas_the_run_built_into() -> Result<()> {
+    let built = fail_unless(
+        "schemas | list == ['main'] and database_schemas | length == 1 \
+         and database_schemas[0][1] == 'main'",
+    );
+    assert!(on_run_end_passes(&built)?);
+
+    let wrong = fail_unless("schemas | list == ['elsewhere']");
+    assert!(!on_run_end_passes(&wrong)?);
+    Ok(())
+}
+
+/// `status` of each result in a project's stored `run_results.json`, by node.
+fn stored_statuses(project: &Project) -> Result<BTreeMap<String, String>> {
+    let results = read_run_results(project)?;
+    results["results"]
+        .as_array()
+        .context("results should be an array")?
+        .iter()
+        .map(|r| {
+            Ok((
+                r["unique_id"].as_str().context("unique_id")?.to_string(),
+                r["status"].as_str().context("status")?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The nodes a `retry_from` run plans from `run_results`, found by planning
+/// with `list` so that nothing executes.
+fn nodes_retried_from(
+    project: &Project,
+    run_results: &std::path::Path,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut input = run_input(false);
+    input.command = "list".to_string();
+    input.retry_from = Some(run_results.to_string_lossy().into_owned());
+    scenario(project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        let raw = handle
+            .get_result(WorkflowGetResultOptions::default())
+            .await
+            .context("planning the retry")?;
+        let payload = raw
+            .payloads
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no result payload"))?;
+        let output: DbtRunOutput = serde_json::from_slice(&payload.data)?;
+        Ok(output
+            .node_results
+            .into_iter()
+            .map(|r| r.unique_id)
+            .collect())
+    })
+}
+
+/// A run cancelled while a node executes still stores what it has: the node
+/// that finished as it finished, the rest as cancelled, in a `run_results.json`
+/// that `retry_from` plans from.
+#[test]
+fn a_cancelled_run_leaves_run_results_that_retry_from_reads() -> Result<()> {
+    let slow = "{{ config(materialized='table') }}\n\
+                select sum(a.range * b.range) as total \
+                from range(120000) as a, range(120000) as b";
+    let project = write_project(&[
+        ("done".to_string(), "select 1 as id".to_string()),
+        ("slow_a".to_string(), slow.to_string()),
+        ("after".to_string(), "select total from {{ ref('slow_a') }}".to_string()),
+    ])?;
+
+    scenario(&project, 4, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, false).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        handle.cancel(WorkflowCancelOptions::default()).await?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_mins(1),
+            handle.get_result(WorkflowGetResultOptions::default()),
+        )
+        .await
+        .context("the cancelled workflow did not end")?;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Cancelled { .. })),
+            "expected cancellation: {result:?}"
+        );
+        Ok(())
+    })?;
+
+    let expected = BTreeMap::from([
+        ("model.spike.after".to_string(), "cancelled".to_string()),
+        ("model.spike.done".to_string(), "success".to_string()),
+        ("model.spike.slow_a".to_string(), "cancelled".to_string()),
+    ]);
+    assert_eq!(stored_statuses(&project)?, expected);
+
+    let run_results = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    let retried = nodes_retried_from(&project, &run_results)?;
+    assert_eq!(
+        retried,
+        ["model.spike.after", "model.spike.slow_a"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    );
+    Ok(())
+}
+
+/// A run that fails fast leaves the nodes it never started as skipped, and
+/// `retry_from` plans the failure and everything the run did not do.
+#[test]
+fn a_failed_run_leaves_run_results_that_retry_from_reads() -> Result<()> {
+    let project = write_project(&[
+        ("bad".to_string(), "select from from".to_string()),
+        ("child".to_string(), "select * from {{ ref('bad') }}".to_string()),
+        ("fine".to_string(), "select 1 as id".to_string()),
+    ])?;
+
+    scenario(&project, 1, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, true).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Failed(_))),
+            "the run should fail: {result:?}"
+        );
+        Ok(())
+    })?;
+
+    let statuses = stored_statuses(&project)?;
+    assert_eq!(statuses["model.spike.bad"], "error");
+    assert_eq!(statuses["model.spike.child"], "skipped");
+    let run_results = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    let retried = nodes_retried_from(&project, &run_results)?;
+    assert!(retried.contains("model.spike.bad") && retried.contains("model.spike.child"));
+    // Whether `fine` ran before the failure depends on scheduling; the retry
+    // re-runs it exactly when it did not succeed.
+    assert_eq!(retried.contains("model.spike.fine"), statuses["model.spike.fine"] != "success");
+    Ok(())
+}
+
+/// The catalog is built under the artifact activity's own cancellation token;
+/// a run with it enabled still stores `catalog.json` describing what it built.
+#[test]
+fn a_run_with_the_catalog_enabled_stores_it() -> Result<()> {
+    let mut project = write_project(&[(
+        "orders".to_string(),
+        "{{ config(materialized='table') }}\nselect 1 as id, 'x' as label".to_string(),
+    )])?;
+    project.write_catalog = true;
+
+    let finished = run_workflow(&project, 2)?;
+
+    let artifacts = finished
+        .output
+        .artifacts
+        .context("the run should have stored artifacts")?;
+    let catalog_path = artifacts
+        .catalog_path
+        .context("catalog.json should have been stored")?;
+    let catalog: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(catalog_path)?)?;
+    let columns = &catalog["nodes"]["model.spike.orders"]["columns"];
+    assert!(columns.get("id").is_some() && columns.get("label").is_some(), "{catalog}");
     Ok(())
 }
 

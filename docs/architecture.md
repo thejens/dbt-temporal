@@ -56,7 +56,7 @@ flowchart TD
 
 8. **`store_artifacts` activity**: Writes `run_results.json`, `manifest.json`, and optionally `log.txt` (a CLI-style run log) to the configured artifact store (local filesystem or GCS/S3).
 
-9. **`run_project_hooks` activity (`on-run-end`)**: Always fires (even after failure), with the standard `results` Jinja list populated from `node_results`. Errors are recorded in `DbtRunOutput.hook_errors` but do not flip the run's success status.
+9. **`run_project_hooks` activity (`on-run-end`)**: Always fires (even after failure), with dbt's `results` list built from `node_results`, plus `schemas` and `database_schemas`. A hook that fails is recorded in `DbtRunOutput.hook_errors` and fails the run, as in dbt; the node results and the stored artifacts are unchanged.
 
 10. **`on_success` / `on_failure` lifecycle hooks**: Child workflows that receive the run's output — notifications, downstream triggers. See [hooks](hooks.md).
 

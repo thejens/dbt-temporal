@@ -18,7 +18,8 @@ use std::time::{Duration, SystemTime};
 use temporalio_common::search_attributes::SearchAttributeUpdate;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{
-    ActivityOptions, LocalActivityOptions, MemoValue, WorkflowContext, WorkflowTermination,
+    ActivityOptions, LocalActivityOptions, MemoValue, WorkflowCancellationToken, WorkflowContext,
+    WorkflowTermination,
 };
 
 use crate::activities::DbtActivities;
@@ -33,7 +34,8 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    FAILURE_FINALIZATION_PATCH, activity_error_message, build_retry_policy, elapsed_secs, plural,
+    FAILURE_FINALIZATION_PATCH, ON_RUN_END_FAILS_RUN_PATCH, activity_error_message,
+    build_retry_policy, elapsed_secs, plural,
 };
 use super::search_attributes::build_search_attribute_updates;
 
@@ -585,16 +587,51 @@ pub async fn store_run_artifacts(
     if !plan.write_artifacts {
         return Ok((None, None));
     }
-    let artifacts: StoreArtifactsOutput = ctx
-        .execute_activity(
-            DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, command, record, facts),
-            bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry),
-        )
-        .await
-        .map_err(|e| activity_failure(ctx, "store_artifacts activity failed", &e))?;
+    let options =
+        bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry);
+    let artifacts = schedule_store_artifacts(ctx, plan, command, record, options, facts).await?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))
+}
+
+/// [`store_run_artifacts`] for a run that is already ending, cancelled or
+/// failed.
+///
+/// The activity is detached from the workflow's cancellation. An activity
+/// scheduled under a cancelled workflow is cancelled before it starts, and the
+/// artifacts of a cancelled run are the ones its `retry_from` needs.
+pub async fn store_artifacts_of_ended_run(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    plan: &ExecutionPlan,
+    command: &str,
+    record: RunRecord<'_>,
+    timeouts: &TimeoutConfig,
+    retry: &RetryConfig,
+    facts: crate::workflow::helpers::RunFacts<'_>,
+) -> Result<(), WorkflowTermination> {
+    let mut options =
+        bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry);
+    options.cancellation_token = Some(WorkflowCancellationToken::new());
+    schedule_store_artifacts(ctx, plan, command, record, options, facts)
+        .await
+        .map(|_| ())
+}
+
+async fn schedule_store_artifacts(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    plan: &ExecutionPlan,
+    command: &str,
+    record: RunRecord<'_>,
+    options: ActivityOptions,
+    facts: crate::workflow::helpers::RunFacts<'_>,
+) -> Result<StoreArtifactsOutput, WorkflowTermination> {
+    ctx.execute_activity(
+        DbtActivities::store_artifacts,
+        build_store_artifacts_input(plan, command, record, facts),
+        options,
+    )
+    .await
+    .map_err(|e| activity_failure(ctx, "store_artifacts activity failed", &e))
 }
 
 /// The results an `on-run-end` hook sees: this segment's, plus the checkpoints
@@ -605,9 +642,14 @@ pub struct OnRunEndRecord<'a> {
     pub prior_segments: &'a [String],
 }
 
-/// Failure here is non-fatal: appended to `hook_errors`, doesn't change the
-/// run outcome. Always fires when configured, even when the run failed
-/// (matches dbt-core behaviour).
+/// Run the `on-run-end` hooks; `true` when one failed and the run has failed
+/// with it.
+///
+/// As in dbt, a failing hook fails the invocation but leaves the nodes' own
+/// results alone: the failure is recorded in `hook_errors` and the node
+/// results and artifacts stay as the nodes produced them. The hooks fire even
+/// when the run's nodes failed. A cancellation that reaches the activity ends
+/// the workflow as cancelled rather than as a failed hook.
 pub async fn run_on_run_end(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     plan: &ExecutionPlan,
@@ -615,9 +657,9 @@ pub async fn run_on_run_end(
     record: OnRunEndRecord<'_>,
     hook_errors: &mut Vec<HookError>,
     policy: HookPolicy<'_>,
-) {
+) -> Result<bool, WorkflowTermination> {
     if !plan.has_on_run_end {
-        return;
+        return Ok(false);
     }
     ctx.set_current_details("running on-run-end hooks".to_string());
     let result = ctx
@@ -634,14 +676,22 @@ pub async fn run_on_run_end(
             hook_activity_options(ProjectHookPhase::OnRunEnd, policy),
         )
         .await;
-    if let Err(e) = result {
-        tracing::error!(error = %e, "on-run-end hook failed (non-fatal)");
-        hook_errors.push(HookError {
-            hook_workflow_type: "on_run_end".to_string(),
-            event: "on_run_end".to_string(),
-            error: e.to_string(),
-        });
+    let Err(e) = result else {
+        return Ok(false);
+    };
+    // Consulted only on this path, so a run whose hooks passed records no
+    // marker.
+    let fails_run = ctx.patched(ON_RUN_END_FAILS_RUN_PATCH);
+    if fails_run && matches!(e, temporalio_sdk::ActivityExecutionError::Cancelled(_)) {
+        return Err(WorkflowTermination::cancelled());
     }
+    tracing::error!(error = %e, fails_run, "on-run-end hook failed");
+    hook_errors.push(HookError {
+        hook_workflow_type: "on_run_end".to_string(),
+        event: "on_run_end".to_string(),
+        error: e.to_string(),
+    });
+    Ok(fails_run)
 }
 
 /// Runs the on_success or on_failure hooks. Returns the post-hook `success`

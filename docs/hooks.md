@@ -33,15 +33,15 @@ Hooks defined in `dbt_project.yml`. These are standard dbt hooks and behave like
 
 - Builds the standard compile+run Jinja context (so `ref`, `source`, `log`, `target`, `env`, custom macros, and the adapter are all available).
 - Adds `execute=true` as a Jinja **global** so cross-template macros that check `{% if execute %}` work correctly.
-- For `on-run-end`, populates the `results` Jinja list — each entry has `unique_id`, `status`, `execution_time`, `message`, `failures`, `adapter_response`, and a `node` sub-object with `unique_id`, `name`, `resource_type`, `package_name`. This matches dbt-core's shape, so existing community macros like `log_run_results(results)` work unchanged.
+- For `on-run-end`, populates the `results`, `schemas` and `database_schemas` Jinja variables as dbt does. Each entry of `results` has `status` (in the words `run_results.json` uses: `success`, `error`, `skipped`, `warn`, and `pass` / `fail` for tests), `unique_id`, `node` (the resolved node as dbt serializes it, so `r.node.name`, `r.node.resource_type` and `r.node.config` work), `timing`, `adapter_response`, `message`, `failures`, `execution_time`, `thread_id` (always `main`) and `compiled_code`. `schemas` lists the schemas, and `database_schemas` the `[database, schema]` pairs, of the models, seeds and snapshots the run built successfully. Existing community macros like `log_run_results(results)` work unchanged.
 - Renders each hook template with `jinja_env.render_str(...)`. Side-effect macros (`run_query`, `statement`, `log`) execute against the warehouse during rendering. If the rendered output is non-empty SQL, it's executed directly via the adapter.
 
 Per-workflow `env` overrides apply: the activity rebuilds the adapter engine if `profiles.yml` uses `env_var()` and the workflow input set `env`, and patches `target.schema` / `target.database` accordingly. Hooks therefore see the same per-workflow connection as the models do.
 
 **Failure semantics:**
 - `on-run-start` failure aborts the workflow — no nodes execute.
-- `on-run-end` failure is non-fatal: the error is logged and recorded in `DbtRunOutput.hook_errors`, but the run's `success` status is unchanged.
-- Cancellation skips both `store_artifacts` and `on-run-end`.
+- `on-run-end` failure fails the run, as in dbt: the error is recorded in `DbtRunOutput.hook_errors`, `success` is false, `DbtStatus` ends `failed`, the `on_failure` lifecycle hooks fire instead of `on_success`, and the workflow fails. The nodes' own results and the stored artifacts are unchanged. A hook after the one that failed does not run, as in dbt.
+- Cancellation skips `on-run-end`. The run's artifacts are still stored; see [Runs that end outside the node loop](error-handling.md#runs-that-end-outside-the-node-loop).
 
 **Example** (`dbt_project.yml` + a custom macro):
 

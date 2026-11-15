@@ -28,5 +28,6 @@ with the [project README](../README.md) and its
 |-------|----------------|
 | [Architecture](architecture.md) | The run lifecycle, module layout and dependencies |
 | [`path:` selectors and ephemeral models](selector-semantics.md) | A worked comparison of selector behaviour with dbt Core |
+| [dbt feature coverage](dbt-coverage.md) | What differs from the dbt CLI, what is not supported yet, and the order it is planned in |
 | [dbt v2 workarounds](workarounds.md) | Upstream issues in dbt v2 and how the worker works around them |
 | [Releasing](releasing.md) | Cutting a release and what the release workflow publishes |

@@ -22,10 +22,9 @@ use crate::worker_state::WorkerState;
 ///
 /// A macro defined by a project is a *template*, `<package>.<macro>`, not a
 /// global of the Jinja environment. Rendering `{{ generate_schema_name(…) }}`
-/// as a plain expression therefore resolved dbt's built-in and returned
-/// `target.schema` no matter what the project had written — a project's
-/// override was accepted at startup and then never actually run. The macro is
-/// looked up and invoked the same way a materialization is.
+/// as a plain expression would resolve dbt's built-in and return
+/// `target.schema` whatever the project had written, so the macro is looked up
+/// and invoked the same way a materialization is.
 pub(super) fn render_naming_macro(
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     template_name: &str,

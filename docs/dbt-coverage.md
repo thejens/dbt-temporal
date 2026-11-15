@@ -39,7 +39,6 @@ Not planned:
 
 | Area | dbt | Here | Why |
 |------|-----|------|-----|
-| `test` command | Runs data tests and unit tests. | Runs data tests. Unit tests run under `build`. | To be aligned: `test` should select unit tests too. |
 | Parse-time `var()` and `env_var()` | Every invocation parses, so `--vars` reach `config()` blocks and `dbt_project.yml`. | The worker parses once at start-up. A run's `vars` and `env` reach everything rendered at run time; values read during parsing keep their start-up value. The planner warns when a run's vars appear in a `config()` block. | Parsing per run would cost seconds per workflow. Relation names are recomputed per run for env overrides; see [env overrides](env-overrides.md). |
 | `manifest.json` | Written from the invocation's own parse. | Written from the start-up parse, with the run's selection. | Same cause. |
 | Microbatch models | One batch per period in the window, each retried on its own. | One activity covers the window given by `event_time_start` and `event_time_end`. | Per-batch activities are the natural Temporal shape and are not built yet. |

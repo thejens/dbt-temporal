@@ -55,7 +55,7 @@ previous run returned in its output.
 |-----------|-----------|
 | `build` (default) | Models, tests, unit tests, seeds, snapshots and functions, in DAG order. |
 | `run` | Models. |
-| `test` | Data tests. Unit tests run under `build`. |
+| `test` | Data tests and unit tests. |
 | `seed` | Seeds. |
 | `snapshot` | Snapshots. |
 | `compile` | Compiles models, tests, snapshots and functions without materializing them. |

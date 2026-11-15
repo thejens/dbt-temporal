@@ -87,6 +87,41 @@ async fn run_command_selects_models_only() {
     );
 }
 
+/// `dbt test` runs unit tests alongside data tests, and nothing else.
+#[tokio::test]
+async fn test_command_selects_data_tests_and_unit_tests() {
+    let harness = Harness::build_files(&[
+        ("models/src.sql", "select 1 as id"),
+        ("models/m.sql", "select id from {{ ref('src') }}"),
+        ("tests/t.sql", "select * from {{ ref('m') }} where id < 0"),
+        (
+            "models/unit.yml",
+            "
+unit_tests:
+  - name: m_passes_ids_through
+    model: m
+    given:
+      - input: ref('src')
+        rows:
+          - {id: 7}
+    expect:
+      rows:
+        - {id: 7}
+",
+        ),
+    ])
+    .await;
+    let ids = select_command_node_ids(harness.state(), &build_input("test"))
+        .expect("selection should succeed");
+    assert!(ids.iter().any(|id| id.starts_with("test.")), "got: {ids:?}");
+    assert!(ids.iter().any(|id| id.starts_with("unit_test.")), "got: {ids:?}");
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("test.") || id.starts_with("unit_test.")),
+        "`test` should select tests only, got: {ids:?}"
+    );
+}
+
 /// A project carrying every freshness shape the planner has to tell apart: a
 /// source with criteria, a source without, a model with an SLA, a model whose
 /// only `freshness` key is the `build_after` scheduling rule, and a plain model.

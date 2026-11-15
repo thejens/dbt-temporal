@@ -700,8 +700,9 @@ const fn command_includes_node_type(command: DbtCommand, rt: NodeType) -> bool {
         DbtCommand::Compile => {
             matches!(rt, NodeType::Model | NodeType::Test | NodeType::Snapshot | NodeType::Function)
         }
-        // test runs only test nodes — mirrors `dbt test` which assumes models already exist.
-        DbtCommand::Test => matches!(rt, NodeType::Test),
+        // `dbt test` runs data tests and unit tests, and assumes the models
+        // they read already exist.
+        DbtCommand::Test => matches!(rt, NodeType::Test | NodeType::UnitTest),
         // seed / snapshot mirror the single-resource dbt commands of the same
         // name. Both assume the rest of the graph is already in place.
         DbtCommand::Seed => matches!(rt, NodeType::Seed),
@@ -972,6 +973,7 @@ mod tests {
     #[test]
     fn test_command_includes_only_tests() {
         assert!(command_includes_node_type(DbtCommand::Test, NodeType::Test));
+        assert!(command_includes_node_type(DbtCommand::Test, NodeType::UnitTest));
         assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Model));
         assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Seed));
         assert!(!command_includes_node_type(DbtCommand::Test, NodeType::Snapshot));

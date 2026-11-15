@@ -480,15 +480,50 @@ fn test_stores_failures(nodes: &dbt_schemas::schemas::Nodes, unique_id: &str) ->
     })
 }
 
-/// True if a node of this resource_type + materialization should produce an
-/// adapter response. Used as a no-op guard: an empty adapter response on a
-/// node that *should* execute SQL is a sign that `statement('main')` never
-/// ran (likely a buggy materialization template).
+/// Fail a node whose dbt-provided materialization finished without storing a
+/// result.
+///
+/// dbt's own templates for a writing node always run `statement('main')`, so an
+/// empty adapter response from one means that statement never ran. The same
+/// node renders the same template on every attempt, so the failure is
+/// non-retryable.
+///
+/// A materialization the project defines itself is not held to this: dbt
+/// accepts one that stores no result (a no-op, a hook-only or an externally
+/// managed relation) and reports the node as successful with an empty
+/// response. `template` is the resolved `<package>.<macro>`; a template of the
+/// root project is the project's own whatever it is called, and a name outside
+/// dbt's built-in set is a custom materialization. Ephemeral models never
+/// execute against the warehouse, being inlined as CTEs in their consumer.
+fn require_adapter_response(
+    unique_id: &str,
+    rt: NodeType,
+    materialization: &str,
+    template: &str,
+    project_name: &str,
+    adapter_response: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), DbtTemporalError> {
+    let dbt_provided = template
+        .split_once('.')
+        .is_none_or(|(package, _)| package != project_name);
+    if dbt_provided && expects_adapter_response(rt, materialization) && adapter_response.is_empty()
+    {
+        return Err(DbtTemporalError::MissingAdapterResponse(format!(
+            "node {unique_id} finished without adapter response (resource_type={}, materialization={materialization}); no query appears to have run",
+            rt.as_str_name()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether dbt's built-in materialization for this resource type and name
+/// stores a `main` result.
 const fn expects_adapter_response(rt: NodeType, materialization: &str) -> bool {
     match rt {
-        // Ephemeral models never execute against the warehouse — they're
-        // inlined as CTEs in their downstream consumer's SQL.
-        NodeType::Model => !matches!(materialization.as_bytes(), b"ephemeral"),
+        NodeType::Model => matches!(
+            materialization.as_bytes(),
+            b"view" | b"table" | b"incremental" | b"materialized_view" | b"clone"
+        ),
         NodeType::Seed
         | NodeType::Snapshot
         | NodeType::Test
@@ -1214,15 +1249,14 @@ fn execute_node_body(
     // Materialization macros call store_result('main', response) during rendering.
     let adapter_response = extract_adapter_response(&result_store);
 
-    // Guard against silent no-op executions. For nodes that should execute SQL, an empty
-    // adapter response indicates that statement('main') likely never ran.
-    if expects_adapter_response(rt, &materialization) && adapter_response.is_empty() {
-        return Err(DbtTemporalError::Adapter(anyhow::anyhow!(
-            "node {unique_id} finished without adapter response (resource_type={}, materialization={materialization}); no query appears to have run",
-            rt.as_str_name()
-        ))
-        .into());
-    }
+    require_adapter_response(
+        unique_id,
+        rt,
+        &materialization,
+        &fq_name,
+        &state.project_name,
+        &adapter_response,
+    )?;
 
     // A terminal outcome dbt reports on the node rather than an execution
     // failure to retry — see `domain_failure_message`. Set by the unit-test and
@@ -1545,6 +1579,55 @@ mod tests {
         assert!(expects_adapter_response(NodeType::Seed, "seed"));
         assert!(expects_adapter_response(NodeType::Snapshot, "snapshot"));
         assert!(expects_adapter_response(NodeType::Test, "test"));
+    }
+
+    #[test]
+    fn expects_adapter_response_skips_custom_model_materializations() {
+        assert!(!expects_adapter_response(NodeType::Model, "my_noop"));
+    }
+
+    fn require(
+        template: &str,
+        materialization: &str,
+        response: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), DbtTemporalError> {
+        require_adapter_response(
+            "model.proj.m",
+            NodeType::Model,
+            materialization,
+            template,
+            "proj",
+            response,
+        )
+    }
+
+    #[test]
+    fn a_dbt_provided_materialization_without_a_response_fails_permanently() {
+        let err = require("dbt_duckdb.materialization_table_duckdb", "table", &BTreeMap::new())
+            .expect_err("a built-in template that stored nothing is a fault");
+        assert!(!err.is_retryable());
+        assert_eq!(err.type_name(), "DbtTemporalError::MissingAdapterResponse");
+        assert!(err.to_string().contains("model.proj.m"), "names the node: {err}");
+    }
+
+    #[test]
+    fn a_dbt_provided_materialization_with_a_response_passes() {
+        let response = BTreeMap::from([("code".to_string(), serde_json::json!("SUCCESS"))]);
+        assert!(require("dbt_duckdb.materialization_table_duckdb", "table", &response).is_ok());
+    }
+
+    #[test]
+    fn a_custom_materialization_may_store_no_response() {
+        assert!(
+            require("some_pkg.materialization_my_noop_default", "my_noop", &BTreeMap::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_root_project_materialization_may_store_no_response() {
+        // The project's own override of a built-in name is still the project's.
+        assert!(require("proj.materialization_table_default", "table", &BTreeMap::new()).is_ok());
     }
 
     #[test]

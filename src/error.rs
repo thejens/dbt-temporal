@@ -3,7 +3,8 @@ use std::fmt;
 /// Errors from dbt-temporal activities.
 ///
 /// The variant determines retry behavior:
-/// - `Compilation` / `Configuration` / `ProjectNotFound` → non-retryable
+/// - `Compilation` / `Configuration` / `ProjectNotFound` / `MissingAdapterResponse` →
+///   non-retryable
 /// - `Adapter` / `ArtifactStore` → retryable (transient I/O)
 #[derive(Debug)]
 pub enum DbtTemporalError {
@@ -20,6 +21,10 @@ pub enum DbtTemporalError {
     ArtifactStore(anyhow::Error),
     /// Worker doesn't have the requested project loaded.
     ProjectNotFound(String),
+    /// A dbt-provided materialization finished without running the statement
+    /// that produces its result — non-retryable: the same node renders the same
+    /// template and ends the same way on every attempt.
+    MissingAdapterResponse(String),
     /// A dbt test query returned failing rows — non-retryable (data won't change on retry).
     TestFailure { unique_id: String, failures: i64 },
     /// A dbt unit test's actual output differed from the expected fixture —
@@ -70,10 +75,11 @@ impl DbtTemporalError {
     /// `non_retryable_error_types`: Temporal matches that list against the
     /// failure type that `type_name` stamps onto every activity failure. A test
     /// asserts the list agrees with `is_retryable` for every variant.
-    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 6] = [
+    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 7] = [
         "DbtTemporalError::Compilation",
         "DbtTemporalError::Configuration",
         "DbtTemporalError::ProjectNotFound",
+        "DbtTemporalError::MissingAdapterResponse",
         "DbtTemporalError::TestFailure",
         "DbtTemporalError::UnitTestFailure",
         "DbtTemporalError::StaleSource",
@@ -93,6 +99,7 @@ impl DbtTemporalError {
             Self::Adapter(_) => "DbtTemporalError::Adapter",
             Self::ArtifactStore(_) => "DbtTemporalError::ArtifactStore",
             Self::ProjectNotFound(_) => "DbtTemporalError::ProjectNotFound",
+            Self::MissingAdapterResponse(_) => "DbtTemporalError::MissingAdapterResponse",
             Self::TestFailure { .. } => "DbtTemporalError::TestFailure",
             Self::UnitTestFailure { .. } => "DbtTemporalError::UnitTestFailure",
             Self::StaleSource { .. } => "DbtTemporalError::StaleSource",
@@ -110,6 +117,7 @@ impl fmt::Display for DbtTemporalError {
             Self::Adapter(err) => write!(f, "adapter error: {err:#}"),
             Self::ArtifactStore(err) => write!(f, "artifact store error: {err:#}"),
             Self::ProjectNotFound(msg) => write!(f, "project not found: {msg}"),
+            Self::MissingAdapterResponse(msg) => write!(f, "missing adapter response: {msg}"),
             Self::TestFailure {
                 unique_id,
                 failures,
@@ -143,6 +151,7 @@ impl std::error::Error for DbtTemporalError {
             Self::Compilation(_)
             | Self::Configuration(_)
             | Self::ProjectNotFound(_)
+            | Self::MissingAdapterResponse(_)
             | Self::TestFailure { .. }
             | Self::UnitTestFailure { .. }
             | Self::StaleSource { .. } => None,
@@ -484,6 +493,7 @@ mod tests {
             | DbtTemporalError::Adapter(_)
             | DbtTemporalError::ArtifactStore(_)
             | DbtTemporalError::ProjectNotFound(_)
+            | DbtTemporalError::MissingAdapterResponse(_)
             | DbtTemporalError::TestFailure { .. }
             | DbtTemporalError::UnitTestFailure { .. }
             | DbtTemporalError::StaleSource { .. } => {}
@@ -494,6 +504,7 @@ mod tests {
             DbtTemporalError::Adapter(anyhow::anyhow!("a")),
             DbtTemporalError::ArtifactStore(anyhow::anyhow!("a")),
             DbtTemporalError::ProjectNotFound("p".into()),
+            DbtTemporalError::MissingAdapterResponse("m".into()),
             DbtTemporalError::TestFailure {
                 unique_id: "t".into(),
                 failures: 1,

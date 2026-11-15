@@ -308,13 +308,13 @@ fn a_slow_node_does_not_hold_back_unrelated_dependents() -> Result<()> {
     assert!(finished.output.success);
     assert_eq!(finished.output.node_results.len(), 5);
     let events = &finished.activity_events;
-    let grand_started = event_id(events, "scheduled model:fast_grand")?;
-    let slow_done = event_id(events, "completed model:slow")?;
+    let grand_started = event_id(events, "scheduled model.spike.fast_grand")?;
+    let slow_done = event_id(events, "completed model.spike.slow")?;
     assert!(
         grand_started < slow_done,
         "fast_grand (event {grand_started}) waited for slow (event {slow_done}): {events:?}"
     );
-    let child_started = event_id(events, "scheduled model:slow_child")?;
+    let child_started = event_id(events, "scheduled model.spike.slow_child")?;
     assert!(child_started > slow_done, "slow_child must wait for slow");
     Ok(())
 }
@@ -362,14 +362,18 @@ fn a_run_continues_as_new_mid_dag_and_finishes_every_node() -> Result<()> {
     Ok(())
 }
 
-/// A failed node skips exactly its transitive dependents; unrelated work still
+/// A failed node skips exactly its transitive dependents, even through a model
+/// that tolerates its own errors with `on_error: continue`; unrelated work still
 /// runs; and the failed run's `run_status` — served by replaying the history the
 /// ready queue recorded — reports the same counts.
 #[test]
 fn a_failure_skips_only_its_dependents() -> Result<()> {
     let models = vec![
         ("bad".to_string(), "select from from".to_string()),
-        ("bad_child".to_string(), "select * from {{ ref('bad') }}".to_string()),
+        (
+            "bad_child".to_string(),
+            "{{ config(on_error='continue') }}\nselect * from {{ ref('bad') }}".to_string(),
+        ),
         ("bad_grand".to_string(), "select * from {{ ref('bad_child') }}".to_string()),
         ("ok_a".to_string(), "select 1 as id".to_string()),
         ("ok_b".to_string(), "select id from {{ ref('ok_a') }}".to_string()),

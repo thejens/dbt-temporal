@@ -23,12 +23,13 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    MEMO_CADENCE_PATCH, activity_error_message, build_log_header, build_node_status_tree,
-    build_retry_policy, cancelled_result, classify_result_status, error_result,
-    format_activity_label, format_progress_line, format_result_tag, format_running_details,
-    is_blocked_by_failed_upstream, mark_remaining_level_as_cancelled, node_label, set_node_status,
-    short_activity_error, should_announce_level, should_flush_memo, skipped_result,
-    upsert_memo_state, upsert_node_status,
+    MEMO_CADENCE_PATCH, TRANSITIVE_SKIP_PATCH, UNIQUE_ACTIVITY_ID_PATCH, activity_error_message,
+    build_log_header, build_node_status_tree, build_retry_policy, cancelled_result,
+    classify_result_status, error_result, format_activity_id, format_activity_label,
+    format_progress_line, format_result_tag, format_running_details, is_blocked_by_failed_upstream,
+    mark_remaining_level_as_cancelled, node_label, set_node_status, short_activity_error,
+    should_announce_level, should_flush_memo, skipped_result, upsert_memo_state,
+    upsert_node_status,
 };
 
 /// Cap memo writes for deep DAGs — upsert on this cadence on quiet levels.
@@ -80,6 +81,10 @@ struct LevelState<'a> {
     had_failure: &'a mut bool,
     was_cancelled: &'a mut bool,
     node_counter: &'a mut usize,
+    /// Activity ids come from the node's `unique_id` ([`UNIQUE_ACTIVITY_ID_PATCH`]).
+    unique_activity_ids: bool,
+    /// A skip carries through a skipped dependency ([`TRANSITIVE_SKIP_PATCH`]).
+    transitive_skips: bool,
 }
 
 /// Drive the level loop. Returns the accumulated state regardless of whether
@@ -110,6 +115,11 @@ pub async fn execute_levels(
     let mut node_counter = resume.node_counter;
     let mut continue_at_level = None;
 
+    // Each patch is consulted once per run, so every level agrees and the
+    // marker is recorded once.
+    let unique_activity_ids = ctx.patched(UNIQUE_ACTIVITY_ID_PATCH);
+    let transitive_skips = ctx.patched(TRANSITIVE_SKIP_PATCH);
+
     for (level_idx, level) in plan.levels.iter().enumerate().skip(resume.start_level) {
         // Stop *between* levels only: a level's activities are already
         // scheduled and awaited as a unit, and abandoning them mid-flight
@@ -136,6 +146,8 @@ pub async fn execute_levels(
             had_failure: &mut had_failure,
             was_cancelled: &mut was_cancelled,
             node_counter: &mut node_counter,
+            unique_activity_ids,
+            transitive_skips,
         };
         execute_one_level(ctx, &mut state, level_idx, level).await?;
     }
@@ -296,7 +308,13 @@ async fn execute_one_level(
     // ctx) so we can upsert memo first.
     let mut nodes_to_schedule: Vec<(String, NodeActivityInput, Option<String>)> = Vec::new();
     for unique_id in level {
-        if is_blocked_by_failed_upstream(state.plan, unique_id, state.failed_nodes) {
+        if is_blocked_by_failed_upstream(
+            state.plan,
+            unique_id,
+            state.failed_nodes,
+            state.node_status,
+            state.transitive_skips,
+        ) {
             *state.node_counter += 1;
             let label = node_label(state.plan, unique_id);
             state.log_lines.push(format_progress_line(
@@ -325,8 +343,8 @@ async fn execute_one_level(
 
         let node_input = node_execution_input(state.plan, state.run_scope, unique_id);
 
-        // Per-node labelling in Temporal UI: activity_id for event details,
-        // summary for the Gantt chart display.
+        // Per-node labelling in Temporal UI: the summary is the Gantt chart
+        // display; the activity id is chosen where the activity is started.
         let activity_label = format_activity_label(state.plan, unique_id);
 
         nodes_to_schedule.push((unique_id.clone(), node_input, activity_label));
@@ -377,6 +395,8 @@ async fn execute_one_level(
         |pending: &mut std::collections::VecDeque<(String, NodeActivityInput, Option<String>)>,
          futures: &mut std::collections::VecDeque<_>| {
             for (unique_id, node_input, activity_label) in take_startable(pending, futures.len()) {
+                let activity_id =
+                    format_activity_id(state.plan, &unique_id, state.unique_activity_ids);
                 let future = ctx.execute_activity(
                     DbtActivities::execute_node,
                     node_input,
@@ -385,6 +405,7 @@ async fn execute_one_level(
                         state.timeouts,
                         state.retry_config,
                         &unique_id,
+                        activity_id,
                         activity_label,
                     ),
                 );
@@ -495,13 +516,14 @@ pub(super) fn node_execution_input(
 }
 
 /// Temporal options for one node's activity: timeouts, heartbeat, retry policy,
-/// the label shown in the UI, and priority/fairness keys.
+/// the id and summary shown in the UI, and priority/fairness keys.
 pub(super) fn node_activity_options(
     plan: &ExecutionPlan,
     timeouts: &TimeoutConfig,
     retry_config: &RetryConfig,
     unique_id: &str,
-    activity_label: Option<String>,
+    activity_id: Option<String>,
+    summary: Option<String>,
 ) -> ActivityOptions {
     // Priority/fairness keys (server >= 1.31; older servers ignore them):
     // priority_key orders nodes within a run by critical-path depth,
@@ -519,8 +541,8 @@ pub(super) fn node_activity_options(
     };
     ActivityOptions::with_start_to_close_timeout(Duration::from_secs(timeouts.node_secs))
         .heartbeat_timeout(Duration::from_secs(timeouts.node_heartbeat_secs))
-        .maybe_activity_id(activity_label.clone())
-        .maybe_summary(activity_label)
+        .maybe_activity_id(activity_id)
+        .maybe_summary(summary)
         .cancellation_type(ActivityCancellationType::TryCancel)
         .retry_policy(build_retry_policy(retry_config))
         .maybe_priority(priority)

@@ -29,9 +29,10 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    activity_error_message, cancelled_result, classify_result_status, error_result,
-    format_activity_label, format_progress_line, format_ready_queue_details, format_result_tag,
-    node_label, set_node_status, short_activity_error, skipped_result, upsert_memo_state,
+    UNIQUE_ACTIVITY_ID_PATCH, activity_error_message, cancelled_result, classify_result_status,
+    error_result, format_activity_id, format_activity_label, format_progress_line,
+    format_ready_queue_details, format_result_tag, node_label, set_node_status,
+    short_activity_error, skipped_result, upsert_memo_state,
 };
 use super::levels::{
     LevelExecutionOutcome, MAX_ACTIVITIES_IN_FLIGHT, ResumePoint, node_activity_options,
@@ -210,6 +211,8 @@ impl<'a> ReadyQueueRun<'a> {
         let mut completed_this_segment = 0;
         let mut draining = false;
         let mut was_cancelled = false;
+        // Consulted once, so every node of the run gets the same kind of id.
+        let unique_activity_ids = ctx.patched(UNIQUE_ACTIVITY_ID_PATCH);
 
         loop {
             // Once history asks for a continuation, nothing new starts: the
@@ -247,7 +250,9 @@ impl<'a> ReadyQueueRun<'a> {
                         self.record_skip(&node, reason);
                         skips += 1;
                     }
-                    Step::Start(node) => in_flight.push(self.start_node(ctx, node)),
+                    Step::Start(node) => {
+                        in_flight.push(self.start_node(ctx, node, unique_activity_ids));
+                    }
                 }
             }
 
@@ -320,9 +325,11 @@ impl<'a> ReadyQueueRun<'a> {
         &mut self,
         ctx: &'c WorkflowContext<DbtRunWorkflow>,
         node: String,
+        unique_activity_ids: bool,
     ) -> Tagged<impl Future<Output = Result<NodeExecutionResult, ActivityExecutionError>> + use<'c>>
     {
         let label = format_activity_label(self.plan, &node);
+        let activity_id = format_activity_id(self.plan, &node, unique_activity_ids);
         self.record_start(&node);
         let future = ctx.execute_activity(
             DbtActivities::execute_node,
@@ -332,6 +339,7 @@ impl<'a> ReadyQueueRun<'a> {
                 self.timeouts,
                 self.retry_config,
                 &node,
+                activity_id,
                 label.clone(),
             ),
         );

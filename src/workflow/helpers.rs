@@ -391,16 +391,44 @@ pub fn mark_remaining_level_as_cancelled(
     }
 }
 
-/// Build the per-node Temporal activity label (used for both `activity_id`
-/// and `summary` in the UI). Pure — uses only the plan's nodemap.
+/// Build the per-node Temporal activity label, shown as the `summary` in the
+/// UI. Pure — uses only the plan's nodemap.
 ///
 /// Format: `<resource_type>:<name>` with the proto enum prefix stripped, so
 /// `NODE_TYPE_MODEL` → `model`. Returns `None` when the id isn't in the plan,
 /// matching the behaviour of `execute_activity` (no label).
+///
+/// The label is not unique — the same name can occur in two packages, in two
+/// versions of a model, or on tests — so it is a display string, never an
+/// identity. See [`format_activity_id`].
 pub fn format_activity_label(plan: &ExecutionPlan, unique_id: &str) -> Option<String> {
     plan.nodes
         .get(unique_id)
         .map(|info| format!("{}:{}", resource_type_label(info.resource_type), info.name))
+}
+
+/// The Temporal activity id for a node.
+///
+/// Temporal requires activity ids to be unique among a workflow's open
+/// activities, and the SDK matches an activity to its recorded history by id
+/// and type. `unique_id` is unique per node in the manifest by construction —
+/// it carries the package, the version of a versioned model and a test's hash —
+/// and is how dbt itself names a node in its logs, so it is both collision-free
+/// and readable. A scheme that kept the short label where it happened to be
+/// unambiguous would make a node's id depend on which other nodes the plan
+/// holds.
+///
+/// With `unique` false this is the short label, which only histories recorded
+/// before [`UNIQUE_ACTIVITY_ID_PATCH`] still use. Returns `None` for an id the
+/// plan does not contain, as the label does.
+pub fn format_activity_id(plan: &ExecutionPlan, unique_id: &str, unique: bool) -> Option<String> {
+    if unique {
+        plan.nodes
+            .contains_key(unique_id)
+            .then(|| unique_id.to_string())
+    } else {
+        format_activity_label(plan, unique_id)
+    }
 }
 
 /// The lower-case resource type as dbt's CLI spells it (`model`, `unit_test`):
@@ -413,12 +441,14 @@ fn resource_type_label(resource_type: NodeType) -> String {
 }
 
 /// True if `unique_id` has any upstream dependency in `failed_nodes` whose
-/// failure isn't exempted by `on_error: continue`. Used by the per-level
-/// scheduler to skip a node whose upstream model failed.
+/// failure blocks it. Used by the per-level scheduler to skip a node whose
+/// upstream failed.
 ///
-/// Mirrors dbt-core's `model_should_continue_on_error`: a failed dependency
-/// only blocks downstream nodes when it *doesn't* carry `on_error: continue`.
-/// Only models can set this — a failed test/seed/snapshot always blocks.
+/// A failed dependency blocks unless it carries `on_error: continue`; see
+/// [`failure_blocks_dependents`] for the rest of the rule. `statuses` says which
+/// failed dependencies were skipped rather than errored, and `transitive`
+/// selects whether that matters ([`TRANSITIVE_SKIP_PATCH`]).
+///
 /// `--fail-fast` isn't threaded through here because the caller
 /// (`execute_one_level`) already short-circuits the whole level before this
 /// runs whenever `fail_fast` and a prior failure coincide, so `failed_nodes`
@@ -428,12 +458,29 @@ pub fn is_blocked_by_failed_upstream(
     plan: &ExecutionPlan,
     unique_id: &str,
     failed_nodes: &std::collections::BTreeSet<String>,
+    statuses: &NodeStatusTree,
+    transitive: bool,
 ) -> bool {
     plan.nodes.get(unique_id).is_some_and(|info| {
-        info.depends_on
-            .iter()
-            .any(|dep| failed_nodes.contains(dep) && !dep_continues_on_error(plan, dep))
+        info.depends_on.iter().any(|dep| {
+            let skipped = transitive && statuses.nodes.get(dep) == Some(&NodeStatus::Skipped);
+            failed_nodes.contains(dep)
+                && failure_blocks_dependents(dep_continues_on_error(plan, dep), skipped)
+        })
     })
+}
+
+/// Whether a failed node's dependents must be skipped.
+///
+/// Mirrors dbt-core, which on a failure marks every descendant of the failed
+/// node as skipped — unless the node is a model with `on_error: continue`, in
+/// which case its descendants run as if it had succeeded. A node that was itself
+/// skipped because an ancestor failed counts as failed, and its own
+/// `on_error: continue` is irrelevant: the ancestor that failed already marked
+/// the whole subtree, so the skip has to carry through it. Both schedulers ask
+/// this one question.
+pub const fn failure_blocks_dependents(continues_on_error: bool, skipped: bool) -> bool {
+    skipped || !continues_on_error
 }
 
 /// True when `dep`'s failure shouldn't propagate to its dependents — it's a
@@ -526,6 +573,23 @@ pub const MEMO_CADENCE_PATCH: &str = "bounded-memo-cadence";
 /// it. Only executions that start after this patch is deployed record the
 /// marker and take the ready queue.
 pub const READY_QUEUE_PATCH: &str = "ready-queue-scheduling";
+
+/// Patch id for node activity ids derived from the node's `unique_id`.
+///
+/// The SDK compares an activity's id and type against the recorded history on
+/// replay, so a run recorded with the short `<type>:<name>` ids has to keep
+/// scheduling them. Only executions that start after this patch is deployed
+/// record the marker and use ids that cannot collide.
+pub const UNIQUE_ACTIVITY_ID_PATCH: &str = "unique-node-activity-ids";
+
+/// Patch id for carrying a skip through a node that is itself skipped.
+///
+/// It decides which nodes the level loop schedules, so a history recorded
+/// before it can hold an activity for a node whose ancestor had failed (a
+/// descendant of a skipped model with `on_error: continue`). That run keeps its
+/// scheduling on replay; executions that start after this patch is deployed
+/// record the marker and skip every descendant of a failure.
+pub const TRANSITIVE_SKIP_PATCH: &str = "transitive-upstream-skip";
 
 /// How many running node labels the workflow details line spells out before
 /// summarising the rest, so the line stays short on a wide run.
@@ -1423,6 +1487,39 @@ mod tests {
         assert_eq!(node_label(&plan, "model.waffle.m1"), "table seed waffle.m1");
     }
 
+    /// Two packages may each define a model of the same name; the label cannot
+    /// tell them apart but the activity id has to.
+    #[test]
+    fn format_activity_id_distinguishes_nodes_that_share_a_label() {
+        let mut plan = test_plan(vec![vec!["m1"]], &[("m1", None, vec![])]);
+        let mut other = plan.nodes["model.waffle.m1"].clone();
+        other.unique_id = "model.other.m1".to_string();
+        other.package_name = "other".to_string();
+        plan.nodes.insert(other.unique_id.clone(), other);
+
+        let first = "model.waffle.m1";
+        let second = "model.other.m1";
+        assert_eq!(format_activity_label(&plan, first), format_activity_label(&plan, second));
+        assert_eq!(format_activity_id(&plan, first, true), Some(first.to_string()));
+        assert_eq!(format_activity_id(&plan, second, true), Some(second.to_string()));
+    }
+
+    #[test]
+    fn format_activity_id_is_the_short_label_when_not_unique() {
+        let plan = test_plan(vec![vec!["m1"]], &[("m1", None, vec![])]);
+        assert_eq!(
+            format_activity_id(&plan, "model.waffle.m1", false),
+            Some("model:m1".to_string())
+        );
+    }
+
+    #[test]
+    fn format_activity_id_returns_none_for_unknown_id() {
+        let plan = test_plan(vec![vec!["m1"]], &[("m1", None, vec![])]);
+        assert!(format_activity_id(&plan, "model.waffle.nope", true).is_none());
+        assert!(format_activity_id(&plan, "model.waffle.nope", false).is_none());
+    }
+
     #[test]
     fn format_activity_label_returns_none_for_unknown_id() {
         let plan = test_plan(vec![vec!["m1"]], &[("m1", None, vec![])]);
@@ -1436,14 +1533,26 @@ mod tests {
         let plan = test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
-        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+        assert!(is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.b",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     #[test]
     fn is_blocked_by_failed_upstream_false_when_no_dep_failed() {
         let plan = test_plan(vec![vec!["a", "b"]], &[("a", None, vec![]), ("b", None, vec!["a"])]);
         let failed = std::collections::BTreeSet::new();
-        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+        assert!(!is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.b",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     #[test]
@@ -1453,7 +1562,13 @@ mod tests {
         failed.insert("model.waffle.a".to_string());
         // An id that isn't in the plan can't be blocked — the level loop will
         // simply skip it. Returning false here keeps the contract coherent.
-        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.nope", &failed));
+        assert!(!is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.nope",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     /// Patch a `test_plan` node's `resource_type`/`on_error` in place — `test_plan`
@@ -1477,7 +1592,13 @@ mod tests {
         set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
-        assert!(!is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+        assert!(!is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.b",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     #[test]
@@ -1495,7 +1616,13 @@ mod tests {
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
         failed.insert("model.waffle.b".to_string());
-        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.c", &failed));
+        assert!(is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.c",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     #[test]
@@ -1507,7 +1634,63 @@ mod tests {
         set_on_error(&mut plan, "model.waffle.a", NodeType::Model, Some(OnError::SkipChildren));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
-        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+        assert!(is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.b",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
+    }
+
+    /// A model with `on_error: continue` that was skipped for an upstream failure
+    /// is in the failed set, but it must not let its own dependents through.
+    fn skipped_continue_dep() -> (ExecutionPlan, std::collections::BTreeSet<String>, NodeStatusTree)
+    {
+        let mut plan = test_plan(
+            vec![vec!["a"], vec!["b"], vec!["c"]],
+            &[
+                ("a", None, vec![]),
+                ("b", None, vec!["a"]),
+                ("c", None, vec!["b"]),
+            ],
+        );
+        set_on_error(&mut plan, "model.waffle.b", NodeType::Model, Some(OnError::Continue));
+        let failed = ["model.waffle.a", "model.waffle.b"]
+            .map(String::from)
+            .into();
+        let mut statuses = build_node_status_tree(&plan);
+        set_node_status(&mut statuses, "model.waffle.a", NodeStatus::Error);
+        set_node_status(&mut statuses, "model.waffle.b", NodeStatus::Skipped);
+        (plan, failed, statuses)
+    }
+
+    #[test]
+    fn is_blocked_by_failed_upstream_true_when_failed_dep_was_skipped_and_continues() {
+        let (plan, failed, statuses) = skipped_continue_dep();
+        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.c", &failed, &statuses, true));
+    }
+
+    /// Without the patch the skipped model's `on_error: continue` exempts its
+    /// dependents, which is what histories recorded before it scheduled.
+    #[test]
+    fn is_blocked_by_failed_upstream_ignores_skips_when_not_transitive() {
+        let (plan, failed, statuses) = skipped_continue_dep();
+        assert!(!is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.c",
+            &failed,
+            &statuses,
+            false
+        ));
+    }
+
+    #[test]
+    fn failure_blocks_dependents_unless_an_errored_node_continues() {
+        assert!(failure_blocks_dependents(false, false));
+        assert!(failure_blocks_dependents(true, true));
+        assert!(failure_blocks_dependents(false, true));
+        assert!(!failure_blocks_dependents(true, false));
     }
 
     #[test]
@@ -1519,7 +1702,13 @@ mod tests {
         set_on_error(&mut plan, "model.waffle.a", NodeType::Seed, Some(OnError::Continue));
         let mut failed = std::collections::BTreeSet::new();
         failed.insert("model.waffle.a".to_string());
-        assert!(is_blocked_by_failed_upstream(&plan, "model.waffle.b", &failed));
+        assert!(is_blocked_by_failed_upstream(
+            &plan,
+            "model.waffle.b",
+            &failed,
+            &build_node_status_tree(&plan),
+            true
+        ));
     }
 
     // --- classify_result_status ---

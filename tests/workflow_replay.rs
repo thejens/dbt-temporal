@@ -113,3 +113,40 @@ async fn committed_histories_replay_against_current_workflow() -> Result<()> {
     }
     Ok(())
 }
+
+/// The activity ids a history scheduled, in order.
+async fn scheduled_activity_ids(history: WorkflowHistory) -> Result<Vec<String>> {
+    use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
+    Ok(history
+        .into_events()
+        .await
+        .context("reading history events")?
+        .into_iter()
+        .filter_map(|event| match event.attributes {
+            Some(Attributes::ActivityTaskScheduledEventAttributes(a)) => Some(a.activity_id),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Histories without the unique-id marker schedule node activities under short
+/// `<type>:<name>` ids, and replay compares those ids. A fixture set holding
+/// only `unique_id`s (which contain dots) would leave that path unchecked.
+#[tokio::test(flavor = "current_thread")]
+async fn fixtures_cover_histories_recorded_with_short_activity_ids() -> Result<()> {
+    let mut with_short_ids = 0;
+    for (name, history) in load_fixtures()? {
+        let ids = scheduled_activity_ids(history).await?;
+        let short = ids
+            .iter()
+            .filter(|id| id.contains(':') && !id.contains('.'))
+            .count();
+        let unique = ids.iter().filter(|id| id.contains('.')).count();
+        assert_eq!(unique, 0, "{name} was recorded with unique ids: {ids:?}");
+        if short > 0 {
+            with_short_ids += 1;
+        }
+    }
+    assert!(with_short_ids >= 2, "only {with_short_ids} fixture(s) schedule short ids");
+    Ok(())
+}

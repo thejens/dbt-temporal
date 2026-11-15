@@ -139,7 +139,7 @@ For production setups (Temporal Cloud, health checks, graceful shutdown, read-on
 
 - **Full hook parity.** `on-run-start` / `on-run-end` with the standard `results` context, and per-model `pre-hook` / `post-hook`.
 - **Selectors.** 20 of dbt's 24 selector methods, with dbt's own glob rules. Methods that need artifacts the worker does not have (`result:`, `source_status:`) are rejected by name rather than silently matching nothing. See [selector semantics](docs/selector-semantics.md).
-- **Unit tests.** `unit_tests:` run as activities in `dbt build`, against `given` fixtures (dict, CSV or SQL). A unit test runs before its model, and a failure skips the model and everything downstream.
+- **Unit tests.** `unit_tests:` run as activities in `dbt build` and `dbt test`, against `given` fixtures (dict, CSV or SQL). A unit test runs before its model, and a failure skips the model and everything downstream.
 - **Freshness.** `source-freshness` measures sources; `freshness` also measures models that declare a freshness SLA. A node past `error_after` fails the run, and results are written to `sources.json`.
 - **Project checks.** SQL under `check-paths` queries the project's own metadata (`dbt.models`, `dbt.checks`, …) and gates the build before any hook or model runs.
 - **`store_failures` and `catalog.json`.** Failing test rows persist to the audit schema; `WRITE_CATALOG=1` adds a partial `catalog.json` to each run's artifacts.

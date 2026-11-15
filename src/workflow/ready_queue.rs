@@ -34,9 +34,9 @@ use super::helpers::{
     short_activity_error, skipped_result, upsert_memo_state,
 };
 use super::levels::{
-    LevelExecutionOutcome, MAX_ACTIVITIES_IN_FLIGHT, ResumePoint, node_activity_options,
-    node_execution_input, should_continue_as_new,
+    LevelExecutionOutcome, MAX_ACTIVITIES_IN_FLIGHT, ResumePoint, should_continue_as_new,
 };
+use super::node_activity::{node_activity_options, node_execution_input};
 use super::scheduler::{Scheduler, SchedulerError, SkipReason, Step};
 
 /// A quiet run is flushed to the memo about this many times in all, however

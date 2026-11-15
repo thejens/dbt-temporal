@@ -111,11 +111,20 @@ nothing.
 | [`discovery.rs`](../src/config/discovery.rs) | Project directory discovery + remote source detection |
 | [`tuning.rs`](../src/config/tuning.rs) | Search attribute + worker tuning env var parsing |
 | **Types** (`src/types/`) | |
-| [`workflow.rs`](../src/types/workflow.rs) | Serializable workflow I/O types (`DbtRunInput`, `DbtRunOutput`, `ExecutionPlan`, …) |
+| [`workflow.rs`](../src/types/workflow.rs) | Workflow input and output (`DbtCommand`, `DbtRunInput`, `DbtRunOutput`) |
+| [`plan.rs`](../src/types/plan.rs) | `ExecutionPlan`, `NodeInfo`, project-config resolution payloads |
+| [`node.rs`](../src/types/node.rs) | Node activity input/result, `NodeStatus`, freshness outcomes |
+| [`segment.rs`](../src/types/segment.rs) | Continue-as-new checkpoints (`RunResumeState`, `RunSegmentState`, …) |
+| [`project_hooks.rs`](../src/types/project_hooks.rs) | `on-run-start` / `on-run-end` activity payloads |
+| [`artifacts.rs`](../src/types/artifacts.rs) | `StoreArtifactsInput` / `StoreArtifactsOutput` |
+| [`memo.rs`](../src/types/memo.rs) | Memo and query types (`CommandMemo`, `NodeStatusTree`, `RunStatusSnapshot`, …) |
 | [`hooks.rs`](../src/types/hooks.rs) | Hook and retry config types (`HooksConfig`, `RetryConfig`, …) |
 | [`checks.rs`](../src/types/checks.rs) | Project-check gate payloads |
 | **Worker** (`src/worker/`) | |
-| [`mod.rs`](../src/worker/mod.rs) | `build_worker`, `run_worker`, project initialization, Temporal registration |
+| [`mod.rs`](../src/worker/mod.rs) | `build_worker`, `run_worker`, Temporal registration |
+| [`project_init.rs`](../src/worker/project_init.rs) | `initialize_project` — load and resolve one dbt project |
+| [`projects.rs`](../src/worker/projects.rs) | Project source resolution and registry building |
+| [`sql_caches.rs`](../src/worker/sql_caches.rs) | Compiled and snapshot SQL captured after resolve |
 | [`adapter.rs`](../src/worker/adapter.rs) | `build_adapter_engine`, `build_adapter_engines`, `build_artifact_store` |
 | [`engines.rs`](../src/worker/engines.rs) | `AdapterEngines` — the per-adapter engine registry nodes route through |
 | [`profile/mod.rs`](../src/worker/profile/mod.rs) | `rebuild_adapter_engines_with_env` (per-workflow env overrides) |
@@ -131,8 +140,9 @@ nothing.
 | [`scheduler.rs`](../src/workflow/scheduler.rs) | Pure readiness scheduler: which nodes to start or skip next |
 | [`ready_queue.rs`](../src/workflow/ready_queue.rs) | Workflow driver around the scheduler: activities, run log, memo, continue-as-new |
 | [`levels.rs`](../src/workflow/levels.rs) | The level loop, kept to replay histories it recorded |
+| [`node_activity.rs`](../src/workflow/node_activity.rs) | Activity input and options for one node, shared by both schedulers |
 | [`search_attributes.rs`](../src/workflow/search_attributes.rs) | Typed search-attribute updates |
-| [`helpers.rs`](../src/workflow/helpers.rs) | Node status tree, retry policy, log helpers |
+| [`helpers.rs`](../src/workflow/helpers.rs) | Re-exports the pure helpers in `helpers/`: `patches` (patch ids), `memo`, `status`, `labels`, `log_lines`, `blocking`, `results`, `clock`, `retry`, `activity_errors` |
 | **Activities** (`src/activities/`) | |
 | [`mod.rs`](../src/activities/mod.rs) | `DbtActivities` — `Arc<Self>` shared state, `#[activities]` registration |
 | [`plan.rs`](../src/activities/plan.rs) | `plan_project` — select nodes, build DAG levels, serialize manifest |

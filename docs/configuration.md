@@ -395,7 +395,7 @@ temporal workflow update execute -w <workflow-id> --name set_fail_fast -i true
 
 ### Per-Node Activity Names
 
-Each dbt node uses the `summary` field on the Temporal activity to display a descriptive label in the UI Gantt chart (e.g. `model:stg_customers`, `test:not_null_orders_id`, `seed:raw_orders`). The `activity_id` is also set to the same label for identification in event details.
+Each dbt node uses the `summary` field on the Temporal activity to display a descriptive label in the UI Gantt chart (e.g. `model:stg_customers`, `test:not_null_orders_id`, `seed:raw_orders`). The `activity_id` is the node's dbt `unique_id` (e.g. `model.shop.stg_customers`): labels repeat across packages, model versions and tests, while Temporal needs ids to be unique among a workflow's open activities. Runs recorded before this keep the label as their activity id.
 
 ### Console Logging
 

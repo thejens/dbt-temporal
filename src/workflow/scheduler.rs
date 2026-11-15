@@ -11,7 +11,9 @@
 //! * a node starts once every dependency is terminal;
 //! * a node whose dependency failed is skipped, unless that dependency is a
 //!   model configured with `on_error: continue`; a node skipped this way counts
-//!   as failed, so the skip spreads to its own dependents;
+//!   as failed, and it blocks its own dependents whatever its `on_error` says,
+//!   so every descendant of a failure is skipped (see
+//!   [`failure_blocks_dependents`]);
 //! * with fail-fast on and any failure recorded, nothing further starts and
 //!   every node that has not started is skipped;
 //! * a node the activity itself reported as skipped, or as a warning, is not a
@@ -25,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::types::{ExecutionPlan, NodeStatus, NodeStatusTree};
 
-use super::helpers::dep_continues_on_error;
+use super::helpers::{dep_continues_on_error, failure_blocks_dependents};
 
 #[cfg(test)]
 mod tests;
@@ -253,10 +255,17 @@ impl Scheduler {
 
     /// Decide what to do with a node whose dependencies are all terminal.
     fn settle(&mut self, position: usize) {
-        let blocked = self.slots[position]
-            .deps
-            .iter()
-            .any(|&d| self.slots[d].failed && !self.slots[d].continues_on_error);
+        let blocked = self.slots[position].deps.iter().any(|&d| {
+            let dep = &self.slots[d];
+            // A failed dependency that is `Done(Skipped)` was skipped for an
+            // upstream failure; a node the activity itself skipped is never
+            // `failed`.
+            dep.failed
+                && failure_blocks_dependents(
+                    dep.continues_on_error,
+                    dep.state == State::Done(NodeStatus::Skipped),
+                )
+        });
         if blocked {
             self.slots[position].state = State::Blocked;
             self.blocked.insert(position);

@@ -304,7 +304,7 @@ the determinism note below if the change touches `src/workflow/`.
 
 A Temporal workflow is replayed against its recorded history. Changes to the
 *shape* of `dbt_run` that have shipped so far (readiness scheduling, memo
-cadence) are guarded by `patched()` markers, so a run recorded by an earlier
+cadence, node activity ids, how a skip carries through the graph) are guarded by `patched()` markers, so a run recorded by an earlier
 release replays on the code path that recorded it. A change that is not guarded
 this way — reordering activities, adding or removing a phase — makes an
 in-flight run fail on replay with a non-determinism error once it lands on a

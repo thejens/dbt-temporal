@@ -305,19 +305,55 @@ fn on_error_continue_lets_dependents_run() -> Result<(), SchedulerError> {
     Ok(())
 }
 
-/// A model with `on_error: continue` that is itself skipped is failed but
-/// exempt, so the skip stops there.
+/// A model with `on_error: continue` that is itself skipped for an upstream
+/// failure does not exempt its dependents: the failure upstream marks every
+/// descendant, however many of them tolerate their own errors.
 #[test]
-fn a_skipped_continue_node_does_not_spread_the_skip() -> Result<(), SchedulerError> {
-    let mut by_id = specs(&[("bad", &[]), ("soft", &["bad"]), ("after", &["soft"])]);
+fn a_skipped_continue_node_still_blocks_its_dependents() -> Result<(), SchedulerError> {
+    let mut by_id = specs(&[
+        ("bad", &[]),
+        ("soft", &["bad"]),
+        ("after", &["soft"]),
+        ("after_after", &["after"]),
+        ("unrelated", &[]),
+        ("unrelated_child", &["unrelated"]),
+    ]);
     by_id.entry("soft".to_string()).or_default().on_error = Some(OnError::Continue);
+    by_id.entry("after".to_string()).or_default().on_error = Some(OnError::Continue);
     let mut s = scheduler(&by_id)?;
     s.advance(WIDE, false);
     s.on_complete("bad", NodeStatus::Error)?;
+    s.on_complete("unrelated", NodeStatus::Success)?;
 
     let steps = s.advance(WIDE, false);
-    assert_eq!(skips(&steps), vec![("soft", SkipReason::UpstreamFailed)]);
-    assert_eq!(starts(&steps), vec!["after"]);
+    assert_eq!(
+        skips(&steps),
+        vec![
+            ("soft", SkipReason::UpstreamFailed),
+            ("after", SkipReason::UpstreamFailed),
+            ("after_after", SkipReason::UpstreamFailed),
+        ]
+    );
+    assert_eq!(starts(&steps), vec!["unrelated_child"]);
+    s.on_complete("unrelated_child", NodeStatus::Success)?;
+    assert!(s.is_finished());
+    Ok(())
+}
+
+/// The same chain resumed from a checkpoint: the carried statuses say which
+/// failed nodes were skipped, which is all the rule needs.
+#[test]
+fn a_carried_skipped_continue_node_still_blocks_its_dependents() -> Result<(), SchedulerError> {
+    let mut by_id = specs(&[("bad", &[]), ("soft", &["bad"]), ("after", &["soft"])]);
+    by_id.entry("soft".to_string()).or_default().on_error = Some(OnError::Continue);
+    let plan = build_plan(&by_id);
+    let mut tree = pending_tree(&plan);
+    tree.nodes.insert("bad".to_string(), NodeStatus::Error);
+    tree.nodes.insert("soft".to_string(), NodeStatus::Skipped);
+    let failed: BTreeSet<String> = ["bad", "soft"].map(String::from).into();
+    let mut s = Scheduler::new(&plan, &tree, &failed, true)?;
+
+    assert_eq!(skips(&s.advance(WIDE, false)), vec![("after", SkipReason::UpstreamFailed)]);
     Ok(())
 }
 
@@ -604,7 +640,10 @@ fn level_loop_statuses(plan: &ExecutionPlan, salt: u64) -> BTreeMap<String, Node
     let mut statuses = BTreeMap::new();
     for level in &plan.levels {
         for id in level {
-            if is_blocked_by_failed_upstream(plan, id, &failed) {
+            let tree = NodeStatusTree {
+                nodes: statuses.clone(),
+            };
+            if is_blocked_by_failed_upstream(plan, id, &failed, &tree, true) {
                 failed.insert(id.clone());
                 statuses.insert(id.clone(), NodeStatus::Skipped);
                 continue;

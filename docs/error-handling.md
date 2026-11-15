@@ -93,6 +93,8 @@ If a hook is not idempotent and you want it to survive transient warehouse failu
 
 A model configured with `{{ config(on_error='continue') }}` (or `on_error: continue` in `dbt_project.yml`/schema config) that fails still reports `Error`, but its failure doesn't block downstream nodes from running — they execute as if the failing model had never been in the graph. This mirrors dbt-core's own scheduling: only models can set it (a failed test/seed/snapshot always blocks its dependents), and `fail_fast` overrides it — if the workflow (or a `set_fail_fast` update) has fail-fast enabled, any failure still halts the remaining levels regardless of `on_error`.
 
+The exemption covers only the model's own failure. A node skipped because an ancestor failed counts as failed and blocks its dependents whatever its own `on_error` says, so every descendant of a failure is skipped, however many `on_error: continue` models lie between. Runs recorded before this behaved differently in the level loop and keep doing so on replay.
+
 ## Activity Timeouts
 
 Each activity's start-to-close and heartbeat timeouts are configurable in

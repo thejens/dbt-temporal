@@ -708,6 +708,134 @@ fn on_run_end_sees_the_schemas_the_run_built_into() -> Result<()> {
     Ok(())
 }
 
+/// `status` of each result in a project's stored `run_results.json`, by node.
+fn stored_statuses(project: &Project) -> Result<BTreeMap<String, String>> {
+    let results = read_run_results(project)?;
+    results["results"]
+        .as_array()
+        .context("results should be an array")?
+        .iter()
+        .map(|r| {
+            Ok((
+                r["unique_id"].as_str().context("unique_id")?.to_string(),
+                r["status"].as_str().context("status")?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// The nodes a `retry_from` run plans from `run_results`, found by planning
+/// with `list` so that nothing executes.
+fn nodes_retried_from(
+    project: &Project,
+    run_results: &std::path::Path,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut input = run_input(false);
+    input.command = "list".to_string();
+    input.retry_from = Some(run_results.to_string_lossy().into_owned());
+    scenario(project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        let raw = handle
+            .get_result(WorkflowGetResultOptions::default())
+            .await
+            .context("planning the retry")?;
+        let payload = raw
+            .payloads
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no result payload"))?;
+        let output: DbtRunOutput = serde_json::from_slice(&payload.data)?;
+        Ok(output
+            .node_results
+            .into_iter()
+            .map(|r| r.unique_id)
+            .collect())
+    })
+}
+
+/// A run cancelled while a node executes still stores what it has: the node
+/// that finished as it finished, the rest as cancelled, in a `run_results.json`
+/// that `retry_from` plans from.
+#[test]
+fn a_cancelled_run_leaves_run_results_that_retry_from_reads() -> Result<()> {
+    let slow = "{{ config(materialized='table') }}\n\
+                select sum(a.range * b.range) as total \
+                from range(120000) as a, range(120000) as b";
+    let project = write_project(&[
+        ("done".to_string(), "select 1 as id".to_string()),
+        ("slow_a".to_string(), slow.to_string()),
+        ("after".to_string(), "select total from {{ ref('slow_a') }}".to_string()),
+    ])?;
+
+    scenario(&project, 4, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, false).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        handle.cancel(WorkflowCancelOptions::default()).await?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_mins(1),
+            handle.get_result(WorkflowGetResultOptions::default()),
+        )
+        .await
+        .context("the cancelled workflow did not end")?;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Cancelled { .. })),
+            "expected cancellation: {result:?}"
+        );
+        Ok(())
+    })?;
+
+    let expected = BTreeMap::from([
+        ("model.spike.after".to_string(), "cancelled".to_string()),
+        ("model.spike.done".to_string(), "success".to_string()),
+        ("model.spike.slow_a".to_string(), "cancelled".to_string()),
+    ]);
+    assert_eq!(stored_statuses(&project)?, expected);
+
+    let run_results = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    let retried = nodes_retried_from(&project, &run_results)?;
+    assert_eq!(
+        retried,
+        ["model.spike.after", "model.spike.slow_a"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    );
+    Ok(())
+}
+
+/// A run that fails fast leaves the nodes it never started as skipped, and
+/// `retry_from` plans the failure and everything the run did not do.
+#[test]
+fn a_failed_run_leaves_run_results_that_retry_from_reads() -> Result<()> {
+    let project = write_project(&[
+        ("bad".to_string(), "select from from".to_string()),
+        ("child".to_string(), "select * from {{ ref('bad') }}".to_string()),
+        ("fine".to_string(), "select 1 as id".to_string()),
+    ])?;
+
+    scenario(&project, 1, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, true).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Failed(_))),
+            "the run should fail: {result:?}"
+        );
+        Ok(())
+    })?;
+
+    let statuses = stored_statuses(&project)?;
+    assert_eq!(statuses["model.spike.bad"], "error");
+    assert_eq!(statuses["model.spike.child"], "skipped");
+    let run_results = find_file(project.artifacts.path(), "run_results.json")
+        .context("no run_results.json was stored")?;
+    let retried = nodes_retried_from(&project, &run_results)?;
+    assert!(retried.contains("model.spike.bad") && retried.contains("model.spike.child"));
+    // Whether `fine` ran before the failure depends on scheduling; the retry
+    // re-runs it exactly when it did not succeed.
+    assert_eq!(retried.contains("model.spike.fine"), statuses["model.spike.fine"] != "success");
+    Ok(())
+}
+
 /// Activities outside the node loop are scheduled with a bounded retry policy
 /// that treats permanent failure types as final.
 #[test]

@@ -29,10 +29,10 @@ use temporalio_sdk::{
     WorkflowResult, WorkflowTermination,
 };
 
-use self::finish::{ExecutedRun, RunEnd, RunProgress, finish_run};
+use self::finish::{ExecutedRun, ExecutionRecord, RunEnd, RunProgress, StorePolicy, finish_run};
 use crate::types::{
-    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunPhase, RunResumeState,
-    RunScope, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, NodeStatusTree, RetryConfig, RunPhase,
+    RunResumeState, RunScope, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
@@ -223,15 +223,29 @@ async fn drive_run(
     let run_scope = RunScope::new(input, &effective_env, run_started_at_utc);
     ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
     let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
-    let mut levels =
+    let outcome =
         execute_nodes(ctx, input, &plan, &retry_config, &timeouts, &run_scope, resume_point)
             .await?;
+    // From here the nodes have run, so every way out of this function leaves
+    // their results with the finisher, which stores the artifacts of a run that
+    // ends before this function does.
+    let executed = progress.executed.insert(ExecutionRecord {
+        levels: outcome,
+        store: StorePolicy {
+            timeouts: timeouts.clone(),
+            retry: retry_config.clone(),
+            env: effective_env.clone(),
+            run_started_at,
+        },
+        artifacts_settled: false,
+    });
+    let levels = &mut executed.levels;
 
     // History is filling up: hand the remaining levels to a fresh run.
     if let Some(next_level) = levels.continue_at_level {
         let state = build_segment_state(
             &plan,
-            &levels,
+            levels,
             &effective_env,
             &hook_errors,
             next_level,
@@ -260,7 +274,7 @@ async fn drive_run(
         return Err(WorkflowTermination::cancelled());
     }
 
-    append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()), &input.command);
+    append_run_summary(levels, elapsed_secs(start, ctx.workflow_time()), &input.command);
     upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
 
     let stored = store_run_artifacts(
@@ -285,11 +299,14 @@ async fn drive_run(
     )
     .await;
     let (artifacts, log_path) = match stored {
-        Ok(stored) => stored,
+        Ok(stored) => {
+            executed.artifacts_settled = true;
+            stored
+        }
         Err(e) => {
-            // The nodes ran; the failure hooks should see what they produced.
-            progress.results = std::mem::take(&mut levels.all_results);
-            progress.results_partial = !levels.prior_segments.is_empty();
+            // A write that failed is not tried again on the way out; one a
+            // cancellation interrupted was never made, so the finisher makes it.
+            executed.artifacts_settled = !matches!(e, WorkflowTermination::Cancelled { .. });
             return Err(e);
         }
     };
@@ -317,7 +334,7 @@ async fn drive_run(
         success: !levels.had_failure && !on_run_end_failed,
         skipped: false,
         skip_reason: None,
-        node_results: levels.all_results,
+        node_results: std::mem::take(&mut levels.all_results),
         node_results_partial,
         elapsed_time: elapsed_secs(start, ctx.workflow_time()),
         log_path,
@@ -328,7 +345,9 @@ async fn drive_run(
         plan,
         hooks,
         output,
-        node_status: levels.node_status,
+        node_status: NodeStatusTree {
+            nodes: std::mem::take(&mut levels.node_status.nodes),
+        },
         hook_errors,
     })))
 }

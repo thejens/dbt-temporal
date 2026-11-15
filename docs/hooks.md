@@ -41,7 +41,7 @@ Per-workflow `env` overrides apply: the activity rebuilds the adapter engine if 
 **Failure semantics:**
 - `on-run-start` failure aborts the workflow — no nodes execute.
 - `on-run-end` failure fails the run, as in dbt: the error is recorded in `DbtRunOutput.hook_errors`, `success` is false, `DbtStatus` ends `failed`, the `on_failure` lifecycle hooks fire instead of `on_success`, and the workflow fails. The nodes' own results and the stored artifacts are unchanged. A hook after the one that failed does not run, as in dbt.
-- Cancellation skips both `store_artifacts` and `on-run-end`.
+- Cancellation skips `on-run-end`. The run's artifacts are still stored; see [Runs that end outside the node loop](error-handling.md#runs-that-end-outside-the-node-loop).
 
 **Example** (`dbt_project.yml` + a custom macro):
 

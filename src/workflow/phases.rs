@@ -18,7 +18,8 @@ use std::time::{Duration, SystemTime};
 use temporalio_common::search_attributes::SearchAttributeUpdate;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{
-    ActivityOptions, LocalActivityOptions, MemoValue, WorkflowContext, WorkflowTermination,
+    ActivityOptions, LocalActivityOptions, MemoValue, WorkflowCancellationToken, WorkflowContext,
+    WorkflowTermination,
 };
 
 use crate::activities::DbtActivities;
@@ -586,16 +587,51 @@ pub async fn store_run_artifacts(
     if !plan.write_artifacts {
         return Ok((None, None));
     }
-    let artifacts: StoreArtifactsOutput = ctx
-        .execute_activity(
-            DbtActivities::store_artifacts,
-            build_store_artifacts_input(plan, command, record, facts),
-            bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry),
-        )
-        .await
-        .map_err(|e| activity_failure(ctx, "store_artifacts activity failed", &e))?;
+    let options =
+        bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry);
+    let artifacts = schedule_store_artifacts(ctx, plan, command, record, options, facts).await?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))
+}
+
+/// [`store_run_artifacts`] for a run that is already ending, cancelled or
+/// failed.
+///
+/// The activity is detached from the workflow's cancellation. An activity
+/// scheduled under a cancelled workflow is cancelled before it starts, and the
+/// artifacts of a cancelled run are the ones its `retry_from` needs.
+pub async fn store_artifacts_of_ended_run(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    plan: &ExecutionPlan,
+    command: &str,
+    record: RunRecord<'_>,
+    timeouts: &TimeoutConfig,
+    retry: &RetryConfig,
+    facts: crate::workflow::helpers::RunFacts<'_>,
+) -> Result<(), WorkflowTermination> {
+    let mut options =
+        bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry);
+    options.cancellation_token = Some(WorkflowCancellationToken::new());
+    schedule_store_artifacts(ctx, plan, command, record, options, facts)
+        .await
+        .map(|_| ())
+}
+
+async fn schedule_store_artifacts(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    plan: &ExecutionPlan,
+    command: &str,
+    record: RunRecord<'_>,
+    options: ActivityOptions,
+    facts: crate::workflow::helpers::RunFacts<'_>,
+) -> Result<StoreArtifactsOutput, WorkflowTermination> {
+    ctx.execute_activity(
+        DbtActivities::store_artifacts,
+        build_store_artifacts_input(plan, command, record, facts),
+        options,
+    )
+    .await
+    .map_err(|e| activity_failure(ctx, "store_artifacts activity failed", &e))
 }
 
 /// The results an `on-run-end` hook sees: this segment's, plus the checkpoints

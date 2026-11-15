@@ -196,8 +196,7 @@ fn unresolved_retry() -> RetryConfig {
 pub fn build_project_hooks_input(
     phase: ProjectHookPhase,
     plan: &ExecutionPlan,
-    input: &DbtRunInput,
-    effective_env: &BTreeMap<String, String>,
+    run: RunScope,
     node_results: &[NodeExecutionResult],
     prior_segments: &[String],
     retry_config: &RetryConfig,
@@ -206,7 +205,7 @@ pub fn build_project_hooks_input(
         phase,
         project: plan.project.clone(),
         invocation_id: plan.invocation_id.clone(),
-        run: RunScope::new(input, effective_env),
+        run,
         node_results: node_results.to_vec(),
         retry_on_error: retry_config.project_hooks.allows(phase),
         prior_segments: prior_segments.to_vec(),
@@ -484,9 +483,8 @@ pub async fn run_pre_run_hooks(
 
 pub async fn run_on_run_start(
     ctx: &WorkflowContext<DbtRunWorkflow>,
-    input: &DbtRunInput,
     plan: &ExecutionPlan,
-    effective_env: &BTreeMap<String, String>,
+    run_scope: &RunScope,
     policy: HookPolicy<'_>,
 ) -> Result<(), WorkflowTermination> {
     if !plan.has_on_run_start {
@@ -498,8 +496,7 @@ pub async fn run_on_run_start(
         build_project_hooks_input(
             ProjectHookPhase::OnRunStart,
             plan,
-            input,
-            effective_env,
+            run_scope.clone(),
             &[],
             &[],
             policy.retry,
@@ -613,9 +610,8 @@ pub struct OnRunEndRecord<'a> {
 /// (matches dbt-core behaviour).
 pub async fn run_on_run_end(
     ctx: &WorkflowContext<DbtRunWorkflow>,
-    input: &DbtRunInput,
     plan: &ExecutionPlan,
-    effective_env: &BTreeMap<String, String>,
+    run_scope: &RunScope,
     record: OnRunEndRecord<'_>,
     hook_errors: &mut Vec<HookError>,
     policy: HookPolicy<'_>,
@@ -630,8 +626,7 @@ pub async fn run_on_run_end(
             build_project_hooks_input(
                 ProjectHookPhase::OnRunEnd,
                 plan,
-                input,
-                effective_env,
+                run_scope.clone(),
                 record.results,
                 record.prior_segments,
                 policy.retry,
@@ -992,8 +987,7 @@ mod tests {
         let phs = build_project_hooks_input(
             ProjectHookPhase::OnRunStart,
             &plan,
-            &input,
-            &env,
+            RunScope::new(&input, &env, None),
             &[], // on-run-start has no results yet
             &[],
             &RetryConfig::default(),
@@ -1029,8 +1023,7 @@ mod tests {
         let phs = build_project_hooks_input(
             ProjectHookPhase::OnRunEnd,
             &plan,
-            &input,
-            &env,
+            RunScope::new(&input, &env, None),
             &results,
             &[],
             &RetryConfig::default(),
@@ -1049,8 +1042,7 @@ mod tests {
         let phs = build_project_hooks_input(
             ProjectHookPhase::OnRunEnd,
             &empty_plan(),
-            &empty_input(),
-            &BTreeMap::new(),
+            RunScope::new(&empty_input(), &BTreeMap::new(), None),
             &[],
             &prior,
             &RetryConfig::default(),
@@ -1456,8 +1448,7 @@ mod tests {
         let start = build_project_hooks_input(
             ProjectHookPhase::OnRunStart,
             &plan,
-            &input,
-            &env,
+            RunScope::new(&input, &env, None),
             &[],
             &[],
             &retry,
@@ -1468,8 +1459,7 @@ mod tests {
         let end = build_project_hooks_input(
             ProjectHookPhase::OnRunEnd,
             &plan,
-            &input,
-            &env,
+            RunScope::new(&input, &env, None),
             &[],
             &[],
             &retry,

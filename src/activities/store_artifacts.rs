@@ -247,6 +247,8 @@ async fn generate_and_store_catalog(
                     // Neither reaches a `get_columns_in_relation` call.
                     vars: &BTreeMap::new(),
                     full_refresh: false,
+                    invocation_id: &invocation_id,
+                    run_started_at: None,
                 },
             )
         })

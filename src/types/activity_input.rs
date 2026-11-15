@@ -27,6 +27,7 @@
 //! `#[serde(default)]` to those fields, and do not hoist compact fields to the
 //! top level.
 
+use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -46,10 +47,19 @@ pub struct RunScope {
     /// the input's own env, as they do in the workflow.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_env: BTreeMap<String, String>,
+    /// When the run started: the workflow's own value, carried through
+    /// continue-as-new, so every node and hook of the run renders the same
+    /// `run_started_at`. It is stated here, with the other facts that are the
+    /// same for every activity of the run, rather than per node. `None` when
+    /// the workflow could not read its clock; the render then keeps the
+    /// worker's parse-time value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 impl RunScope {
-    /// Capture a run whose effective env is `effective_env`.
+    /// Capture a run that started at `started_at` and whose effective env is
+    /// `effective_env`.
     ///
     /// The effective env only ever grows from the base env (hooks add or
     /// overwrite entries, nothing removes one), so the entries that differ
@@ -57,7 +67,11 @@ impl RunScope {
     /// the effective env comes from the first segment, whose `_` was
     /// serialized from the input before `resume_from` was set; clearing it here
     /// makes that `_` reproducible and keeps it out of `extra_env`.
-    pub fn new(input: &DbtRunInput, effective_env: &BTreeMap<String, String>) -> Self {
+    pub fn new(
+        input: &DbtRunInput,
+        effective_env: &BTreeMap<String, String>,
+        started_at: Option<DateTime<Utc>>,
+    ) -> Self {
         let mut input = input.clone();
         input.resume_from = None;
         let base = input.base_env();
@@ -66,7 +80,11 @@ impl RunScope {
             .filter(|(key, value)| base.get(*key) != Some(*value))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        Self { input, extra_env }
+        Self {
+            input,
+            extra_env,
+            started_at,
+        }
     }
 
     /// The env the workflow held when it built this scope.
@@ -100,6 +118,7 @@ impl CompactNodeInput {
     /// The flat form the activity executes.
     pub fn resolve(self) -> NodeExecutionInput {
         let env = self.run.env();
+        let started_at = self.run.started_at;
         let run = self.run.input;
         NodeExecutionInput {
             unique_id: self.unique_id,
@@ -113,6 +132,7 @@ impl CompactNodeInput {
             event_time_end: run.event_time_end,
             vars: run.vars,
             full_refresh: run.full_refresh,
+            run_started_at: started_at,
         }
     }
 }
@@ -136,6 +156,7 @@ impl CompactProjectHooksInput {
     /// The flat form the activity executes.
     pub fn resolve(self) -> ProjectHooksInput {
         let env = self.run.env();
+        let started_at = self.run.started_at;
         let run = self.run.input;
         ProjectHooksInput {
             phase: self.phase,
@@ -148,6 +169,7 @@ impl CompactProjectHooksInput {
             full_refresh: run.full_refresh,
             retry_on_error: self.retry_on_error,
             prior_segments: self.prior_segments,
+            run_started_at: started_at,
         }
     }
 }

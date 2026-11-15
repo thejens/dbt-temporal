@@ -6,7 +6,7 @@ use futures::FutureExt;
 
 use super::{MemoCadence, ReadyQueueRun, next_completed};
 use crate::types::{
-    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeInfo, NodeStatus, RetryConfig,
+    DbtRunInput, ExecutionPlan, NodeExecutionResult, NodeInfo, NodeStatus, RetryConfig, RunScope,
     TimeoutConfig,
 };
 use crate::workflow::levels::ResumePoint;
@@ -181,7 +181,14 @@ fn fixture() -> Fixture {
 
 fn run_of(f: &Fixture) -> ReadyQueueRun<'_> {
     let resume = ResumePoint::fresh(&f.plan, true);
-    match ReadyQueueRun::new(&f.plan, &f.input, &f.retry, &f.timeouts, &f.env, &resume) {
+    match ReadyQueueRun::new(
+        &f.plan,
+        &f.input,
+        &f.retry,
+        &f.timeouts,
+        &RunScope::new(&f.input, &f.env, None),
+        &resume,
+    ) {
         Ok(run) => run,
         Err(e) => panic!("run: {e}"),
     }
@@ -329,7 +336,14 @@ fn a_resumed_run_carries_statuses_failures_and_counter() {
         .insert("b".to_string(), NodeStatus::Success);
     resume.prior_segments = vec!["seg-0.json".to_string()];
 
-    let run = match ReadyQueueRun::new(&f.plan, &f.input, &f.retry, &f.timeouts, &f.env, &resume) {
+    let run = match ReadyQueueRun::new(
+        &f.plan,
+        &f.input,
+        &f.retry,
+        &f.timeouts,
+        &RunScope::new(&f.input, &f.env, None),
+        &resume,
+    ) {
         Ok(run) => run,
         Err(e) => panic!("run: {e}"),
     };
@@ -368,6 +382,13 @@ fn a_plan_with_a_cycle_is_refused_so_the_caller_can_fall_back() {
         a.depends_on = vec!["c".to_string()];
     }
     let resume = ResumePoint::fresh(&f.plan, true);
-    let result = ReadyQueueRun::new(&f.plan, &f.input, &f.retry, &f.timeouts, &f.env, &resume);
+    let result = ReadyQueueRun::new(
+        &f.plan,
+        &f.input,
+        &f.retry,
+        &f.timeouts,
+        &RunScope::new(&f.input, &f.env, None),
+        &resume,
+    );
     assert!(result.is_err());
 }

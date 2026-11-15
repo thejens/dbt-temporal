@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dbt_jinja_utils::jinja_environment::JinjaEnv;
+use minijinja_contrib::modules::py_datetime::datetime::PyDateTime;
+use minijinja_contrib::modules::pytz::PytzTimezone;
 
 use crate::error::DbtTemporalError;
 use crate::worker_state::WorkerState;
@@ -43,6 +45,12 @@ pub struct RenderOverrides<'a> {
     /// token holds only a `Weak` ref to its source, so a dropped source reads as
     /// "already cancelled".
     pub cancellation: &'a dbt_common::cancellation::CancellationToken,
+    /// The run's invocation id, rendered as `{{ invocation_id }}`.
+    pub invocation_id: &'a str,
+    /// When the run started, rendered as `{{ run_started_at }}`. `None` for an
+    /// activity input recorded before the start time travelled with it; the
+    /// render then keeps the value the worker parsed the project with.
+    pub run_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A configured render environment, valid for one activity invocation.
@@ -132,6 +140,8 @@ pub fn prepare_render_env(
         Arc::clone(&adapter),
     );
 
+    set_run_globals(&mut jinja_env, overrides);
+
     // Set `execute` as a GLOBAL, not just a context variable. dbt-fusion only
     // puts it in the context built by `build_compile_and_run_base_context`,
     // which does not propagate into cross-template macro calls — a package
@@ -161,6 +171,29 @@ pub fn prepare_render_env(
     })
 }
 
+/// Point `invocation_id` and `run_started_at` at this activity's run.
+///
+/// dbt sets both once, when it parses the project. A worker parses once and
+/// then serves many runs, so left alone every model would render the time the
+/// worker started and one id for all runs. They are globals, like dbt's, so a
+/// macro called from a model or a hook sees them too. `run_started_at` is the
+/// same timezone-aware datetime object dbt builds, so `strftime` and the rest of
+/// its methods work.
+fn set_run_globals(jinja_env: &mut JinjaEnv, overrides: &RenderOverrides<'_>) {
+    jinja_env
+        .env
+        .add_global("invocation_id", minijinja::Value::from(overrides.invocation_id));
+    if let Some(started_at) = overrides.run_started_at {
+        jinja_env.env.add_global(
+            "run_started_at",
+            minijinja::Value::from_object(PyDateTime::new_aware(
+                started_at.with_timezone(&chrono_tz::Tz::UTC),
+                Some(PytzTimezone::new(chrono_tz::Tz::UTC)),
+            )),
+        );
+    }
+}
+
 /// Drop the engine's relation cache before rendering.
 ///
 /// dbt-fusion's relation cache is built for the CLI's one-shot lifetime: the
@@ -182,6 +215,19 @@ pub fn prepare_render_env(
 /// Clearing per activity costs one schema listing per node instead of one per
 /// worker lifetime. That is the price of correctness here, and it restores the
 /// per-invocation freshness the cache was designed around.
+///
+/// Clearing less often is not safe, because the cache cannot be kept current:
+///
+/// - dbt itself only adds the relations a materialization returns, and does so
+///   after the node succeeds. A node that created its relation and then failed
+///   leaves it in the warehouse but not in the cache, so the retry would be told
+///   the relation is absent and fail the same way.
+/// - The engine is shared by every workflow on the worker, and the same schema
+///   is written by other workers, by `run_query` DDL in hooks and macros, and by
+///   anything outside dbt. None of those update this cache.
+/// - Narrowing the clear to the schemas a node writes saves nothing: a node's
+///   lookups are of its own relation, so the schema it writes is the schema it
+///   lists.
 ///
 /// The cache belongs to the engine, and an activity binds exactly one engine, so
 /// clearing the selected one is enough: every engine is cleared before each of

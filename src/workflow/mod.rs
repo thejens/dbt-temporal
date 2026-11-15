@@ -31,7 +31,7 @@ use temporalio_sdk::{
 use self::finish::{ExecutedRun, RunEnd, RunProgress, finish_run};
 use crate::types::{
     DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunPhase, RunResumeState,
-    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    RunScope, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
@@ -143,6 +143,7 @@ async fn drive_run(
         .as_ref()
         .and_then(|state| state.started_at)
         .map_or(start, |t| Some(std::time::SystemTime::from(t)));
+    let run_started_at_utc = run_started_at.map(chrono::DateTime::<chrono::Utc>::from);
 
     ctx.state_mut(|s| s.status.phase = RunPhase::Planning);
     // Timeouts come from dbt_temporal.yml, but planning happens before that is
@@ -213,13 +214,16 @@ async fn drive_run(
             timeouts: &timeouts,
             retry: &retry_config,
         };
-        run_on_run_start(ctx, input, &plan, &effective_env, hook_policy).await?;
+        let run_scope = RunScope::new(input, &effective_env, run_started_at_utc);
+        run_on_run_start(ctx, &plan, &run_scope, hook_policy).await?;
     }
 
+    // Stated once per run: every node's activity input carries a copy.
+    let run_scope = RunScope::new(input, &effective_env, run_started_at_utc);
     ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
     let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
     let mut levels =
-        execute_nodes(ctx, input, &plan, &retry_config, &timeouts, &effective_env, resume_point)
+        execute_nodes(ctx, input, &plan, &retry_config, &timeouts, &run_scope, resume_point)
             .await?;
 
     // History is filling up: hand the remaining levels to a fresh run.
@@ -231,7 +235,7 @@ async fn drive_run(
             &hook_errors,
             next_level,
             next_segment_number(input.resume_from.as_ref()),
-            run_started_at.map(chrono::DateTime::<chrono::Utc>::from),
+            run_started_at_utc,
         );
         return Err(continue_run_as_new(ctx, input, &plan, state).await);
     }
@@ -291,9 +295,8 @@ async fn drive_run(
 
     run_on_run_end(
         ctx,
-        input,
         &plan,
-        &effective_env,
+        &run_scope,
         OnRunEndRecord {
             results: &levels.all_results,
             prior_segments: &levels.prior_segments,
@@ -366,11 +369,11 @@ async fn execute_nodes(
     plan: &ExecutionPlan,
     retry_config: &RetryConfig,
     timeouts: &TimeoutConfig,
-    effective_env: &BTreeMap<String, String>,
+    run_scope: &RunScope,
     resume: ResumePoint,
 ) -> Result<levels::LevelExecutionOutcome, WorkflowTermination> {
     if ctx.patched(READY_QUEUE_PATCH) {
-        match ReadyQueueRun::new(plan, input, retry_config, timeouts, effective_env, &resume) {
+        match ReadyQueueRun::new(plan, input, retry_config, timeouts, run_scope, &resume) {
             Ok(run) => return run.execute(ctx).await,
             // The plan's levels are valid by construction; edges that disagree
             // with them are not something to schedule by.
@@ -379,7 +382,7 @@ async fn execute_nodes(
             }
         }
     }
-    execute_levels(ctx, input, plan, retry_config, timeouts, effective_env, resume).await
+    execute_levels(ctx, input, plan, retry_config, timeouts, run_scope, resume).await
 }
 
 /// Build the level loop's starting point, fresh or resumed.

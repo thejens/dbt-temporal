@@ -154,6 +154,7 @@ mod tests {
             event_time_end: None,
             vars: BTreeMap::new(),
             full_refresh: false,
+            run_started_at: None,
         }
     }
 

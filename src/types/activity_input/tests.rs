@@ -1,5 +1,6 @@
 use super::*;
 use crate::types::RunResumeState;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 /// `NodeExecutionInput` exactly as the earlier release defined it. An
@@ -105,7 +106,7 @@ fn compact_node(input: &DbtRunInput, env: &BTreeMap<String, String>) -> NodeActi
         "model.shop.orders",
         "inv-1",
         "shop",
-        &RunScope::new(input, env),
+        &RunScope::new(input, env, None),
     ))
 }
 
@@ -157,7 +158,7 @@ fn hook_injected_env_wins_exactly_as_it_does_in_the_workflow() {
         ],
     );
 
-    let scope = RunScope::new(&input, &env);
+    let scope = RunScope::new(&input, &env, None);
     assert_eq!(
         scope
             .extra_env
@@ -180,7 +181,7 @@ fn hook_injected_env_wins_exactly_as_it_does_in_the_workflow() {
 fn hook_env_equal_to_the_base_is_not_repeated() {
     let input = run_input(&BTreeMap::from([("A".into(), "1".into())]));
     let env = effective(&input, &[("A", "1")]);
-    assert!(RunScope::new(&input, &env).extra_env.is_empty());
+    assert!(RunScope::new(&input, &env, None).extra_env.is_empty());
 }
 
 /// The successor of a continued run holds the first segment's effective
@@ -200,7 +201,7 @@ fn a_continued_run_reproduces_the_first_segments_underscore() {
         fail_fast_override: None,
     });
 
-    let scope = RunScope::new(&continued, &env);
+    let scope = RunScope::new(&continued, &env, None);
     assert_eq!(scope.extra_env, BTreeMap::from([("FROM_HOOK".to_string(), "x".to_string())]));
     assert!(scope.input.resume_from.is_none());
     let resolved = over_the_wire(&compact_node(&continued, &env)).resolve();
@@ -226,7 +227,7 @@ fn compact_project_hooks_input_resolves_to_the_flat_form() {
         phase: ProjectHookPhase::OnRunEnd,
         project: "shop".into(),
         invocation_id: "inv-1".into(),
-        run: RunScope::new(&input, &env),
+        run: RunScope::new(&input, &env, None),
         node_results: Vec::new(),
         retry_on_error: true,
         prior_segments: vec!["inv-1/seg_0.json".into()],
@@ -246,6 +247,77 @@ fn compact_project_hooks_input_resolves_to_the_flat_form() {
     assert!(resolved.retry_on_error);
     assert_eq!(resolved.prior_segments, ["inv-1/seg_0.json"]);
     assert!(resolved.node_results.is_empty());
+}
+
+// --- the run's start time ---
+
+fn run_start() -> DateTime<Utc> {
+    "2026-03-04T05:06:07.123456789Z"
+        .parse()
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Every node and hook of a run renders one `run_started_at`: the workflow's,
+/// carried in the run scope and surviving the trip through history.
+#[test]
+fn the_runs_start_time_reaches_node_and_hook_inputs() {
+    let input = run_input(&BTreeMap::new());
+    let env = effective(&input, &[]);
+    let scope = RunScope::new(&input, &env, Some(run_start()));
+
+    let node = NodeActivityInput::compact(CompactNodeInput::new(
+        "model.shop.orders",
+        "inv-1",
+        "shop",
+        &scope,
+    ));
+    assert_eq!(over_the_wire(&node).resolve().run_started_at, Some(run_start()));
+
+    let hooks = ProjectHooksActivityInput::compact(CompactProjectHooksInput {
+        phase: ProjectHookPhase::OnRunStart,
+        project: "shop".into(),
+        invocation_id: "inv-1".into(),
+        run: scope,
+        node_results: Vec::new(),
+        retry_on_error: false,
+        prior_segments: Vec::new(),
+    });
+    let wire: ProjectHooksActivityInput =
+        serde_json::from_slice(&serde_json::to_vec(&hooks).unwrap_or_else(|e| panic!("{e}")))
+            .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(wire.resolve().run_started_at, Some(run_start()));
+}
+
+/// Without a start time the payload carries no key for it, so a run whose
+/// clock was unreadable is byte-identical to one from an earlier release.
+#[test]
+fn an_unknown_start_time_is_left_out_of_the_payload() {
+    let input = run_input(&BTreeMap::new());
+    let scope = RunScope::new(&input, &effective(&input, &[]), None);
+    let json = serde_json::to_value(&scope).unwrap_or_else(|e| panic!("{e}"));
+    assert!(json.get("started_at").is_none(), "{json}");
+}
+
+/// Temporal redelivers the input an activity was scheduled with, so a compact
+/// payload recorded before the start time existed must still deserialize.
+#[test]
+fn a_compact_payload_without_a_start_time_still_deserializes() {
+    let input = run_input(&BTreeMap::new());
+    let compact = compact_node(&input, &effective(&input, &[]));
+    let mut payload = serde_json::to_value(&compact).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        payload["compact"]["run"]
+            .as_object_mut()
+            .is_some_and(|run| {
+                run.remove("started_at");
+                true
+            })
+    );
+
+    let resolved = serde_json::from_value::<NodeActivityInput>(payload)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .resolve();
+    assert_eq!(resolved.run_started_at, None);
 }
 
 // --- earlier payloads: the flat shape recorded by workflows that predate the compact one ---
@@ -288,6 +360,7 @@ fn a_flat_node_payload_resolves_unchanged() {
     assert_eq!(resolved.vars["ratio"], json!(0.1));
     assert_eq!(resolved.vars["nested"], json!({"a": [1, 2]}));
     assert!(resolved.full_refresh);
+    assert_eq!(resolved.run_started_at, None);
 }
 
 /// Fields the flat shape defaults when absent keep their defaults.
@@ -355,7 +428,7 @@ fn an_earlier_worker_cannot_deserialize_a_compact_project_hooks_payload() {
         phase: ProjectHookPhase::OnRunStart,
         project: "shop".into(),
         invocation_id: "inv-1".into(),
-        run: RunScope::new(&input, &effective(&input, &[])),
+        run: RunScope::new(&input, &effective(&input, &[]), None),
         node_results: Vec::new(),
         retry_on_error: false,
         prior_segments: Vec::new(),
@@ -474,6 +547,7 @@ fn flat_node_input(input: &DbtRunInput, env: &BTreeMap<String, String>) -> NodeE
         event_time_end: input.event_time_end.clone(),
         vars: input.vars.clone(),
         full_refresh: input.full_refresh,
+        run_started_at: None,
     }
 }
 

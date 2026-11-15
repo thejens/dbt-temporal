@@ -35,6 +35,14 @@ permissions:
 env:
   K3D_VERSION: v5.9.0
 
+# A push to a pull request supersedes the runs of its earlier commits. Only
+# pull-request runs are cancelled: the release workflow calls this one to gate
+# publishing, and a manual run was asked for by name, so neither is dropped for
+# a later one.
+concurrency:
+  group: chart-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   e2e:
     name: Chart e2e (${{ matrix.variant || 'debian-slim' }})

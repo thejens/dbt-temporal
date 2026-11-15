@@ -577,6 +577,41 @@ async fn hook_raw_sql_transient_fault_is_a_retryable_adapter_error() {
 
 // --- materialization variants ---
 
+/// A materialization the project defines may store no result (here it leaves
+/// the relation to something else). dbt reports the node as successful with an
+/// empty response; failing it would send Temporal into retries of a node that
+/// ends the same way every time.
+#[tokio::test]
+async fn a_custom_materialization_without_a_result_succeeds_with_an_empty_response() {
+    let harness = Harness::build_files(&[
+        (
+            "macros/noop.sql",
+            "{% materialization noop, default %}{{ return({'relations': []}) }}{% endmaterialization %}",
+        ),
+        ("models/external.sql", "{{ config(materialized='noop') }}\nselect 1 as id"),
+    ])
+    .await;
+    let result = harness.run_ok("external").await;
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+    assert_eq!(result.adapter_response, std::collections::BTreeMap::new());
+}
+
+/// A project's own override of a built-in name is still the project's
+/// materialization.
+#[tokio::test]
+async fn a_project_override_of_a_built_in_materialization_may_store_no_result() {
+    let harness = Harness::build_files(&[
+        (
+            "macros/table.sql",
+            "{% materialization table, default %}{{ return({'relations': []}) }}{% endmaterialization %}",
+        ),
+        ("models/m.sql", "{{ config(materialized='table') }}\nselect 1 as id"),
+    ])
+    .await;
+    let result = harness.run_ok("m").await;
+    assert_eq!(result.status, dbt_temporal::types::NodeStatus::Success, "{result:?}");
+}
+
 #[tokio::test]
 async fn ephemeral_model_is_inlined_as_a_cte() {
     // Ephemeral models never materialize as their own relation — they're

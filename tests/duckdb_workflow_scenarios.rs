@@ -647,6 +647,67 @@ fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
     Ok(())
 }
 
+/// Run two models with `hook` as the project's `on-run-end`, and report
+/// whether the run succeeded.
+///
+/// A hook cannot hand a value back, so the scenarios make it render invalid SQL
+/// when what it sees is not what is expected. That fails the run, because a
+/// failing `on-run-end` hook does.
+fn on_run_end_passes(hook: &str) -> Result<bool> {
+    let project = write_project_with(
+        &format!("on-run-end:\n  - \"{hook}\""),
+        &[
+            ("a".to_string(), "select 1 as id".to_string()),
+            ("b".to_string(), "select id from {{ ref('a') }}".to_string()),
+        ],
+    )?;
+    scenario(&project, 2, |client, task_queue| async move {
+        let handle = start(&client, &task_queue, false).await?;
+        let result = handle.get_result(WorkflowGetResultOptions::default()).await;
+        Ok(result.is_ok())
+    })
+}
+
+/// Fails the run (invalid SQL) unless `expected` holds.
+fn fail_unless(expected: &str) -> String {
+    format!("{{% if not ({expected}) %}}select from from{{% endif %}}")
+}
+
+/// `results` is dbt's list of result objects: each has the executed `node` and
+/// a status in dbt's words.
+#[test]
+fn on_run_end_results_carry_the_node_and_dbt_statuses() -> Result<()> {
+    let names_and_statuses = fail_unless(
+        "results | map(attribute='node') | map(attribute='name') | sort | join(',') == 'a,b' \
+         and results | map(attribute='status') | unique | list == ['success'] \
+         and results | map(attribute='node') | map(attribute='resource_type') | unique | list \
+             == ['model']",
+    );
+    assert!(on_run_end_passes(&names_and_statuses)?);
+
+    // The same hook refuses what it should: the check is not vacuous.
+    let wrong_name = fail_unless(
+        "results | map(attribute='node') | map(attribute='name') \
+                                  | join(',') == 'nobody'",
+    );
+    assert!(!on_run_end_passes(&wrong_name)?);
+    Ok(())
+}
+
+/// `schemas` and `database_schemas` name where the run built its relations.
+#[test]
+fn on_run_end_sees_the_schemas_the_run_built_into() -> Result<()> {
+    let built = fail_unless(
+        "schemas | list == ['main'] and database_schemas | length == 1 \
+         and database_schemas[0][1] == 'main'",
+    );
+    assert!(on_run_end_passes(&built)?);
+
+    let wrong = fail_unless("schemas | list == ['elsewhere']");
+    assert!(!on_run_end_passes(&wrong)?);
+    Ok(())
+}
+
 /// Activities outside the node loop are scheduled with a bounded retry policy
 /// that treats permanent failure types as final.
 #[test]

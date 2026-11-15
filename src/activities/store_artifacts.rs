@@ -405,7 +405,7 @@ fn run_result_output(
     use dbt_schemas::schemas::{RunResultOutput, TimingInfo};
 
     RunResultOutput {
-        status: dbt_status(result),
+        status: dbt_status(result).as_str().to_string(),
         timing: result
             .timing
             .iter()
@@ -444,18 +444,16 @@ fn run_result_output(
     }
 }
 
-/// dbt's status word for one node: a freshness check reports the grade it
+/// dbt's status for one node: a freshness check reports the grade it
 /// measured, an assertion passes or fails, anything else keeps its own word.
-fn dbt_status(result: &crate::types::NodeExecutionResult) -> String {
-    result
-        .freshness
-        .as_ref()
-        .map_or_else(
-            || ArtifactStatus::for_node(&result.unique_id, result.status),
-            |freshness| ArtifactStatus::for_freshness(freshness.status),
-        )
-        .as_str()
-        .to_string()
+///
+/// Shared with the `results` an `on-run-end` hook sees, which carry the same
+/// words as `run_results.json`.
+pub(super) fn dbt_status(result: &crate::types::NodeExecutionResult) -> ArtifactStatus {
+    result.freshness.as_ref().map_or_else(
+        || ArtifactStatus::for_node(&result.unique_id, result.status),
+        |freshness| ArtifactStatus::for_freshness(freshness.status),
+    )
 }
 
 /// Adapter responses arrive as JSON and leave as YAML values — the same data,

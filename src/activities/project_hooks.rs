@@ -6,18 +6,19 @@
 //! macros (`run_query`, `statement`, `log`) execute against the warehouse during
 //! rendering. If the rendered output is non-empty SQL, we execute it directly.
 //!
-//! For `on-run-end`, the `results` Jinja variable is built from the workflow's
-//! `node_results` and matches dbt-core's shape (`status`, `unique_id`,
-//! `execution_time`, `message`, `failures`, `adapter_response`, `node.*`).
+//! For `on-run-end`, the `results`, `schemas` and `database_schemas` Jinja
+//! variables are built from the workflow's `node_results` and match what dbt
+//! hands the hook: result objects with dbt's status words and the executed
+//! `node`, and the schemas of the relations the run built.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tracing::info;
 
 use crate::artifact_store::ArtifactStore;
-use crate::types::{NodeExecutionResult, ProjectHookPhase, ProjectHooksInput};
+use crate::types::{NodeExecutionResult, NodeStatus, ProjectHookPhase, ProjectHooksInput};
 
 use crate::error::DbtTemporalError;
 
@@ -26,6 +27,7 @@ use super::cancellable;
 use super::node_helpers::json_to_minijinja;
 use super::render_env;
 use super::retry::{self, RetryDecision};
+use super::store_artifacts::dbt_status;
 use crate::worker_state::WorkerState;
 
 /// Whether a failed hook should be handed back to Temporal as retryable.
@@ -244,10 +246,13 @@ fn run_project_hooks_body(
     // Without this, `model.schema` is undefined and the `+` string operator fails.
     context.insert("model".to_owned(), empty_model_context());
 
-    // For on_run_end: inject `results` matching dbt-core's shape.
+    // For on_run_end: inject `results`, `schemas` and `database_schemas` as dbt does.
     if matches!(input.phase, ProjectHookPhase::OnRunEnd) {
-        let results_value = build_results_context(&input.node_results, &state.resolver_state.nodes);
-        context.insert("results".to_owned(), results_value);
+        let nodes = &state.resolver_state.nodes;
+        context.insert("results".to_owned(), build_results_context(&input.node_results, nodes));
+        let built = built_schemas(&input.node_results, nodes);
+        context.insert("schemas".to_owned(), schemas_context(&built));
+        context.insert("database_schemas".to_owned(), database_schemas_context(&built));
     }
 
     // ── Select hook list ─────────────────────────────────────────────────
@@ -331,18 +336,21 @@ fn empty_model_context() -> minijinja::Value {
     minijinja::Value::from_object(EmptyModel)
 }
 
-/// Convert the workflow's `Vec<NodeExecutionResult>` into a Jinja value list
-/// matching dbt-core's `results` context shape.
+/// Convert the workflow's `Vec<NodeExecutionResult>` into the `results` list an
+/// `on-run-end` hook sees.
 ///
-/// Each item exposes:
-/// - `unique_id`, `status`, `execution_time`, `message`, `failures`, `thread_id`
-/// - `adapter_response` (map of warehouse-specific response fields)
-/// - `node` (sub-object with `unique_id`, `name`, `resource_type`, `package_name`)
+/// Each item has the attributes of dbt's run result:
+/// - `status`, in the words `run_results.json` uses (`success`, `error`,
+///   `skipped`, `pass`, `fail`, `warn`, ...)
+/// - `unique_id`, `execution_time`, `message`, `failures`, `thread_id`,
+///   `compiled_code`
+/// - `timing`, a list of `name` / `started_at` / `completed_at`
+/// - `adapter_response`, the warehouse-specific response fields
+/// - `node`, the resolved node as dbt serializes it (`name`, `resource_type`,
+///   `config`, ...)
 ///
-/// The `node` sub-object is enriched at render time by looking up
-/// `nodes.get_node(unique_id)` — we don't serialize node metadata through Temporal
-/// workflow history.
-#[allow(clippy::option_if_let_else)] // if-let is clearer than nested map_or_else here.
+/// The node is looked up in the worker's resolver state at render time rather
+/// than carried through Temporal workflow history.
 fn build_results_context(
     results: &[NodeExecutionResult],
     nodes: &dbt_schemas::schemas::Nodes,
@@ -353,20 +361,17 @@ fn build_results_context(
             let mut map = BTreeMap::<String, minijinja::Value>::new();
 
             map.insert("unique_id".to_owned(), minijinja::Value::from(r.unique_id.clone()));
-            map.insert("status".to_owned(), minijinja::Value::from(r.status.as_str()));
+            map.insert("status".to_owned(), minijinja::Value::from(dbt_status(r).as_str()));
             map.insert("execution_time".to_owned(), minijinja::Value::from(r.execution_time));
-            map.insert(
-                "message".to_owned(),
-                r.message
-                    .as_deref()
-                    .map_or_else(|| minijinja::Value::from(()), minijinja::Value::from),
-            );
-            map.insert(
-                "failures".to_owned(),
-                r.failures
-                    .map_or_else(|| minijinja::Value::from(()), minijinja::Value::from),
-            );
+            map.insert("message".to_owned(), optional(r.message.as_deref()));
+            map.insert("failures".to_owned(), optional(r.failures));
+            map.insert("compiled_code".to_owned(), optional(r.compiled_code.as_deref()));
+            // The artifact writer names the thread the same way; see its comment.
             map.insert("thread_id".to_owned(), minijinja::Value::from("main"));
+            map.insert(
+                "timing".to_owned(),
+                minijinja::Value::from(r.timing.iter().map(timing_value).collect::<Vec<_>>()),
+            );
 
             // adapter_response as a flat map (rows_affected, message, code, query_id...).
             let resp: BTreeMap<String, minijinja::Value> = r
@@ -376,32 +381,101 @@ fn build_results_context(
                 .collect();
             map.insert("adapter_response".to_owned(), minijinja::Value::from(resp));
 
-            // `node` sub-object — enriched from resolver_state.nodes.
-            let node_val = if let Some(node) = nodes.get_node(&r.unique_id) {
-                let common = node.common();
-                let rt = node.resource_type().as_str_name().to_ascii_lowercase();
-                let rt = rt.strip_prefix("node_type_").unwrap_or(&rt).to_string();
-                let mut n = BTreeMap::<String, minijinja::Value>::new();
-                n.insert("unique_id".to_owned(), minijinja::Value::from(r.unique_id.clone()));
-                n.insert("name".to_owned(), minijinja::Value::from(common.name.clone()));
-                n.insert("resource_type".to_owned(), minijinja::Value::from(rt));
-                n.insert(
-                    "package_name".to_owned(),
-                    minijinja::Value::from(common.package_name.clone()),
-                );
-                minijinja::Value::from(n)
-            } else {
-                // Node not in resolver (e.g. cancelled before plan): minimal object.
-                let mut n = BTreeMap::<String, minijinja::Value>::new();
-                n.insert("unique_id".to_owned(), minijinja::Value::from(r.unique_id.clone()));
-                minijinja::Value::from(n)
-            };
-            map.insert("node".to_owned(), node_val);
+            map.insert("node".to_owned(), node_value(&r.unique_id, nodes));
 
             minijinja::Value::from(map)
         })
         .collect();
     minijinja::Value::from(items)
+}
+
+/// `none` for an absent value, as dbt's result objects hold.
+fn optional<T: Into<minijinja::Value>>(value: Option<T>) -> minijinja::Value {
+    value.map_or_else(|| minijinja::Value::from(()), Into::into)
+}
+
+/// One timing entry. The instants are naive datetimes, as dbt hands them, so
+/// a hook can call `strftime` on them; an instant that does not parse is `none`.
+fn timing_value(timing: &crate::types::TimingEntry) -> minijinja::Value {
+    use minijinja_contrib::modules::py_datetime::datetime::PyDateTime;
+
+    let instant = |text: &str| {
+        text.parse::<chrono::DateTime<chrono::Utc>>().map_or_else(
+            |_| minijinja::Value::from(()),
+            |at| minijinja::Value::from_object(PyDateTime::new_naive(at.naive_utc())),
+        )
+    };
+    let mut entry = BTreeMap::<String, minijinja::Value>::new();
+    entry.insert("name".to_owned(), minijinja::Value::from(timing.name.clone()));
+    entry.insert("started_at".to_owned(), instant(&timing.started_at));
+    entry.insert("completed_at".to_owned(), instant(&timing.completed_at));
+    minijinja::Value::from(entry)
+}
+
+/// The `node` of a result: the resolved node as dbt serializes it, so
+/// `node.config`, `node.tags` and the rest read as they do in dbt.
+///
+/// A result whose node is not in the resolver (a node of another project, or a
+/// run planned by an older worker) carries only its `unique_id`.
+fn node_value(unique_id: &str, nodes: &dbt_schemas::schemas::Nodes) -> minijinja::Value {
+    let Some(node) = nodes.get_node(unique_id) else {
+        let mut minimal = BTreeMap::<String, minijinja::Value>::new();
+        minimal.insert("unique_id".to_owned(), minijinja::Value::from(unique_id.to_owned()));
+        return minijinja::Value::from(minimal);
+    };
+    let mut serialized = node.serialize_keep_none();
+    if let dbt_yaml::Value::Mapping(map, _) = &mut serialized {
+        // dbt's serialization spells the type as the node's own variant name;
+        // macros compare it with the lower-case words ("model", "seed", ...).
+        let resource_type = node.resource_type().as_str_name().to_ascii_lowercase();
+        let resource_type = resource_type
+            .strip_prefix("node_type_")
+            .unwrap_or(&resource_type)
+            .to_string();
+        map.insert("resource_type".into(), dbt_yaml::Value::string(resource_type));
+    }
+    minijinja::Value::from_serialize(serialized)
+}
+
+/// The `(database, schema)` pairs of the relations the run built, which is what
+/// dbt hands `on-run-end` as `database_schemas` (and, without the database, as
+/// `schemas`).
+///
+/// Models, seeds and snapshots that succeeded, as in dbt. The schema is the
+/// one the node wrote to when it recorded it, because a run that overrides the
+/// target or the profile's env builds elsewhere than the worker's startup
+/// metadata says.
+fn built_schemas(
+    results: &[NodeExecutionResult],
+    nodes: &dbt_schemas::schemas::Nodes,
+) -> BTreeSet<(String, String)> {
+    results
+        .iter()
+        .filter(|r| r.status == NodeStatus::Success)
+        .filter(|r| {
+            ["model.", "seed.", "snapshot."]
+                .iter()
+                .any(|p| r.unique_id.starts_with(p))
+        })
+        .filter_map(|r| {
+            if let Some((database, schema, _)) = super::catalog::executed_relation(r) {
+                return Some((database, schema));
+            }
+            let base = nodes.get_node(&r.unique_id)?.base();
+            Some((base.database.clone(), base.schema.clone()))
+        })
+        .collect()
+}
+
+/// `schemas`: the distinct schema names, in order.
+fn schemas_context(built: &BTreeSet<(String, String)>) -> minijinja::Value {
+    let schemas: BTreeSet<&str> = built.iter().map(|(_, schema)| schema.as_str()).collect();
+    minijinja::Value::from_iter(schemas)
+}
+
+/// `database_schemas`: `[database, schema]` pairs.
+fn database_schemas_context(built: &BTreeSet<(String, String)>) -> minijinja::Value {
+    minijinja::Value::from_serialize(built)
 }
 
 #[cfg(test)]
@@ -505,12 +579,13 @@ mod tests {
         assert_eq!(second_failures, "2");
 
         // Iteration with status filtering — the actual log_run_results pattern.
+        // An assertion that errors reports dbt's word for it, `fail`.
         let summary = env
             .template_from_str(
                 r"{% set ns = namespace(pass=0, error=0) %}\
 {% for r in results %}\
 {% if r.status == 'success' %}{% set ns.pass = ns.pass + 1 %}{% endif %}\
-{% if r.status == 'error' %}{% set ns.error = ns.error + 1 %}{% endif %}\
+{% if r.status == 'fail' %}{% set ns.error = ns.error + 1 %}{% endif %}\
 {% endfor %}\
 pass={{ ns.pass }} error={{ ns.error }}",
             )?
@@ -609,6 +684,156 @@ pass={{ ns.pass }} error={{ ns.error }}",
             .render(&ctx, &[])?;
         assert_eq!(rt, "model");
 
+        Ok(())
+    }
+
+    fn render(template: &str, results: minijinja::Value) -> Result<String, minijinja::Error> {
+        let env = minijinja::Environment::new();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("results".to_string(), results);
+        env.template_from_str(template)?.render(&ctx, &[])
+    }
+
+    /// The words are `run_results.json`'s, not this worker's own.
+    #[test]
+    fn statuses_use_dbt_words() -> anyhow::Result<()> {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let results = [
+            mk_result("model.p.ok", NodeStatus::Success, None),
+            mk_result("model.p.bad", NodeStatus::Error, None),
+            mk_result("model.p.later", NodeStatus::Skipped, None),
+            mk_result("test.p.holds", NodeStatus::Success, None),
+            mk_result("test.p.breaks", NodeStatus::Error, Some(3)),
+            mk_result("test.p.noisy", NodeStatus::Warn, Some(1)),
+        ];
+
+        let rendered = render(
+            "{% for r in results %}{{ r.status }},{% endfor %}",
+            build_results_context(&results, &nodes),
+        )?;
+
+        assert_eq!(rendered, "success,error,skipped,pass,fail,warn,");
+        Ok(())
+    }
+
+    #[test]
+    fn a_freshness_result_reports_its_grade() -> anyhow::Result<()> {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let mut stale = mk_result("source.p.raw.orders", NodeStatus::Error, None);
+        stale.freshness = Some(crate::types::FreshnessOutcome {
+            max_loaded_at: "2026-06-12T10:00:00+00:00".into(),
+            snapshotted_at: "2026-06-12T11:00:00+00:00".into(),
+            max_loaded_at_time_ago_in_s: 3600.0,
+            status: crate::types::FreshnessGrade::Warn,
+            resource_type: "source".into(),
+            criteria: dbt_schemas::schemas::common::FreshnessDefinition::default(),
+        });
+
+        let rendered = render("{{ results[0].status }}", build_results_context(&[stale], &nodes))?;
+
+        assert_eq!(rendered, "warn");
+        Ok(())
+    }
+
+    #[test]
+    fn the_node_is_the_resolved_node_with_its_config() -> anyhow::Result<()> {
+        use dbt_schemas::schemas::nodes::{CommonAttributes, DbtModel};
+
+        let mut nodes = dbt_schemas::schemas::Nodes::default();
+        nodes.models.insert(
+            "model.shop.orders".to_string(),
+            Arc::new(DbtModel {
+                __common_attr__: CommonAttributes {
+                    unique_id: "model.shop.orders".to_string(),
+                    name: "orders".to_string(),
+                    ..CommonAttributes::default()
+                },
+                ..DbtModel::default()
+            }),
+        );
+
+        let rendered = render(
+            "{{ results[0].node.name }}|{{ results[0].node.resource_type }}|\
+             {{ results[0].node.config is defined }}",
+            build_results_context(
+                &[mk_result("model.shop.orders", NodeStatus::Success, None)],
+                &nodes,
+            ),
+        )?;
+
+        assert_eq!(rendered, "orders|model|True");
+        Ok(())
+    }
+
+    #[test]
+    fn timing_instants_support_strftime() -> anyhow::Result<()> {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let mut r = mk_result("model.p.m", NodeStatus::Success, None);
+        r.timing = vec![crate::types::TimingEntry {
+            name: "execute".to_string(),
+            started_at: "2026-03-04T05:06:07Z".to_string(),
+            completed_at: "not a timestamp".to_string(),
+        }];
+
+        let rendered = render(
+            "{% set t = results[0].timing[0] %}{{ t.name }}|\
+             {{ t.started_at.strftime('%Y-%m-%d %H:%M') }}|{{ t.completed_at is none }}",
+            build_results_context(&[r], &nodes),
+        )?;
+
+        assert_eq!(rendered, "execute|2026-03-04 05:06|True");
+        Ok(())
+    }
+
+    fn built(unique_id: &str, status: NodeStatus, relation: Option<&str>) -> NodeExecutionResult {
+        let mut r = mk_result(unique_id, status, None);
+        r.relation_name = relation.map(ToString::to_string);
+        r
+    }
+
+    #[test]
+    fn schemas_are_those_of_the_relations_the_run_built() {
+        let nodes = dbt_schemas::schemas::Nodes::default();
+        let results = [
+            built("model.p.a", NodeStatus::Success, Some("db.analytics.a")),
+            built("seed.p.b", NodeStatus::Success, Some("db.analytics.b")),
+            built("snapshot.p.c", NodeStatus::Success, Some("db.history.c")),
+            // Not built: failed, an assertion, or a node with nowhere recorded.
+            built("model.p.failed", NodeStatus::Error, Some("db.broken.failed")),
+            built("test.p.t", NodeStatus::Success, Some("db.tests.t")),
+            built("model.p.unrecorded", NodeStatus::Success, None),
+        ];
+
+        let set = built_schemas(&results, &nodes);
+
+        assert_eq!(
+            set.iter().cloned().collect::<Vec<_>>(),
+            [
+                ("db".to_string(), "analytics".to_string()),
+                ("db".to_string(), "history".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn schemas_and_database_schemas_render_as_dbt_hands_them() -> anyhow::Result<()> {
+        let set: BTreeSet<(String, String)> = [("db", "a"), ("db", "b"), ("other", "a")]
+            .into_iter()
+            .map(|(d, s)| (d.to_string(), s.to_string()))
+            .collect();
+        let env = minijinja::Environment::new();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("schemas".to_string(), schemas_context(&set));
+        ctx.insert("database_schemas".to_string(), database_schemas_context(&set));
+
+        let rendered = env
+            .template_from_str(
+                "{% for s in schemas %}{{ s }},{% endfor %}|\
+                 {% for d, s in database_schemas %}{{ d }}.{{ s }},{% endfor %}",
+            )?
+            .render(&ctx, &[])?;
+
+        assert_eq!(rendered, "a,b,|db.a,db.b,other.a,");
         Ok(())
     }
 

@@ -57,7 +57,7 @@ pub fn build_catalog_json(
 ///
 /// `None` when the node recorded none — nothing ran, or the result came from a
 /// worker that predates the field.
-fn executed_relation(result: &NodeExecutionResult) -> Option<(String, String, String)> {
+pub(super) fn executed_relation(result: &NodeExecutionResult) -> Option<(String, String, String)> {
     let name = result.relation_name.as_deref()?;
     let mut parts = name.split('.');
     let database = parts.next()?.to_string();

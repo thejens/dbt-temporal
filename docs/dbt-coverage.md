@@ -46,6 +46,8 @@ Not planned:
 | `run_results.json` `thread_id` | The dbt thread name. | Always `main`. | There are no dbt threads. Nothing in dbt reads the field. |
 | Artifacts of a failed or cancelled run | Written with whatever finished. | Not always written. | To be aligned: artifacts should be stored on every exit path. |
 | `on-run-end` failure | dbt Core fails the run. | Reported, and the run's outcome is unchanged. | To be aligned with dbt. |
+| `generate_alias_name` under an env override | Every invocation calls it. | Called at start-up only. An override recomputes database and schema, not the alias. | To be aligned. Matters only to an alias macro that reads the environment or `node.schema`. |
+| Snapshot `target_schema` / `target_database` under an env override | dbt skips the naming macros for a snapshot that sets them. | The naming macros run for it. | To be aligned. |
 | `@` with `+` (`@+model`) | dbt Core applies both. dbt v2 lets the `+` win. | Follows dbt v2. | The worker embeds dbt v2. |
 
 ## How to take an item

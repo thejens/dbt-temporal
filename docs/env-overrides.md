@@ -76,6 +76,31 @@ The second condition is by key, not by "did the workflow supply any overrides". 
 
 The startup scan is deliberately generous in every uncertain case. It matches `env_var` followed by its opening paren with any whitespace between and counts mentions in comments; and if a key cannot be named — a computed `env_var(some_var)`, or a file that cannot be read — every override is assumed relevant. Naming one key too many costs a rebuild; missing one would silently pin the run to startup credentials.
 
+## Where the values are visible
+
+A run's input is recorded by Temporal, so treat `env` and `vars` as readable by
+anyone who can read the namespace:
+
+- The whole input, `env` included, is in the workflow's history, and in the
+  input of every activity the run schedules.
+- A [lifecycle hook](hooks.md#hook-payload) receives the run's input in its
+  payload, so `env` is also in the history of each hook's child workflow.
+  Values a `pre_run` hook returns as `extra_env` are recorded the same way.
+- `vars` are written to the workflow's memo, which the Temporal UI shows and
+  which list queries return.
+
+Pass a reference in `env`, not the credential: the name of a secret, a role, an
+account. Keep the credential in the worker's own environment or in the
+warehouse's native authentication (workload identity, key-pair files mounted
+into the pod), where `profiles.yml` reads it without it entering a workflow. If
+a secret has to travel in the input, run the namespace with a
+[payload codec](https://docs.temporal.io/payload-codec) that encrypts payloads;
+the worker itself applies none.
+
+A run's `hooks` field replaces the project's lifecycle hooks for that run.
+Anyone who can start a workflow can therefore run without a hook the project
+configures, so do not rely on a lifecycle hook as an access control.
+
 ## Known limitations
 
 Per-workflow env overrides work fully for `env_var()` in **profiles.yml**, **model SQL**, and **macros**. The common pattern of setting schema/dataset and database/project in profiles.yml via `env_var()` is fully supported — each workflow gets its own connection, `target` context, and relation metadata. Static custom schemas (e.g. `+schema: staging` in `dbt_project.yml` or `config(schema='staging')` in SQL) are also correctly recomputed against the per-workflow target.
@@ -84,4 +109,4 @@ Edge cases with limited support:
 
 - **`config(schema=env_var(...))` in model SQL**: If a model uses `env_var()` inside its in-file `config()` block to set the custom schema name (not in profiles.yml or dbt_project.yml), that value is evaluated once at worker startup and baked into node metadata. Per-workflow overrides for that env var will not change the custom schema. This is an unusual pattern — the standard approach is `env_var()` in profiles.yml (fully supported) or static `+schema` in dbt_project.yml (fully supported).
 
-- **Custom `generate_schema_name` macros**: Schema patching follows the default dbt convention (`target.schema` for no custom, `target.schema_custom` for custom schemas). Projects with a `generate_schema_name` override that uses a different naming pattern may not get correct context-variable patching. The `target` Jinja global is always correct, so materializations and macros that read `target.schema` directly will work.
+- **Custom naming macros**: A project's `generate_schema_name` and `generate_database_name` are called again for the run, with the custom name and the `node` dbt passes at parse time, so a macro that branches on node attributes or reads `env_var()` gives the schema a fresh parse under that environment would. `generate_alias_name` is not called again: an alias keeps its start-up value. A snapshot that sets `target_schema` or `target_database` goes through the naming macros here, where dbt skips them.

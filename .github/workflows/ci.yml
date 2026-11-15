@@ -3,6 +3,13 @@ name: CI
 on:
   pull_request:
 
+# A push to a pull request supersedes the runs of its earlier commits: their
+# result can no longer gate the merge, so they are cancelled instead of holding
+# runners for another quarter of an hour.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

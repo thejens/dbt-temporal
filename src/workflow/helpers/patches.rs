@@ -60,3 +60,12 @@ pub const FAILURE_FINALIZATION_PATCH: &str = "finalize-runs-that-fail-outside-th
 /// `on-run-end` activity did not succeed, so a run whose hooks passed records
 /// nothing.
 pub const ON_RUN_END_FAILS_RUN_PATCH: &str = "failed-on-run-end-fails-the-run";
+
+/// Patch id for storing the artifacts of a run that ends before its own
+/// artifact step has run.
+///
+/// The store is an activity, and a history recorded without the marker ends
+/// such a run without scheduling it. The marker is consulted only where the
+/// activity would be scheduled, so a run that stored its artifacts in the
+/// ordinary course, or never ran a node, records nothing.
+pub const ENDED_RUN_ARTIFACTS_PATCH: &str = "store-artifacts-of-runs-that-end-early";

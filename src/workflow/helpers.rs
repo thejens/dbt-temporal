@@ -33,8 +33,9 @@ pub use self::memo::{
     upsert_node_status,
 };
 pub use self::patches::{
-    FAILURE_FINALIZATION_PATCH, MEMO_CADENCE_PATCH, ON_RUN_END_FAILS_RUN_PATCH, READY_QUEUE_PATCH,
-    SINGLE_TERMINAL_MEMO_PATCH, TRANSITIVE_SKIP_PATCH, UNIQUE_ACTIVITY_ID_PATCH,
+    ENDED_RUN_ARTIFACTS_PATCH, FAILURE_FINALIZATION_PATCH, MEMO_CADENCE_PATCH,
+    ON_RUN_END_FAILS_RUN_PATCH, READY_QUEUE_PATCH, SINGLE_TERMINAL_MEMO_PATCH,
+    TRANSITIVE_SKIP_PATCH, UNIQUE_ACTIVITY_ID_PATCH,
 };
 pub use self::results::{
     cancelled_result, classify_result_status, error_result, mark_remaining_level_as_cancelled,

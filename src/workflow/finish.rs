@@ -19,22 +19,13 @@ use crate::types::{
 
 use super::DbtRunWorkflow;
 use super::helpers::{
-    FAILURE_FINALIZATION_PATCH, NodeStatusSummary, RunClock, RunFacts, elapsed_secs,
-    format_final_details, skipped_result,
+    ENDED_RUN_ARTIFACTS_PATCH, FAILURE_FINALIZATION_PATCH, NodeStatusSummary, RunClock, RunFacts,
+    elapsed_secs, format_final_details, skipped_result,
 };
 use super::levels::LevelExecutionOutcome;
 use super::phases::{
     RunRecord, run_post_hooks, store_artifacts_of_ended_run, upsert_terminal_status,
 };
-
-/// Patch id for storing the artifacts of a run that ends before its own
-/// artifact step has run.
-///
-/// The store is an activity, so a run that now issues it on its way out issues
-/// a command a history recorded without it does not contain. The marker is
-/// consulted only where the activity would be scheduled, so a run that stored
-/// its artifacts in the ordinary course, or never ran a node, records nothing.
-const ENDED_RUN_ARTIFACTS_PATCH: &str = "store-artifacts-of-runs-that-end-early";
 
 /// What the phases had established when one of them failed.
 #[derive(Default)]

@@ -303,9 +303,21 @@ the determinism note below if the change touches `src/workflow/`.
 ### Workflow changes and in-flight runs
 
 A Temporal workflow is replayed against its recorded history. Changes to the
-*shape* of `dbt_run` that have shipped so far (readiness scheduling, memo
-cadence, node activity ids, how a skip carries through the graph) are guarded by `patched()` markers, so a run recorded by an earlier
-release replays on the code path that recorded it. A change that is not guarded
+*shape* of `dbt_run` that have shipped so far are guarded by `patched()`
+markers, so a run recorded by an earlier release replays on the code path that
+recorded it. The markers are all in
+[`src/workflow/helpers/patches.rs`](../src/workflow/helpers/patches.rs), each
+with the reason for it:
+
+| Marker | What it guards |
+|--------|----------------|
+| `single-terminal-memo-upsert`, `bounded-memo-cadence` | When the run's memo is written |
+| `ready-queue-scheduling` | Nodes start when their dependencies finish, not level by level |
+| `unique-node-activity-ids` | A node's activity id is its dbt `unique_id` |
+| `transitive-upstream-skip` | A skip carries through a skipped `on_error: continue` model (level loop only) |
+| `finalize-runs-that-fail-outside-the-node-loop` | Failure hooks, terminal status and cancellation for a failure outside the node loop |
+| `store-artifacts-of-runs-that-end-early` | Artifacts of a run that is cancelled or fails after its nodes ran |
+| `failed-on-run-end-fails-the-run` | A failing `on-run-end` hook fails the run | A change that is not guarded
 this way — reordering activities, adding or removing a phase — makes an
 in-flight run fail on replay with a non-determinism error once it lands on a
 worker running the new binary. The markers only protect upgrades: a run started

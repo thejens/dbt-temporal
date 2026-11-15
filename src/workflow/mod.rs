@@ -13,6 +13,7 @@
 mod finish;
 mod helpers;
 mod levels;
+mod node_activity;
 mod phases;
 mod ready_queue;
 pub mod scheduler;

@@ -366,7 +366,8 @@ fn a_nodes_activity_input_resolves_to_the_runs_effective_env() {
     let run = run_of(&f);
 
     let resolved =
-        crate::workflow::levels::node_execution_input(&f.plan, &run.run_scope, "a").resolve();
+        crate::workflow::node_activity::node_execution_input(&f.plan, &run.run_scope, "a")
+            .resolve();
 
     assert_eq!(resolved.unique_id, "a");
     assert_eq!(resolved.invocation_id, f.plan.invocation_id);

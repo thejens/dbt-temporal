@@ -10,6 +10,7 @@
 // levels.rs and phases.rs silence the same lint for the same reason.
 #![allow(clippy::future_not_send)]
 
+mod finish;
 mod helpers;
 mod levels;
 mod phases;
@@ -19,30 +20,29 @@ mod search_attributes;
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 use temporalio_macros::{workflow, workflow_methods};
-use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{
     ContinueAsNewOptions, SyncWorkflowContext, WorkflowContext, WorkflowContextView,
     WorkflowResult, WorkflowTermination,
 };
 
+use self::finish::{ExecutedRun, RunEnd, RunProgress, finish_run};
 use crate::types::{
-    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunOutcome, RunPhase,
-    RunResumeState, RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
+    DbtCommand, DbtRunInput, DbtRunOutput, ExecutionPlan, RetryConfig, RunPhase, RunResumeState,
+    RunSegmentControl, RunSegmentState, RunStatusSnapshot, TimeoutConfig,
 };
 
 use self::helpers::{
     NodeStatusSummary, READY_QUEUE_PATCH, RunClock, RunFacts, SINGLE_TERMINAL_MEMO_PATCH,
-    build_freshness_summary_line, build_summary_lines, elapsed_secs, format_final_details,
-    upsert_memo_state,
+    build_freshness_summary_line, build_summary_lines, elapsed_secs, upsert_memo_state,
 };
 use self::levels::{ResumePoint, execute_levels};
 use self::phases::{
     HookPolicy, OnRunEndRecord, RunRecord, build_list_output, load_segment_state,
-    plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_post_hooks,
-    run_pre_run_hooks, run_project_checks, save_segment_state, store_run_artifacts,
-    upsert_terminal_status, write_command_memo,
+    plan_and_announce, resolve_project_config, run_on_run_end, run_on_run_start, run_pre_run_hooks,
+    run_project_checks, save_segment_state, store_run_artifacts, write_command_memo,
 };
 use self::ready_queue::ReadyQueueRun;
 
@@ -100,249 +100,234 @@ impl DbtRunWorkflow {
     }
 
     #[run(name = "dbt_run")]
-    #[allow(
-        clippy::needless_pass_by_ref_mut, // Required by the #[run] macro.
-        clippy::too_many_lines            // A flat list of run phases reads better than nested helpers.
-    )]
+    #[allow(clippy::needless_pass_by_ref_mut)] // Required by the #[run] macro.
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<DbtRunOutput> {
         // Deterministic workflow time — the workflow's docstring forbids
         // wall-clock sources because they break history replay.
         let start = ctx.workflow_time();
         let input = ctx.state(|s| s.input.clone());
 
-        write_command_memo(ctx, &input)?;
+        // Every way out of the run — success, failure, cancellation — passes
+        // through `finish_run`, so the run's recorded state cannot be left
+        // behind by an early return in a phase.
+        let mut progress = RunProgress::default();
+        let ended = drive_run(ctx, &input, start, &mut progress).await;
+        finish_run(ctx, &input, start, progress, ended).await
+    }
+}
 
-        // A continued run inherits its predecessor's plan and progress instead
-        // of re-planning: re-running the selector could pick up a different
-        // node set mid-run, and the pre_run / on-run-start hooks have already
-        // fired for this logical run.
-        let resumed = load_resume_state(ctx, &input).await?;
+/// Run the phases of a dbt run in order, recording in `progress` what the
+/// finisher needs if one of them fails.
+///
+/// Returns how the run ended when it got that far; an `Err` is an exit from a
+/// phase, which `finish_run` turns into a terminal state.
+#[allow(clippy::too_many_lines)] // A flat list of run phases reads better than nested helpers.
+async fn drive_run(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    input: &DbtRunInput,
+    start: Option<std::time::SystemTime>,
+    progress: &mut RunProgress,
+) -> Result<RunEnd, WorkflowTermination> {
+    write_command_memo(ctx, input)?;
 
-        // A continuation restarts this execution's clock, but the artifacts
-        // describe one logical run — so the first segment's start is the one
-        // that counts, and it travels in the checkpoint.
-        let run_started_at = resumed
-            .as_ref()
-            .and_then(|state| state.started_at)
-            .map_or(start, |t| Some(std::time::SystemTime::from(t)));
+    // A continued run inherits its predecessor's plan and progress instead
+    // of re-planning: re-running the selector could pick up a different
+    // node set mid-run, and the pre_run / on-run-start hooks have already
+    // fired for this logical run.
+    let resumed = load_resume_state(ctx, input).await?;
 
-        ctx.state_mut(|s| s.status.phase = RunPhase::Planning);
-        // Timeouts come from dbt_temporal.yml, but planning happens before that is
-        // resolved — use the built-in default for the plan activity itself.
-        let plan = match resumed.as_ref() {
-            Some(state) => state.plan.clone(),
-            None => plan_and_announce(ctx, &input, TimeoutConfig::default().plan_secs).await?,
-        };
-        ctx.state_mut(|s| {
-            s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
-            s.status.total_levels = plan.levels.len();
-            s.status.phase = RunPhase::PreRunHooks;
-        });
+    // A continuation restarts this execution's clock, but the artifacts
+    // describe one logical run — so the first segment's start is the one
+    // that counts, and it travels in the checkpoint.
+    let run_started_at = resumed
+        .as_ref()
+        .and_then(|state| state.started_at)
+        .map_or(start, |t| Some(std::time::SystemTime::from(t)));
 
-        // list: return the selected node set without executing any SQL.
-        if DbtCommand::parse(&input.command) == Some(DbtCommand::List) {
-            let out = build_list_output(&plan, elapsed_secs(start, ctx.workflow_time()));
-            upsert_terminal_status(ctx, &plan, RunOutcome::Passed)?;
-            ctx.set_current_details("list".to_string());
-            return Ok(out);
-        }
+    ctx.state_mut(|s| s.status.phase = RunPhase::Planning);
+    // Timeouts come from dbt_temporal.yml, but planning happens before that is
+    // resolved — use the built-in default for the plan activity itself.
+    let plan = match resumed.as_ref() {
+        Some(state) => state.plan.clone(),
+        None => plan_and_announce(ctx, input, TimeoutConfig::default().plan_secs).await?,
+    };
+    let plan = Arc::new(plan);
+    progress.plan = Some(Arc::clone(&plan));
+    ctx.state_mut(|s| {
+        s.status.total_nodes = plan.levels.iter().map(Vec::len).sum();
+        s.status.total_levels = plan.levels.len();
+        s.status.phase = RunPhase::PreRunHooks;
+    });
 
-        let project_config = resolve_project_config(ctx, &input, &plan).await?;
-        let hooks = project_config.hooks;
-        let retry_config = project_config.retry;
-        let timeouts = project_config.timeouts;
-
-        // The gate runs before any hook fires: a project that fails its checks
-        // must not have executed side effects on the way to finding out. A
-        // resumed run skips it, having already passed in its first segment.
-        if resumed.is_none() {
-            run_project_checks(ctx, &input, &plan, &timeouts).await?;
-        }
-
-        // Effective env: workflow input env (with `_` set to the serialised
-        // input), extended by pre_run hook extra_env. Used in NodeExecutionInput
-        // so execute_node picks it up for env_var() rendering and per-workflow
-        // adapter engine rebuilding (profiles.yml env_var() overrides).
-        let mut effective_env;
-        let mut hook_errors;
-        if let Some(state) = resumed.as_ref() {
-            // Both already ran in the first segment; re-running on-run-start
-            // would re-execute its side effects.
-            effective_env = state.effective_env.clone();
-            hook_errors = state.hook_errors.clone();
-        } else {
-            effective_env = input.base_env();
-            hook_errors = Vec::new();
-
-            if let ControlFlow::Break(out) = run_pre_run_hooks(
-                ctx,
-                &input,
-                &plan,
-                &hooks,
-                &mut effective_env,
-                &mut hook_errors,
-                start,
-            )
-            .await?
-            {
-                upsert_terminal_status(ctx, &plan, RunOutcome::Skipped)?;
-                ctx.set_current_details("skipped by pre_run hook".to_string());
-                return Ok(out);
-            }
-
-            let hook_policy = HookPolicy {
-                timeouts: &timeouts,
-                retry: &retry_config,
-            };
-            run_on_run_start(ctx, &input, &plan, &effective_env, hook_policy).await?;
-        }
-
-        ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
-        let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
-        let mut levels = execute_nodes(
-            ctx,
-            &input,
+    // list: return the selected node set without executing any SQL.
+    if DbtCommand::parse(&input.command) == Some(DbtCommand::List) {
+        return Ok(RunEnd::Listed(build_list_output(
             &plan,
-            &retry_config,
-            &timeouts,
-            &effective_env,
-            resume_point,
-        )
-        .await?;
+            elapsed_secs(start, ctx.workflow_time()),
+        )));
+    }
 
-        // History is filling up: hand the remaining levels to a fresh run.
-        if let Some(next_level) = levels.continue_at_level {
-            let state = build_segment_state(
-                &plan,
-                &levels,
-                &effective_env,
-                &hook_errors,
-                next_level,
-                next_segment_number(input.resume_from.as_ref()),
-                run_started_at.map(chrono::DateTime::<chrono::Utc>::from),
-            );
-            return continue_run_as_new(ctx, &input, &plan, state).await;
-        }
-        ctx.state_mut(|s| {
-            s.status.phase = RunPhase::Finalizing;
-            // `tally` adds to the warned count instead of replacing it, and
-            // both scheduling paths may already have published one.
-            s.status.warned = 0;
-            s.status.tally(&levels.node_status);
-        });
+    let project_config = resolve_project_config(ctx, input, &plan).await?;
+    let hooks = Arc::new(project_config.hooks);
+    progress.hooks = Some(Arc::clone(&hooks));
+    let retry_config = project_config.retry;
+    let timeouts = project_config.timeouts;
 
-        // A finished run's memo is written once, after the summary line. Only
-        // the cancelled path returns before that write, so it publishes its
-        // terminal state here. Replays of histories recorded before the patch
-        // keep the unconditional write.
-        if levels.was_cancelled || !ctx.patched(SINGLE_TERMINAL_MEMO_PATCH) {
-            upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
-        }
+    // The gate runs before any hook fires: a project that fails its checks
+    // must not have executed side effects on the way to finding out. A
+    // resumed run skips it, having already passed in its first segment.
+    if resumed.is_none() {
+        run_project_checks(ctx, input, &plan, &timeouts).await?;
+    }
 
-        if levels.was_cancelled {
-            upsert_terminal_status(ctx, &plan, RunOutcome::Cancelled)?;
-            ctx.set_current_details("cancelled".to_string());
-            return Err(WorkflowTermination::cancelled());
-        }
+    // Effective env: workflow input env (with `_` set to the serialised
+    // input), extended by pre_run hook extra_env. Used in NodeExecutionInput
+    // so execute_node picks it up for env_var() rendering and per-workflow
+    // adapter engine rebuilding (profiles.yml env_var() overrides).
+    let mut effective_env;
+    let mut hook_errors;
+    if let Some(state) = resumed.as_ref() {
+        // Both already ran in the first segment; re-running on-run-start
+        // would re-execute its side effects.
+        effective_env = state.effective_env.clone();
+        hook_errors = state.hook_errors.clone();
+    } else {
+        effective_env = input.base_env();
+        hook_errors = Vec::new();
 
-        append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()), &input.command);
-        upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
-
-        let (artifacts, log_path) = store_run_artifacts(
+        if let ControlFlow::Break(out) = run_pre_run_hooks(
             ctx,
-            &plan,
-            &input.command,
-            RunRecord {
-                results: &levels.all_results,
-                log_lines: &levels.log_lines,
-                prior_segments: &levels.prior_segments,
-            },
-            &timeouts,
-            RunFacts {
-                clock: RunClock {
-                    started_at: run_started_at,
-                    elapsed_secs: elapsed_secs(run_started_at, ctx.workflow_time()),
-                },
-                env: &effective_env,
-                target: input.target.as_deref(),
-            },
-        )
-        .await?;
-
-        run_on_run_end(
-            ctx,
-            &input,
-            &plan,
-            &effective_env,
-            OnRunEndRecord {
-                results: &levels.all_results,
-                prior_segments: &levels.prior_segments,
-            },
-            &mut hook_errors,
-            HookPolicy {
-                timeouts: &timeouts,
-                retry: &retry_config,
-            },
-        )
-        .await;
-
-        // Evaluated before `all_results` moves into the output.
-        let node_results_partial = !levels.prior_segments.is_empty();
-        let mut output = DbtRunOutput {
-            invocation_id: plan.invocation_id.clone(),
-            success: !levels.had_failure,
-            skipped: false,
-            skip_reason: None,
-            node_results: levels.all_results,
-            node_results_partial,
-            elapsed_time: elapsed_secs(start, ctx.workflow_time()),
-            log_path,
-            artifacts,
-            hook_errors: vec![],
-        };
-
-        let success = run_post_hooks(
-            ctx,
-            &input,
+            input,
             &plan,
             &hooks,
-            &output,
-            !levels.had_failure,
+            &mut effective_env,
             &mut hook_errors,
+            start,
         )
-        .await;
-
-        output.success = success;
-        output.hook_errors = hook_errors;
-
-        ctx.set_current_details(format_final_details(
-            &levels.node_status,
-            success,
-            output.elapsed_time,
-        ));
-        upsert_terminal_status(
-            ctx,
-            &plan,
-            if success {
-                RunOutcome::Passed
-            } else {
-                RunOutcome::Failed
-            },
-        )?;
-
-        if success {
-            Ok(output)
-        } else {
-            // Fail the workflow so Temporal marks it FAILED (not COMPLETED).
-            // Structured output is already persisted in memo for callers to inspect.
-            let error_count = NodeStatusSummary::tally(&levels.node_status).error;
-            Err(WorkflowTermination::failed_application(ApplicationFailure::non_retryable(
-                anyhow::anyhow!(
-                    "dbt run failed: {error_count} node(s) errored (see workflow memo for details)"
-                ),
-            )))
+        .await?
+        {
+            return Ok(RunEnd::Skipped(out));
         }
+
+        let hook_policy = HookPolicy {
+            timeouts: &timeouts,
+            retry: &retry_config,
+        };
+        run_on_run_start(ctx, input, &plan, &effective_env, hook_policy).await?;
     }
+
+    ctx.state_mut(|s| s.status.phase = RunPhase::Executing);
+    let resume_point = build_resume_point(&plan, resumed, plan.write_artifacts);
+    let mut levels =
+        execute_nodes(ctx, input, &plan, &retry_config, &timeouts, &effective_env, resume_point)
+            .await?;
+
+    // History is filling up: hand the remaining levels to a fresh run.
+    if let Some(next_level) = levels.continue_at_level {
+        let state = build_segment_state(
+            &plan,
+            &levels,
+            &effective_env,
+            &hook_errors,
+            next_level,
+            next_segment_number(input.resume_from.as_ref()),
+            run_started_at.map(chrono::DateTime::<chrono::Utc>::from),
+        );
+        return Err(continue_run_as_new(ctx, input, &plan, state).await);
+    }
+    ctx.state_mut(|s| {
+        s.status.phase = RunPhase::Finalizing;
+        // `tally` adds to the warned count instead of replacing it, and
+        // both scheduling paths may already have published one.
+        s.status.warned = 0;
+        s.status.tally(&levels.node_status);
+    });
+
+    // A finished run's memo is written once, after the summary line. Only
+    // the cancelled path returns before that write, so it publishes its
+    // terminal state here. Replays of histories recorded before the patch
+    // keep the unconditional write.
+    if levels.was_cancelled || !ctx.patched(SINGLE_TERMINAL_MEMO_PATCH) {
+        upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
+    }
+
+    if levels.was_cancelled {
+        return Err(WorkflowTermination::cancelled());
+    }
+
+    append_run_summary(&mut levels, elapsed_secs(start, ctx.workflow_time()), &input.command);
+    upsert_memo_state(ctx, &levels.node_status, &levels.log_lines)?;
+
+    let stored = store_run_artifacts(
+        ctx,
+        &plan,
+        &input.command,
+        RunRecord {
+            results: &levels.all_results,
+            log_lines: &levels.log_lines,
+            prior_segments: &levels.prior_segments,
+        },
+        &timeouts,
+        &retry_config,
+        RunFacts {
+            clock: RunClock {
+                started_at: run_started_at,
+                elapsed_secs: elapsed_secs(run_started_at, ctx.workflow_time()),
+            },
+            env: &effective_env,
+            target: input.target.as_deref(),
+        },
+    )
+    .await;
+    let (artifacts, log_path) = match stored {
+        Ok(stored) => stored,
+        Err(e) => {
+            // The nodes ran; the failure hooks should see what they produced.
+            progress.results = std::mem::take(&mut levels.all_results);
+            progress.results_partial = !levels.prior_segments.is_empty();
+            return Err(e);
+        }
+    };
+
+    run_on_run_end(
+        ctx,
+        input,
+        &plan,
+        &effective_env,
+        OnRunEndRecord {
+            results: &levels.all_results,
+            prior_segments: &levels.prior_segments,
+        },
+        &mut hook_errors,
+        HookPolicy {
+            timeouts: &timeouts,
+            retry: &retry_config,
+        },
+    )
+    .await;
+
+    // Evaluated before `all_results` moves into the output.
+    let node_results_partial = !levels.prior_segments.is_empty();
+    let output = DbtRunOutput {
+        invocation_id: plan.invocation_id.clone(),
+        success: !levels.had_failure,
+        skipped: false,
+        skip_reason: None,
+        node_results: levels.all_results,
+        node_results_partial,
+        elapsed_time: elapsed_secs(start, ctx.workflow_time()),
+        log_path,
+        artifacts,
+        hook_errors: vec![],
+    };
+    Ok(RunEnd::Executed(Box::new(ExecutedRun {
+        plan,
+        hooks,
+        output,
+        node_status: levels.node_status,
+        hook_errors,
+        had_failure: levels.had_failure,
+    })))
 }
 
 /// Load the previous segment's state when this execution is a continuation.
@@ -428,8 +413,8 @@ fn build_resume_point(
 
 /// Spill the run's state and restart with a fresh history.
 ///
-/// Always returns `Err` — `continue_as_new` is a workflow termination, and the
-/// caller propagates it.
+/// Returns the termination the caller propagates: `continue_as_new` when the
+/// checkpoint was written, a failure when it could not be.
 ///
 /// Takes the snapshot already built, so the two halves stay separate: what the
 /// successor needs is decided by `build_segment_state`, and the checkpoint
@@ -439,11 +424,14 @@ async fn continue_run_as_new(
     input: &DbtRunInput,
     plan: &ExecutionPlan,
     state: RunSegmentState,
-) -> WorkflowResult<DbtRunOutput> {
+) -> WorkflowTermination {
     let segment = state.segment;
     let next_level = state.next_level;
 
-    let state_ref = save_segment_state(ctx, &plan.invocation_id, state).await?;
+    let state_ref = match save_segment_state(ctx, &plan.invocation_id, state).await {
+        Ok(state_ref) => state_ref,
+        Err(failure) => return failure,
+    };
 
     let mut next_input = input.clone();
     next_input.resume_from = Some(RunResumeState {
@@ -467,9 +455,8 @@ async fn continue_run_as_new(
         "workflow history approaching its limit — continuing as new"
     );
 
-    Err(ctx
-        .continue_as_new(next_input, ContinueAsNewOptions::default())
-        .expect_err("continue_as_new always returns Err"))
+    ctx.continue_as_new(next_input, ContinueAsNewOptions::default())
+        .expect_err("continue_as_new always returns Err")
 }
 
 /// The fail-fast override a continuation inherits from its predecessor.

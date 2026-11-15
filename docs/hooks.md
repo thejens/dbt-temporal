@@ -81,7 +81,7 @@ Hooks let you run arbitrary Temporal workflows at specific points in the dbt run
 |-------|-------|------------------|
 | `pre_run` | After planning, before the first node executes | `ExecutionPlan` + `DbtRunInput` |
 | `on_success` | After all nodes succeed and artifacts are stored | Full `DbtRunOutput` |
-| `on_failure` | After a failure, once artifacts are stored | Full `DbtRunOutput` (with errors) |
+| `on_failure` | After a failure, once artifacts are stored; also when a phase outside the node loop fails after planning (project checks, `pre_run`, on-run-start, artifact storage) | Full `DbtRunOutput` (with errors; `node_results` holds only the nodes that ran) |
 
 Each event supports multiple hooks, executed sequentially in list order.
 

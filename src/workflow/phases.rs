@@ -32,14 +32,32 @@ use crate::types::{
 };
 
 use super::DbtRunWorkflow;
-use super::helpers::{activity_error_message, build_retry_policy, elapsed_secs, plural};
+use super::helpers::{
+    FAILURE_FINALIZATION_PATCH, activity_error_message, build_retry_policy, elapsed_secs, plural,
+};
 use super::search_attributes::build_search_attribute_updates;
 
-/// A non-retryable workflow failure naming the activity that failed and the
-/// reason it returned (see [`activity_error_message`] for why that reason needs
-/// the `cause` chain). Non-retryable, so the workflow fails outright instead
-/// of the workflow task being retried into the same activity error.
-fn activity_failure(what: &str, e: &temporalio_sdk::ActivityExecutionError) -> WorkflowTermination {
+/// How the workflow ends when an activity outside the node loop does not
+/// succeed.
+///
+/// A cancelled activity means the workflow itself was cancelled, and ends it as
+/// cancelled. Anything else is a non-retryable workflow failure naming the
+/// activity that failed and the reason it returned (see
+/// [`activity_error_message`] for why that reason needs the `cause` chain),
+/// so the workflow fails outright instead of the workflow task being retried
+/// into the same activity error.
+fn activity_failure(
+    ctx: &WorkflowContext<DbtRunWorkflow>,
+    what: &str,
+    e: &temporalio_sdk::ActivityExecutionError,
+) -> WorkflowTermination {
+    // Histories recorded before cancellation was reported as such ended in
+    // failure here; the marker is only consulted on this path.
+    if matches!(e, temporalio_sdk::ActivityExecutionError::Cancelled(_))
+        && ctx.patched(FAILURE_FINALIZATION_PATCH)
+    {
+        return WorkflowTermination::cancelled();
+    }
     WorkflowTermination::failed_application(ApplicationFailure::non_retryable(anyhow::anyhow!(
         "{what}: {}",
         activity_error_message(e)
@@ -151,6 +169,26 @@ fn hook_activity_options(phase: ProjectHookPhase, policy: HookPolicy<'_>) -> Act
     }
 }
 
+/// Options for an activity outside the node loop, bounded by `retry`.
+///
+/// Temporal's default policy retries without limit, so an activity that keeps
+/// failing for a reason its error cannot mark permanent would hold the run open
+/// forever. The policy lists the same non-retryable failure types the node
+/// activities do, so a failure the activity classifies as permanent (a bad
+/// configuration, a missing bucket, access denied) ends the run at once.
+fn bounded_activity_options(timeout: Duration, retry: &RetryConfig) -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(timeout)
+        .retry_policy(build_retry_policy(retry))
+        .build()
+}
+
+/// Retry budget for the activities that run before the project's own
+/// `dbt_temporal.yml` settings are resolved: planning, and restoring a
+/// continued run's state.
+fn unresolved_retry() -> RetryConfig {
+    RetryConfig::default()
+}
+
 /// Build the input for `run_project_hooks` (on-run-start or on-run-end).
 /// `node_results` and `prior_segments` are empty for on-run-start, populated
 /// for on-run-end: `node_results` is this segment's, and `prior_segments` names
@@ -175,6 +213,10 @@ pub fn build_project_hooks_input(
     })
 }
 
+/// Time one segment-state read or write may take; a checkpoint is a single
+/// object-store round trip.
+const SEGMENT_STATE_TIMEOUT: Duration = Duration::from_mins(5);
+
 /// Spill run state for a continue-as-new handover, returning its store path.
 pub async fn save_segment_state(
     ctx: &WorkflowContext<DbtRunWorkflow>,
@@ -187,10 +229,10 @@ pub async fn save_segment_state(
             invocation_id: invocation_id.to_string(),
             state,
         },
-        ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
+        bounded_activity_options(SEGMENT_STATE_TIMEOUT, &unresolved_retry()),
     )
     .await
-    .map_err(|e| activity_failure("save_segment_state activity failed", &e))
+    .map_err(|e| activity_failure(ctx, "save_segment_state activity failed", &e))
 }
 
 /// Restore the state the previous segment spilled.
@@ -213,10 +255,10 @@ pub async fn load_segment_state(
                 next_level: resume.next_level,
             }),
         },
-        ActivityOptions::start_to_close_timeout(Duration::from_mins(5)),
+        bounded_activity_options(SEGMENT_STATE_TIMEOUT, &unresolved_retry()),
     )
     .await
-    .map_err(|e| activity_failure("load_segment_state activity failed", &e))
+    .map_err(|e| activity_failure(ctx, "load_segment_state activity failed", &e))
 }
 
 /// What the run produced, as the artifact activity needs it.
@@ -342,12 +384,15 @@ fn terminal_status_updates(
 /// (`passed` / `failed` / `skipped` / `cancelled`) as the run ends, so the
 /// workflow list can be filtered by outcome. The initial `running` value is
 /// set at plan time.
+///
+/// `plan` is `None` for a run that ended before it was planned; it never set
+/// `running`, so there is nothing to replace.
 pub fn upsert_terminal_status(
     ctx: &WorkflowContext<DbtRunWorkflow>,
-    plan: &ExecutionPlan,
+    plan: Option<&ExecutionPlan>,
     status: RunOutcome,
 ) -> Result<(), WorkflowTermination> {
-    if let Some(updates) = terminal_status_updates(plan, status) {
+    if let Some(updates) = plan.and_then(|plan| terminal_status_updates(plan, status)) {
         ctx.upsert_search_attributes(updates?);
     }
     Ok(())
@@ -372,10 +417,10 @@ pub async fn plan_and_announce(
         .execute_activity(
             DbtActivities::plan_project,
             input.clone(),
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(plan_timeout_secs)),
+            bounded_activity_options(Duration::from_secs(plan_timeout_secs), &unresolved_retry()),
         )
         .await
-        .map_err(|e| activity_failure("plan_project activity failed", &e))?;
+        .map_err(|e| activity_failure(ctx, "plan_project activity failed", &e))?;
 
     if !plan.search_attributes.is_empty() {
         ctx.upsert_search_attributes(build_search_attribute_updates(&plan.search_attributes)?);
@@ -406,7 +451,7 @@ pub async fn resolve_project_config(
             .build(),
     )
     .await
-    .map_err(|e| activity_failure("resolve_config activity failed", &e))
+    .map_err(|e| activity_failure(ctx, "resolve_config activity failed", &e))
 }
 
 /// `ControlFlow::Break(out)` means the pre_run hooks signalled `skip` — the
@@ -462,7 +507,7 @@ pub async fn run_on_run_start(
         hook_activity_options(ProjectHookPhase::OnRunStart, policy),
     )
     .await
-    .map_err(|e| activity_failure("on-run-start hook failed", &e))
+    .map_err(|e| activity_failure(ctx, "on-run-start hook failed", &e))
 }
 
 /// The node ids a check's violations must name, or `None` for the whole project.
@@ -510,10 +555,10 @@ pub async fn run_project_checks(
             checks_input,
             // The gate reads the index built at parse time and issues no
             // warehouse query, so it is bounded by the same work planning is.
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(timeouts.plan_secs)),
+            bounded_activity_options(Duration::from_secs(timeouts.plan_secs), &unresolved_retry()),
         )
         .await
-        .map_err(|e| activity_failure("project checks could not be evaluated", &e))?;
+        .map_err(|e| activity_failure(ctx, "project checks could not be evaluated", &e))?;
 
     if output.failed == 0 {
         ctx.set_current_details(format!("{} project check(s) passed", output.results.len()));
@@ -537,6 +582,7 @@ pub async fn store_run_artifacts(
     command: &str,
     record: RunRecord<'_>,
     timeouts: &TimeoutConfig,
+    retry: &RetryConfig,
     facts: crate::workflow::helpers::RunFacts<'_>,
 ) -> Result<(Option<StoreArtifactsOutput>, Option<String>), WorkflowTermination> {
     if !plan.write_artifacts {
@@ -546,12 +592,10 @@ pub async fn store_run_artifacts(
         .execute_activity(
             DbtActivities::store_artifacts,
             build_store_artifacts_input(plan, command, record, facts),
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(
-                timeouts.store_artifacts_secs,
-            )),
+            bounded_activity_options(Duration::from_secs(timeouts.store_artifacts_secs), retry),
         )
         .await
-        .map_err(|e| activity_failure("store_artifacts activity failed", &e))?;
+        .map_err(|e| activity_failure(ctx, "store_artifacts activity failed", &e))?;
     let log_path = artifacts.log_path.clone();
     Ok((Some(artifacts), log_path))
 }
@@ -1261,6 +1305,59 @@ mod tests {
         let applied = SearchAttributes::new(updates);
         let key: SearchAttributeKey<String> = SearchAttributeKey::keyword("DbtStatus");
         assert_eq!(applied.get(&key).as_deref(), Some("failed"));
+    }
+
+    // --- activities outside the node loop ---
+
+    /// Unbounded retries are Temporal's default; every activity the workflow
+    /// schedules outside the node loop must carry an explicit, bounded policy.
+    #[test]
+    fn a_bounded_activity_carries_the_projects_attempt_limit_and_timeout() {
+        let retry = RetryConfig {
+            max_attempts: 4,
+            ..RetryConfig::default()
+        };
+        let opts = bounded_activity_options(Duration::from_secs(90), &retry);
+
+        assert!(
+            matches!(
+                opts.close_timeouts,
+                temporalio_common::ActivityCloseTimeouts::StartToClose(t) if t == Duration::from_secs(90)
+            ),
+            "{:?}",
+            opts.close_timeouts
+        );
+        let policy = opts
+            .retry_policy
+            .expect("the activity must bound its retries");
+        assert_eq!(policy.maximum_attempts(), 4);
+    }
+
+    /// The failure types the activities stamp on permanent errors must be
+    /// listed, or Temporal retries them regardless of the non-retryable flag's
+    /// intent whenever the type is the only thing a policy sees.
+    #[test]
+    fn a_bounded_activity_does_not_retry_permanent_failure_types() {
+        let opts = bounded_activity_options(Duration::from_secs(5), &RetryConfig::default());
+        let policy = opts.retry_policy.expect("bounded");
+
+        assert_eq!(
+            policy.non_retryable_error_types(),
+            crate::error::DbtTemporalError::NON_RETRYABLE_TYPE_NAMES
+        );
+        assert!(
+            policy
+                .non_retryable_error_types()
+                .iter()
+                .any(|name| name == "DbtTemporalError::ArtifactStorePermanent")
+        );
+    }
+
+    /// Planning and checkpoint reads run before the project's own retry settings
+    /// are resolved, so they get the built-in budget.
+    #[test]
+    fn activities_before_config_resolution_use_the_default_retry_budget() {
+        assert_eq!(unresolved_retry().max_attempts, RetryConfig::default().max_attempts);
     }
 
     // --- project hook activity options ---

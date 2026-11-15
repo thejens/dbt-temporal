@@ -5,7 +5,8 @@ use std::fmt;
 /// The variant determines retry behavior:
 /// - `Compilation` / `Configuration` / `ProjectNotFound` / `MissingAdapterResponse` →
 ///   non-retryable
-/// - `Adapter` / `ArtifactStore` → retryable (transient I/O)
+/// - `Adapter` / `ArtifactStore` → retryable (transient I/O), except an
+///   `ArtifactStore` failure that retrying cannot fix (see [`Self::is_retryable`])
 #[derive(Debug)]
 pub enum DbtTemporalError {
     /// Bad SQL, missing ref, Jinja render failure.
@@ -18,6 +19,8 @@ pub enum DbtTemporalError {
     /// a dropped connection while reading or writing run artifacts. Distinct
     /// from `Adapter` because it says nothing about the warehouse, but shares
     /// its retryability: the same call usually succeeds on a later attempt.
+    /// A failure that is permanent (missing bucket, access denied, invalid
+    /// path) is still carried here and classified by its cause.
     ArtifactStore(anyhow::Error),
     /// Worker doesn't have the requested project loaded.
     ProjectNotFound(String),
@@ -75,7 +78,7 @@ impl DbtTemporalError {
     /// `non_retryable_error_types`: Temporal matches that list against the
     /// failure type that `type_name` stamps onto every activity failure. A test
     /// asserts the list agrees with `is_retryable` for every variant.
-    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 7] = [
+    pub const NON_RETRYABLE_TYPE_NAMES: [&'static str; 8] = [
         "DbtTemporalError::Compilation",
         "DbtTemporalError::Configuration",
         "DbtTemporalError::ProjectNotFound",
@@ -83,20 +86,43 @@ impl DbtTemporalError {
         "DbtTemporalError::TestFailure",
         "DbtTemporalError::UnitTestFailure",
         "DbtTemporalError::StaleSource",
+        Self::ARTIFACT_STORE_PERMANENT_TYPE_NAME,
     ];
 
+    /// Failure type of an artifact-store error whose cause no retry can fix.
+    /// Its own name, rather than `ArtifactStore`'s, so a retry policy can list
+    /// it as non-retryable while transient store errors keep retrying.
+    const ARTIFACT_STORE_PERMANENT_TYPE_NAME: &'static str =
+        "DbtTemporalError::ArtifactStorePermanent";
+
     /// Whether this error is retryable by Temporal.
-    pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Adapter(_) | Self::ArtifactStore(_))
+    ///
+    /// An artifact-store error is retryable unless its cause is permanent, which
+    /// is decided from the typed errors in its chain.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Adapter(_) => true,
+            Self::ArtifactStore(err) => !crate::artifact_store::is_permanent(err),
+            Self::Compilation(_)
+            | Self::Configuration(_)
+            | Self::ProjectNotFound(_)
+            | Self::MissingAdapterResponse(_)
+            | Self::TestFailure { .. }
+            | Self::UnitTestFailure { .. }
+            | Self::StaleSource { .. } => false,
+        }
     }
 
     /// Stable failure type reported to Temporal for this variant, so operators
     /// can filter failures by type and the retry policy can match on it.
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Self::Compilation(_) => "DbtTemporalError::Compilation",
             Self::Configuration(_) => "DbtTemporalError::Configuration",
             Self::Adapter(_) => "DbtTemporalError::Adapter",
+            Self::ArtifactStore(_) if !self.is_retryable() => {
+                Self::ARTIFACT_STORE_PERMANENT_TYPE_NAME
+            }
             Self::ArtifactStore(_) => "DbtTemporalError::ArtifactStore",
             Self::ProjectNotFound(_) => "DbtTemporalError::ProjectNotFound",
             Self::MissingAdapterResponse(_) => "DbtTemporalError::MissingAdapterResponse",
@@ -483,6 +509,25 @@ mod tests {
         assert!(adapter.to_string().contains("connection refused"));
     }
 
+    fn permanent_store_failure() -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("reading artifact")
+    }
+
+    #[test]
+    fn a_permanent_store_failure_is_not_retryable_and_names_its_own_type() {
+        let permanent = DbtTemporalError::ArtifactStore(permanent_store_failure());
+        assert!(!permanent.is_retryable());
+        assert!(DbtTemporalError::NON_RETRYABLE_TYPE_NAMES.contains(&permanent.type_name()));
+
+        let transient = DbtTemporalError::ArtifactStore(
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+                .context("writing artifact"),
+        );
+        assert!(transient.is_retryable());
+        assert_eq!(transient.type_name(), "DbtTemporalError::ArtifactStore");
+    }
+
     /// One value of every variant. The exhaustive match makes adding a variant
     /// without extending this list a compile error.
     fn one_of_each_variant() -> Vec<DbtTemporalError> {
@@ -503,6 +548,7 @@ mod tests {
             DbtTemporalError::Configuration("c".into()),
             DbtTemporalError::Adapter(anyhow::anyhow!("a")),
             DbtTemporalError::ArtifactStore(anyhow::anyhow!("a")),
+            DbtTemporalError::ArtifactStore(permanent_store_failure()),
             DbtTemporalError::ProjectNotFound("p".into()),
             DbtTemporalError::MissingAdapterResponse("m".into()),
             DbtTemporalError::TestFailure {

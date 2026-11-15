@@ -838,10 +838,11 @@ pass={{ ns.pass }} error={{ ns.error }}",
             assert!(!typed.is_retryable());
         }
 
-        /// An unreadable checkpoint is transient store I/O, so it retries when
-        /// the phase opted in, and never yields a silently shorter `results`.
+        /// A checkpoint that is not in the store will not appear on a retry, so
+        /// the read fails for good, and never yields a silently shorter
+        /// `results`.
         #[tokio::test]
-        async fn an_unreadable_segment_is_a_retryable_store_error() {
+        async fn a_missing_segment_is_a_permanent_store_error() {
             let dir = tempfile::tempdir().expect("tempdir");
             let store = LocalArtifactStore::new(dir.path().to_path_buf());
             let missing = dir.path().join("inv/run_segment_state_1.json");
@@ -854,7 +855,8 @@ pass={{ ns.pass }} error={{ ns.error }}",
             .expect_err("a missing checkpoint must be reported");
             let typed = err.downcast_ref::<DbtTemporalError>().expect("typed error");
             assert!(matches!(typed, DbtTemporalError::ArtifactStore(_)), "{typed}");
-            assert!(typed.is_retryable());
+            assert!(!typed.is_retryable());
+            assert_eq!(typed.type_name(), "DbtTemporalError::ArtifactStorePermanent");
             assert!(format!("{typed}").contains("earlier segment"), "{typed}");
         }
 

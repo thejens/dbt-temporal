@@ -1,10 +1,12 @@
 mod local;
 #[cfg(any(feature = "gcs", feature = "aws"))]
 mod object_store_backend;
+mod permanence;
 
 pub use local::LocalArtifactStore;
 #[cfg(any(feature = "gcs", feature = "aws"))]
 pub use object_store_backend::{ObjectStoreArtifactStore, parse_object_store_url};
+pub use permanence::{InvalidArtifactPath, is_permanent};
 
 use anyhow::Result;
 use async_trait::async_trait;

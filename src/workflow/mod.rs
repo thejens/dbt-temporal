@@ -830,7 +830,7 @@ mod tests {
     /// recorded history, so anything that can differ between the original run
     /// and the replay corrupts the workflow.
     ///
-    /// Scans `src/workflow/*.rs` for the patterns above. Test modules are
+    /// Scans `src/workflow/**/*.rs` for the patterns above. Test modules are
     /// exempt (they are never replayed) and by convention sit at the end of
     /// each file, so the scan stops at the first `#[cfg(test)]`.
     #[test]
@@ -839,13 +839,13 @@ mod tests {
         let workflow_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workflow");
 
         let mut checked = 0;
-        for entry in std::fs::read_dir(&workflow_dir).expect("read src/workflow") {
-            let path = entry.expect("dir entry").path();
-            if path.extension().is_none_or(|ext| ext != "rs") {
-                continue;
-            }
+        for path in workflow_sources(&workflow_dir) {
             let contents = std::fs::read_to_string(&path).expect("read file");
-            let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+            let filename = path
+                .strip_prefix(&workflow_dir)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             let production = executable_code(production_code(&contents));
             checked += 1;
 
@@ -858,6 +858,31 @@ mod tests {
             }
         }
         assert!(checked > 0, "determinism scan found no files — did the module move?");
+    }
+
+    /// Every replayed source file under `dir`, submodule directories included.
+    /// Files that hold only test code (`tests.rs`, `tests/`, `test_support.rs`)
+    /// are never replayed and carry no `#[cfg(test)]` marker of their own, so
+    /// they are skipped by name.
+    #[allow(clippy::expect_used)]
+    fn workflow_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("read workflow dir") {
+            let path = entry.expect("dir entry").path();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if matches!(stem, "tests" | "test_support") {
+                continue;
+            }
+            if path.is_dir() {
+                files.extend(workflow_sources(&path));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+        files
     }
 
     /// The part of a source file that gets replayed: everything before the

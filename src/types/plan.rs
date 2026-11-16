@@ -32,10 +32,13 @@ pub struct ExecutionPlan {
     /// Whether artifact writing is enabled for this run.
     #[serde(default)]
     pub write_artifacts: bool,
-    /// Whether dbt_project.yml (or any loaded package) defines on-run-start hooks.
+    /// Whether the run executes `dbt_project.yml`'s (or a loaded package's)
+    /// on-run-start hooks: they are defined, and the selection is not one
+    /// dbt runs no hooks for (see `DbtCommand::skips_hooks_when_nothing_selected`).
     #[serde(default)]
     pub has_on_run_start: bool,
-    /// Whether dbt_project.yml (or any loaded package) defines on-run-end hooks.
+    /// Whether the run executes the on-run-end hooks, under the same conditions
+    /// as `has_on_run_start`.
     #[serde(default)]
     pub has_on_run_end: bool,
     /// Whether activities carry priority/fairness keys (worker config;
@@ -49,6 +52,10 @@ pub struct ExecutionPlan {
     /// keeps histories recorded before the gate existed replaying cleanly.
     #[serde(default)]
     pub has_project_checks: bool,
+    /// Warnings the planner raised for the run's log: what dbt says when a
+    /// selection matches nothing. Empty for every plan that holds nodes.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Metadata about a single dbt node.

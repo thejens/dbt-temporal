@@ -13,9 +13,9 @@ pub const fn plural(n: usize) -> &'static str {
 }
 
 /// Build the dbt-style run-log header: version line, resource-type tally,
-/// and concurrency line. Pure — no ctx side effects.
+/// concurrency line, and the planner's warnings. Pure — no ctx side effects.
 pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
-    let mut log_lines = Vec::with_capacity(3);
+    let mut log_lines = Vec::with_capacity(3 + plan.warnings.len());
     log_lines.push(format!("Running with dbt-temporal={}", env!("CARGO_PKG_VERSION")));
 
     let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -28,13 +28,20 @@ pub fn build_log_header(plan: &ExecutionPlan) -> Vec<String> {
         .iter()
         .map(|(t, n)| format!("{n} {t}{}", plural(*n)))
         .collect();
-    log_lines.push(format!("Found {}", parts.join(", ")));
+    // An empty plan has no resource types to tally.
+    let found = if parts.is_empty() {
+        "0 nodes".to_string()
+    } else {
+        parts.join(", ")
+    };
+    log_lines.push(format!("Found {found}"));
 
     log_lines.push(format!(
         "Concurrency: {} parallel level{}",
         plan.levels.len(),
         plural(plan.levels.len())
     ));
+    log_lines.extend(plan.warnings.iter().map(|w| format!("WARNING: {w}")));
     log_lines
 }
 
@@ -224,6 +231,20 @@ mod tests {
         let header = build_log_header(&plan);
         assert_eq!(header[1], "Found 1 model");
         assert_eq!(header[2], "Concurrency: 1 parallel level");
+    }
+
+    #[test]
+    fn build_log_header_of_an_empty_plan_carries_the_planner_warnings() {
+        let mut plan = test_plan(vec![], &[]);
+        plan.warnings = vec!["Nothing to do.".to_string()];
+        assert_eq!(
+            build_log_header(&plan)[1..],
+            [
+                "Found 0 nodes".to_string(),
+                "Concurrency: 0 parallel levels".to_string(),
+                "WARNING: Nothing to do.".to_string(),
+            ]
+        );
     }
 
     fn result_with_status(uid: &str, status: NodeStatus) -> NodeExecutionResult {

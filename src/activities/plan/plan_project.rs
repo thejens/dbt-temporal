@@ -16,6 +16,7 @@ use super::super::dag::{
 };
 use super::super::indirect::{IndirectSelection, expand_indirect_selection};
 use super::super::selectors::{StateSelector, apply_selectors, selectors_use_state};
+use super::empty::{hooks_skipped, narrow_to_retry, nothing_selected_warnings};
 use super::nodes::build_node_info;
 use super::priorities::compute_priorities;
 use super::retry::parse_retry_node_ids;
@@ -193,9 +194,11 @@ pub async fn plan_project_inner(
         },
     )?;
 
-    if selected_ids.is_empty() {
-        anyhow::bail!("no nodes matched after applying selectors");
-    }
+    // An empty selection is not an error, as in dbt: the plan simply holds no
+    // nodes and `nothing_selected_warnings` says so. Everything above that can
+    // reject a selector (syntax, unknown methods, `state:` without a manifest)
+    // has already run, so only a valid selection that matches nothing gets here.
+    let selected_before_retry = selected_ids.len();
 
     // Retry-from-failure: narrow the selection to the nodes `dbt retry` would
     // re-run from a previous run (errored, failed and skipped ones; skipped
@@ -211,14 +214,7 @@ pub async fn plan_project_inner(
             artifact_io_error(e.context(format!("loading previous run_results from {retry_ref}")))
         })?;
         let retry_ids = parse_retry_node_ids(&bytes)?;
-        let filtered: Vec<String> = selected_ids
-            .into_iter()
-            .filter(|id| retry_ids.contains(id))
-            .collect();
-        anyhow::ensure!(
-            !filtered.is_empty(),
-            "retry_from: no selected node errored, failed or was skipped in the previous run — nothing to retry"
-        );
+        let filtered = narrow_to_retry(selected_ids, &retry_ids);
         warn!(
             retrying = filtered.len(),
             from = %retry_ref,
@@ -304,8 +300,17 @@ pub async fn plan_project_inner(
         &activities.registered_attrs.0,
     );
 
-    let has_on_run_start = !state.resolver_state.operations.on_run_start.is_empty();
-    let has_on_run_end = !state.resolver_state.operations.on_run_end.is_empty();
+    let warnings = nothing_selected_warnings(&input, selected_before_retry, selected_ids.len());
+    for line in &warnings {
+        warn!("{line}");
+    }
+
+    // dbt runs no hooks for an empty selection of these commands; see
+    // `DbtCommand::skips_hooks_when_nothing_selected`.
+    let hooks_skipped = hooks_skipped(&input.command, selected_ids.len());
+    let has_on_run_start =
+        !hooks_skipped && !state.resolver_state.operations.on_run_start.is_empty();
+    let has_on_run_end = !hooks_skipped && !state.resolver_state.operations.on_run_end.is_empty();
     let has_project_checks = state
         .project_checks
         .as_ref()
@@ -324,6 +329,7 @@ pub async fn plan_project_inner(
         has_on_run_end,
         priority_scheduling: activities.priority_scheduling.0,
         has_project_checks,
+        warnings,
     })
 }
 

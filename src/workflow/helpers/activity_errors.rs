@@ -2,7 +2,7 @@
 ///
 /// The SDK's `Display` prints only the top-level failure — for a failed
 /// activity that is the generic "Activity task failed". What the activity
-/// actually returned ("no nodes matched after applying selectors", a
+/// actually returned ("invalid --select", a
 /// warehouse error) travels in the failure's `cause` chain, which neither
 /// `Display` nor `{:#}` reaches. Without it a rejected run tells the operator
 /// nothing and sends them to the worker logs.
@@ -79,17 +79,11 @@ mod tests {
     fn failure_cause_messages_walks_the_chain_outermost_first() {
         let chain = failure(
             "Activity task failed",
-            Some(failure(
-                "no nodes matched after applying selectors",
-                Some(failure("selector: no_such_model", None)),
-            )),
+            Some(failure("invalid --select", Some(failure("selector: no_such_model", None)))),
         );
         assert_eq!(
             failure_cause_messages(&chain),
-            vec![
-                "no nodes matched after applying selectors",
-                "selector: no_such_model"
-            ]
+            vec!["invalid --select", "selector: no_such_model"]
         );
     }
 

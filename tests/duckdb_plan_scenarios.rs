@@ -35,13 +35,22 @@ async fn ephemeral_models_are_excluded_from_selection() {
 }
 
 #[tokio::test]
-async fn build_with_only_an_ephemeral_model_finds_no_nodes() {
-    // After excluding the (only) ephemeral model, nothing is left to plan.
+async fn build_with_only_an_ephemeral_model_selects_nothing() {
+    // After excluding the (only) ephemeral model, nothing is left to plan; that
+    // is an empty selection, not an error.
     let harness =
         Harness::build(&[("base", "{{ config(materialized='ephemeral') }}\nselect 1 as id")]).await;
-    let err = select_command_node_ids(harness.state(), &build_input("build"))
-        .expect_err("no nodes should remain");
-    assert!(err.to_string().contains("no nodes found for command"), "got: {err}");
+    let ids = select_command_node_ids(harness.state(), &build_input("build"))
+        .expect("an empty selection is not an error");
+    assert_eq!(ids, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn seed_on_a_project_without_seeds_selects_nothing() {
+    let harness = Harness::build(&[("m", "select 1 as id")]).await;
+    let ids = select_command_node_ids(harness.state(), &build_input("seed"))
+        .expect("an empty selection is not an error");
+    assert_eq!(ids, Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -284,9 +293,9 @@ models:
 }
 
 /// A misspelled command would match no arm of the planner's dispatch and
-/// select nothing, so the run would fail with "no nodes found" — an error that
-/// blames the selection rather than the typo, and looks identical to a genuine
-/// empty selection. It must be rejected by name instead.
+/// select nothing, so the run would end with "Nothing to do" — which blames the
+/// selection rather than the typo, and looks identical to a genuine empty
+/// selection. It must be rejected by name instead.
 #[tokio::test]
 async fn a_misspelled_command_says_so() {
     let harness = Harness::build(&[("m", "select 1 as id")]).await;
@@ -369,4 +378,32 @@ exposures:
     let ids = select_command_node_ids(harness.state(), &build_input("build"))
         .expect("selection should succeed");
     assert_eq!(ids, vec!["model.spike.m".to_string()]);
+}
+
+/// A valid selector that matches nothing leaves an empty selection, even when
+/// the command had no eligible nodes to begin with; one that cannot be
+/// evaluated is still rejected, whatever the node set.
+#[tokio::test]
+async fn an_invalid_selector_fails_where_a_valid_empty_one_does_not() {
+    use dbt_temporal::activities::selectors::apply_selectors;
+
+    let harness = Harness::build(&[("m", "select 1 as id")]).await;
+    let nodes = &harness.state().resolver_state.nodes;
+    let select = |ids: Vec<String>, spec: &str| {
+        apply_selectors(ids, nodes, Some(spec), None, None, &|ids, _| ids)
+    };
+
+    let all = select_command_node_ids(harness.state(), &build_input("build")).unwrap();
+    assert_eq!(select(all, "no_such_model").unwrap(), Vec::<String>::new());
+
+    // `seed` has no eligible nodes here, so the selector sees an empty set.
+    let none = select_command_node_ids(harness.state(), &build_input("seed")).unwrap();
+    assert_eq!(select(none.clone(), "no_such_model").unwrap(), Vec::<String>::new());
+
+    let err = select(none.clone(), "no_such_method:x").expect_err("unknown method");
+    assert!(format!("{err:#}").contains("Invalid node selector method"), "{err:#}");
+    let err = select(none.clone(), "result:error").expect_err("method this planner lacks");
+    assert!(format!("{err:#}").contains("unsupported selector method"), "{err:#}");
+    let err = select(none, "tag:").expect_err("selector without a value");
+    assert!(format!("{err:#}").contains("Invalid selector spec"), "{err:#}");
 }

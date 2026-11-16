@@ -173,10 +173,11 @@ async fn test_planner_rejects_inputs_it_cannot_honour() -> Result<()> {
             let failure = failure_of(&client, &task_queue, input).await?;
             assert!(failure.contains("retry_from requires artifact storage"), "got: {failure}");
 
-            // A selector that matches nothing is an error, not an empty success.
-            let input = make_input("build", Some("no_such_model"), None, false);
+            // A selector that cannot be evaluated is an error. One that is valid
+            // but matches nothing is an empty run, which ends successfully.
+            let input = make_input("build", Some("no_such_method:x"), None, false);
             let failure = failure_of(&client, &task_queue, input).await?;
-            assert!(failure.contains("no nodes matched"), "got: {failure}");
+            assert!(failure.contains("Invalid node selector method"), "got: {failure}");
 
             // A microbatch window whose end is not a timestamp.
             let mut input = make_input("build", None, None, false);

@@ -113,6 +113,7 @@ mod tests {
                 has_on_run_end: true,
                 priority_scheduling: false,
                 has_project_checks: false,
+                warnings: vec![],
             },
             prior_segments: vec![],
             all_results: vec![result(node)],

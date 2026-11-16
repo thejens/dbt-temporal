@@ -26,6 +26,8 @@ In the order they are planned.
 | 7 | `clone` | No command. | Zero-copy clones of the nodes in a state manifest. Adapter support varies. |
 | 8 | `--sample` | No input field. | Time-based sampling of `ref()` and `source()` for development runs. |
 | 9 | `state:modified.configs`, `.relation`, `.persisted_descriptions`, `.macros`, `.contract` | Rejected. | The state comparison reads node bodies and file checksums only. `state:modified` on its own therefore misses a config-only or macro-only change, and warns that it does. |
+| 10 | Analyses in `compile` | `compile` plans models, data tests, snapshots and functions only; analyses are never compiled. | dbt compiles every `analyses/` file so its SQL can be inspected. An analysis is not part of the run's DAG here, and the planner does not select that resource type. |
+| 11 | Full `list` output | `list` returns the selected nodes as ids with a success status. It leaves out sources, exposures, metrics and analyses. | dbt lists every resource type. The workflow answers from the plan, which holds only the node types the other commands execute. |
 
 Not planned:
 
@@ -48,6 +50,7 @@ Not planned:
 | `generate_alias_name` under an env override | Every invocation calls it. | Called at start-up only. An override recomputes database and schema, not the alias. | To be aligned. Matters only to an alias macro that reads the environment or `node.schema`. |
 | Snapshot `target_schema` / `target_database` under an env override | dbt skips the naming macros for a snapshot that sets them. | The naming macros run for it. | To be aligned. |
 | `@` with `+` (`@+model`) | dbt Core applies both. dbt v2 lets the `+` win. | Follows dbt v2. | The worker embeds dbt v2. |
+| Artifact storage that fails | `run_results.json` is written after the nodes ran, and `on-run-end` runs regardless. | The `store_artifacts` activity retries under the project's retry policy: 3 attempts by default, a 5 s first interval doubling to at most 60 s, and 120 s per attempt (`retry` and `timeouts.store_artifacts_secs` in `dbt_temporal.yml`). If it still fails, the run fails and `on-run-end` does not run. | The workflow stores artifacts before it runs `on-run-end`. dbt has no storage step that can fail. Accepted as it is: a store that fails after its retries ends the run at once. |
 
 ## How to take an item
 

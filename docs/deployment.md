@@ -360,6 +360,25 @@ upgraded worker in time; otherwise the node fails and the run reports it. Keep
 old and new workers off the same task queue while rolling out, or use
 `TEMPORAL_DEPLOYMENT_NAME` so a run stays on the version that started it.
 
+### Workers that loaded different project revisions
+
+Plan and node activities may run on different workers. `plan_project` selects
+nodes from the project the planning worker loaded; `execute_node` then looks the
+node up by `unique_id` in the project the executing worker loaded, and runs what
+it finds there. The two workers are not compared: there is no project
+fingerprint in the plan or the activity input. Workers on one task queue that
+loaded different revisions of a project (for example `git+...#main` fetched at
+different times during a rolling restart) can therefore plan on one revision and
+execute on another. A node that does not exist on the executing worker fails with
+`node not found`; a node that exists there with a changed body runs the changed
+body, without any error.
+
+Today's mitigation is operational. Pin the git ref to a commit or tag
+(`#${GIT_COMMIT}` as below, not a branch), and run one deployment version per
+project revision: either keep old and new workers off the same task queue
+during a rollout, or set `TEMPORAL_DEPLOYMENT_NAME` so a run stays on the
+version that started it.
+
 **Model file changes** — two strategies:
 
 1. **Baked into image**: rebuild the image with new model files, re-deploy. This is the simplest and most reproducible approach.

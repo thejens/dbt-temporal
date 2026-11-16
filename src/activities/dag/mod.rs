@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use dbt_schemas::schemas::telemetry::NodeType;
 use dbt_schemas::schemas::{InternalDbtNode, Nodes};
@@ -12,6 +13,7 @@ pub fn build_dependency_map(
     selected_ids: &[String],
 ) -> BTreeMap<String, BTreeSet<String>> {
     let selected_set: BTreeSet<&str> = selected_ids.iter().map(String::as_str).collect();
+    let mut promoter = EphemeralPromoter::new(nodes, &selected_set);
     let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for id in selected_ids {
@@ -23,7 +25,7 @@ pub fn build_dependency_map(
                 } else {
                     // Dependency is not selected (likely ephemeral) — promote its
                     // transitive dependencies so the DAG ordering is correct.
-                    promote_ephemeral_deps(nodes, dep_id, &selected_set, &mut node_deps);
+                    node_deps.extend(promoter.promoted(dep_id).iter().cloned());
                 }
             }
         }
@@ -33,27 +35,105 @@ pub fn build_dependency_map(
     deps
 }
 
-/// Walk through an unselected (ephemeral) node's dependencies transitively,
-/// collecting any that ARE in the selected set.
-fn promote_ephemeral_deps(
-    nodes: &Nodes,
-    unselected_id: &str,
-    selected_set: &BTreeSet<&str>,
-    result: &mut BTreeSet<String>,
-) {
-    let mut stack = vec![unselected_id.to_string()];
-    let mut visited = BTreeSet::new();
-    while let Some(current) = stack.pop() {
-        if !visited.insert(current.clone()) {
-            continue;
+/// One step of [`EphemeralPromoter::promoted`]'s depth-first walk: an unselected
+/// node, the dependencies still to visit, and the selected ancestors found so far.
+struct Frame<'a> {
+    id: &'a str,
+    pending: std::vec::IntoIter<&'a str>,
+    found: BTreeSet<String>,
+}
+
+/// Resolves unselected (ephemeral) nodes to the selected nodes they stand in for.
+///
+/// The selected ancestors of an unselected node are computed once and kept, so
+/// each unselected node is expanded a single time however many selected nodes
+/// reach it: O(nodes + edges) expansions in total rather than a fresh walk per
+/// edge into the unselected region. That matters for selections such as
+/// `command: test`, where every test's model is unselected and shares its
+/// ancestry with the next test's.
+///
+/// Assumes the unselected region is acyclic, which dbt guarantees when it parses
+/// a project. On a cycle the walk still terminates, but the nodes on the cycle
+/// may report an incomplete set.
+struct EphemeralPromoter<'a> {
+    nodes: &'a Nodes,
+    selected: &'a BTreeSet<&'a str>,
+    /// Unselected node to the selected nodes reachable from it through unselected
+    /// nodes only.
+    memo: HashMap<&'a str, Rc<BTreeSet<String>>>,
+    /// How many unselected nodes have been expanded; tests assert it stays
+    /// linear in the size of the graph.
+    #[cfg(test)]
+    expansions: std::cell::Cell<usize>,
+}
+
+impl<'a> EphemeralPromoter<'a> {
+    fn new(nodes: &'a Nodes, selected: &'a BTreeSet<&'a str>) -> Self {
+        Self {
+            nodes,
+            selected,
+            memo: HashMap::new(),
+            #[cfg(test)]
+            expansions: std::cell::Cell::new(0),
         }
-        if let Some(node) = nodes.get_node(&current) {
-            for (dep_id, _) in &node.base().depends_on.nodes_with_ref_location {
-                if selected_set.contains(dep_id.as_str()) {
-                    result.insert(dep_id.clone());
-                } else if !visited.contains(dep_id.as_str()) {
-                    stack.push(dep_id.clone());
+    }
+
+    fn frame(&self, id: &'a str) -> Frame<'a> {
+        #[cfg(test)]
+        {
+            self.expansions.set(self.expansions.get() + 1);
+        }
+        let pending: Vec<&'a str> = self.nodes.get_node(id).map_or_else(Vec::new, |node| {
+            node.base()
+                .depends_on
+                .nodes_with_ref_location
+                .iter()
+                .map(|(dep_id, _)| dep_id.as_str())
+                .collect()
+        });
+        Frame {
+            id,
+            pending: pending.into_iter(),
+            found: BTreeSet::new(),
+        }
+    }
+
+    /// The selected nodes reachable from the unselected node `root` through
+    /// unselected nodes only.
+    ///
+    /// Iterative, so a long chain of ephemeral models cannot exhaust the stack.
+    fn promoted(&mut self, root: &'a str) -> Rc<BTreeSet<String>> {
+        if let Some(done) = self.memo.get(root) {
+            return Rc::clone(done);
+        }
+        let mut in_progress: HashSet<&'a str> = HashSet::from([root]);
+        let first = self.frame(root);
+        let mut stack = vec![first];
+        loop {
+            let Some(top) = stack.last_mut() else {
+                // Unreachable: the loop returns when the root's frame is popped.
+                return Rc::default();
+            };
+            if let Some(dep) = top.pending.next() {
+                if self.selected.contains(dep) {
+                    top.found.insert(dep.to_string());
+                } else if let Some(done) = self.memo.get(dep) {
+                    top.found.extend(done.iter().cloned());
+                } else if in_progress.insert(dep) {
+                    let frame = self.frame(dep);
+                    stack.push(frame);
                 }
+                continue;
+            }
+            let Some(finished) = stack.pop() else {
+                return Rc::default();
+            };
+            in_progress.remove(finished.id);
+            let found = Rc::new(finished.found);
+            self.memo.insert(finished.id, Rc::clone(&found));
+            match stack.last_mut() {
+                Some(parent) => parent.found.extend(found.iter().cloned()),
+                None => return found,
             }
         }
     }

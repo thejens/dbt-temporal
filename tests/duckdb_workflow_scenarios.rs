@@ -713,6 +713,9 @@ fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
             matches!(result, Err(WorkflowGetResultError::Failed(_))),
             "the run should fail: {result:?}"
         );
+        // The failure names what the hook did wrong, not just that the
+        // activity task failed.
+        assert!(format!("{result:?}").contains("syntax error"), "{result:?}");
         history_events(&handle).await
     })?;
 

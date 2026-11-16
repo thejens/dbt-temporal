@@ -153,6 +153,8 @@ connections; the health port is for the kubelet's probes.
 | `dbt.target` | `""` | dbt target. Defaults to the profile's. |
 | `dbt.profiles.existingSecret` / `.inline` | `""` | One of the two. |
 | `dbt.allowExperimentalAdapters` | `false` | Required for Postgres and other adapters dbt marks experimental. |
+| `dbt.allowedEnvOverrides` | `null` | Names a workflow's `env` may override (`ALLOWED_ENV_OVERRIDES`). `null` is unrestricted, `[]` allows none. Unrestricted, anyone who can start a workflow can point the worker's credentials at another host. See [env overrides](../../docs/env-overrides.md#security-restricting-what-a-workflow-can-override). |
+| `dbt.allowedTargets` | `null` | Targets a workflow may select besides the default (`ALLOWED_TARGETS`). Same `null` / list / `[]` semantics. |
 | `dbt.git.token.existingSecret` / `.key` | `""` / `token` | HTTPS access token for private repos. |
 | `dbt.git.username` | `""` | Sent with the token. Host-dependent, see above. |
 | `dbt.git.ssh.existingSecret` | `""` | Secret with `ssh-privatekey` and `known_hosts`. |

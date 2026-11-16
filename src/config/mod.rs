@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod override_policy;
 pub mod secret;
 pub mod tuning;
 
@@ -8,6 +9,7 @@ mod test_util;
 use std::collections::BTreeMap;
 
 pub use self::discovery::is_remote_source;
+pub use self::override_policy::OverridePolicy;
 pub use self::secret::Secret;
 
 /// Configuration for the dbt-temporal worker, read from environment variables.
@@ -42,6 +44,11 @@ pub struct DbtTemporalConfig {
     /// Artifact store location. Accepts a local path or a cloud URL (`gs://…`, `s3://…`).
     /// Controlled by `ARTIFACT_STORE` (default: `/tmp/dbt-artifacts`).
     pub artifact_store: String,
+
+    // Per-workflow overrides
+    /// Which `env` names and `target`s a workflow may override. Controlled by
+    /// `ALLOWED_ENV_OVERRIDES` and `ALLOWED_TARGETS` (default: unrestricted).
+    pub override_policy: OverridePolicy,
 
     // Search attributes: static key-value pairs upserted on every workflow run.
     pub search_attributes: BTreeMap<String, String>,
@@ -240,6 +247,7 @@ impl DbtTemporalConfig {
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             artifact_store: std::env::var("ARTIFACT_STORE")
                 .unwrap_or_else(|_| "/tmp/dbt-artifacts".to_string()),
+            override_policy: OverridePolicy::from_env()?,
             search_attributes: tuning::parse_search_attributes()?,
             write_run_log: std::env::var("WRITE_RUN_LOG")
                 .map_or(true, |v| v != "0" && !v.eq_ignore_ascii_case("false")),

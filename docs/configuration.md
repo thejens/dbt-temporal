@@ -36,6 +36,8 @@ If none are set, the current working directory is used (either as a project if i
 | `DBT_PROFILES_DIR` | project dir | Path to profiles.yml |
 | `DBT_TARGET` | from profile | Target override |
 | `DBT_ALLOW_EXPERIMENTAL_ADAPTERS` | `false` | Read by dbt. Release builds load only the adapters dbt calls supported (Snowflake, BigQuery, Databricks, Redshift, DuckDB, Salesforce, ClickHouse) and refuse any other, Postgres included, with "adapter is not yet supported". Set `true` to allow them. Debug builds (`cargo run`, the examples) allow them by default. |
+| `ALLOWED_ENV_OVERRIDES` | unrestricted | Comma-separated names a workflow's `env` may contain. Unset allows any name; set to an empty string allows none. A run naming anything else fails without retry, naming the key. Exact names, no patterns. See [security](env-overrides.md#security-restricting-what-a-workflow-can-override). |
+| `ALLOWED_TARGETS` | unrestricted | Comma-separated targets a workflow's `target` may select. Unset allows any; set to an empty string allows none. The worker's own default target is always selectable. A run naming another fails without retry, naming the target. |
 | `GITHUB_TOKEN` | - | Auth token for private git repos over HTTPS. Falls back to `GIT_TOKEN`. See [Private Git Repositories](#private-git-repositories). |
 | `GIT_USERNAME` | - | Username sent with the token, which then goes as the password. Unset sends the token as the username (GitHub, Gitea). |
 

@@ -222,6 +222,7 @@ mod tests {
             write_artifacts: false,
             write_catalog: false,
             artifact_store: "/tmp/dbt-artifacts".into(),
+            override_policy: crate::config::OverridePolicy::default(),
             search_attributes: std::collections::BTreeMap::new(),
             write_run_log: true,
             worker_tuning: WorkerTuningConfig::Fixed {

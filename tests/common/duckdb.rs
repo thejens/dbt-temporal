@@ -148,14 +148,38 @@ impl Harness {
             .iter()
             .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
             .collect();
-        Self::build_inner(&owned, ProfileMode::Template(profile_yml.to_string())).await
+        Self::build_inner(
+            &owned,
+            ProfileMode::Template(profile_yml.to_string()),
+            dbt_temporal::config::OverridePolicy::default(),
+        )
+        .await
+    }
+
+    /// Like [`build`](Self::build), on a worker whose operator restricted what a
+    /// workflow may override.
+    pub async fn build_restricted(
+        models: &[(&str, &str)],
+        policy: dbt_temporal::config::OverridePolicy,
+    ) -> Self {
+        Self::build_inner(&model_files(models), ProfileMode::Default { unreachable: false }, policy)
+            .await
     }
 
     async fn build_files_inner(files: &[(String, String)], unreachable: bool) -> Self {
-        Self::build_inner(files, ProfileMode::Default { unreachable }).await
+        Self::build_inner(
+            files,
+            ProfileMode::Default { unreachable },
+            dbt_temporal::config::OverridePolicy::default(),
+        )
+        .await
     }
 
-    async fn build_inner(files: &[(String, String)], profile_mode: ProfileMode) -> Self {
+    async fn build_inner(
+        files: &[(String, String)],
+        profile_mode: ProfileMode,
+        policy: dbt_temporal::config::OverridePolicy,
+    ) -> Self {
         // Run every scenario under the production tracing stack. Without a
         // subscriber no log record is ever built, so the field expressions in
         // `warn!` / `info!` calls go unexecuted and a formatter that panics
@@ -202,7 +226,8 @@ impl Harness {
         };
         std::fs::write(profiles.path().join("profiles.yml"), profile_yml).unwrap();
 
-        let config = build_config(project.path(), profiles.path());
+        let mut config = build_config(project.path(), profiles.path());
+        config.override_policy = policy;
         let mut state = initialize_project(project.path(), &config, None)
             .await
             .unwrap_or_else(|e| panic!("initialize duckdb project: {e:#}"));
@@ -632,6 +657,7 @@ pub fn build_config(
         write_artifacts: false,
         write_catalog: false,
         artifact_store: std::env::temp_dir().to_string_lossy().to_string(),
+        override_policy: dbt_temporal::config::OverridePolicy::default(),
         search_attributes: BTreeMap::new(),
         write_run_log: false,
         worker_tuning: WorkerTuningConfig::Fixed {

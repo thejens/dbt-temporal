@@ -36,6 +36,13 @@ data:
   {{- if .Values.dbt.allowExperimentalAdapters }}
   DBT_ALLOW_EXPERIMENTAL_ADAPTERS: "true"
   {{- end }}
+  {{- /* An empty list is set-but-empty (nothing may be overridden), which is not the same as unset (anything may). */}}
+  {{- if not (kindIs "invalid" .Values.dbt.allowedEnvOverrides) }}
+  ALLOWED_ENV_OVERRIDES: {{ join "," .Values.dbt.allowedEnvOverrides | quote }}
+  {{- end }}
+  {{- if not (kindIs "invalid" .Values.dbt.allowedTargets) }}
+  ALLOWED_TARGETS: {{ join "," .Values.dbt.allowedTargets | quote }}
+  {{- end }}
   {{- if include "dbt-temporal.profilesSecret" . }}
   DBT_PROFILES_DIR: /etc/dbt
   {{- end }}

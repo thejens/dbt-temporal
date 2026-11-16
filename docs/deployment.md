@@ -51,6 +51,8 @@ All config is via environment variables. The important ones:
 | `WRITE_ARTIFACTS` | | `true` — write run_results.json, manifest.json, log.txt after each run (default: `false`) |
 | `ARTIFACT_STORE` | | `/data/dbt-artifacts`, `gs://bucket/prefix`, or `s3://bucket/prefix` |
 | `TEMPORAL_DEPLOYMENT_NAME` | | `dbt-temporal-prod` — enables worker versioning, see [Workflow changes and in-flight runs](#workflow-changes-and-in-flight-runs) |
+| `ALLOWED_ENV_OVERRIDES` | | `DB_SCHEMA,TENANT_ID` — the only names a workflow's `env` may override (unset: any). Set it wherever workflows can be started by someone other than the worker's operators, see [security](env-overrides.md#security-restricting-what-a-workflow-can-override) |
+| `ALLOWED_TARGETS` | | `prod,staging` — the only targets a workflow may select besides the default (unset: any) |
 | `DBT_ALLOW_EXPERIMENTAL_ADAPTERS` | | `true` — required for adapters dbt marks experimental, Postgres among them |
 | `WORKER_TUNER` | | `fixed` (default) or `resource-based` |
 | `WORKER_MAX_CACHED_WORKFLOWS` | | `1000` — workflows cached on sticky queues |

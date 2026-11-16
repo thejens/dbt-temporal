@@ -196,6 +196,12 @@ pub async fn plan_project_inner(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // First thing the run asks of the worker: a refused override must stop the
+    // run before any node is selected, let alone executed.
+    state
+        .override_policy
+        .check(&input.env, input.target.as_deref(), &state.default_target)?;
+
     validate_microbatch_window(&input)?;
     // The mode is parsed up front so an unrecognised value is rejected before
     // any graph work, and on every run rather than only on filtered ones.

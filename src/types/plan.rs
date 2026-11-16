@@ -21,7 +21,10 @@ pub struct ExecutionPlan {
     pub manifest_json: Option<String>,
     /// Artifact store reference for the manifest stored during planning.
     pub manifest_ref: Option<String>,
-    /// Workflow run identifier (= Temporal workflow ID).
+    /// Run identifier: the Temporal run id of the execution that planned (a
+    /// random UUID when planning runs outside a Temporal context). It names
+    /// the run's artifacts, keys its segment checkpoints and is carried
+    /// unchanged through continue-as-new, so it differs from the workflow id.
     pub invocation_id: String,
     /// Search attributes to upsert on the workflow (static config + dynamic).
     #[serde(default)]

@@ -163,10 +163,15 @@ pub fn build_worker_options(config: &DbtTemporalConfig) -> WorkerOptions {
     // `VersioningBehavior::Unspecified` on task completion, which a versioned
     // worker's server rejects. Core substitutes this default only when it is set.
     //
-    // `Pinned` is the correct choice for `dbt_run`: the workflow carries no
-    // `patched()` calls, so an in-flight run must finish on the worker version
-    // that started it rather than migrating onto changed workflow code mid-DAG.
-    // A dbt run is finite, so pinned executions drain on their own.
+    // `Pinned` is the correct choice for `dbt_run`: a pinned execution replays
+    // and finishes on the worker version that started it, so it never meets
+    // workflow code that issues different commands than its history recorded.
+    // The workflow's `patched()` markers (`workflow/helpers/patches.rs`) are a
+    // second line of defence for runs that do cross versions (a worker started
+    // without a deployment name, or an execution moved by an operator); they
+    // do not replace pinning, because they cover only the changes someone
+    // thought to gate. A dbt run is finite, so pinned executions drain on
+    // their own.
     let deployment = if let Some(ref name) = config.deployment_name {
         WorkerDeploymentOptions::new(
             WorkerDeploymentVersion::builder()

@@ -45,7 +45,7 @@ pub(super) fn build_run_results_json(
             __other__: BTreeMap::new(),
         },
     };
-    serde_json::to_string_pretty(&artifact).map_err(Into::into)
+    serde_json::to_string(&artifact).map_err(Into::into)
 }
 
 /// Convert one node result into dbt's `run_results.json` row.
@@ -274,6 +274,17 @@ mod tests {
             .abs()
                 < f64::EPSILON
         );
+        Ok(())
+    }
+
+    /// dbt writes `run_results.json` compact; a large run's artifact would
+    /// otherwise carry an indented line per field of every node.
+    #[test]
+    fn run_results_are_written_compact() -> anyhow::Result<()> {
+        let input =
+            freshness_input("run", vec![sample_result("model.a", NodeStatus::Success, 1.0)]);
+        let json = build_run_results_json(&input, &BTreeMap::new())?;
+        assert!(!json.contains('\n'), "{json}");
         Ok(())
     }
 }

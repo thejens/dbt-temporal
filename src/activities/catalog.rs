@@ -50,7 +50,13 @@ pub fn build_catalog_json(
 
     let entries = fetch_columns(state, &targets, overrides)?;
     let artifact = assemble_catalog(&entries, invocation_id);
-    serde_json::to_string_pretty(&artifact).map_err(Into::into)
+    render_catalog(&artifact)
+}
+
+/// dbt writes `catalog.json` compact; a large project's catalog is megabytes
+/// and indentation only inflates what consumers must download and parse.
+fn render_catalog(artifact: &serde_json::Value) -> Result<String, anyhow::Error> {
+    serde_json::to_string(artifact).map_err(Into::into)
 }
 
 /// Split a result's recorded relation into its three parts.
@@ -434,5 +440,12 @@ mod tests {
         let artifact = assemble_catalog(&[], "inv-1");
         assert_eq!(artifact["metadata"]["dbt_version"], DBT_VERSION);
         assert_ne!(artifact["metadata"]["dbt_version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_catalog_is_written_compact() -> anyhow::Result<()> {
+        let rendered = render_catalog(&assemble_catalog(&[], "inv-1"))?;
+        assert!(!rendered.contains('\n'), "{rendered}");
+        Ok(())
     }
 }

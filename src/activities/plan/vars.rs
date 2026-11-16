@@ -64,13 +64,39 @@ fn config_block_reads_var<'a>(raw_code: &str, var_names: impl Iterator<Item = &'
     let Some(config_start) = raw_code.find("config(") else {
         return false;
     };
-    let Some(config_end) = raw_code[config_start..].find(')') else {
+    let Some(config_len) = config_call_len(&raw_code[config_start..]) else {
         return false;
     };
-    let block = &raw_code[config_start..config_start + config_end];
+    let block = &raw_code[config_start..config_start + config_len];
     var_names.into_iter().any(|name| {
         block.contains(&format!("var('{name}'")) || block.contains(&format!("var(\"{name}\""))
     })
+}
+
+/// Byte length of the call starting at `call` (which begins with `config(`),
+/// up to its matching `)`, or `None` when it never closes.
+///
+/// Parentheses nest (`config(alias=upper(var('a')), ...)`), and one inside a
+/// string literal belongs to the string, so the scan balances them outside
+/// quotes. A bare `find(')')` would end the block at the first inner call.
+fn config_call_len(call: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for (idx, c) in call.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -86,6 +112,33 @@ mod tests {
         ));
         assert!(config_block_reads_var(
             "{{ config(schema=var(\"region\")) }}\nselect 1",
+            names.iter()
+        ));
+    }
+
+    #[test]
+    fn config_block_reads_var_sees_past_a_nested_call() {
+        let names = ["region".to_string()];
+        assert!(config_block_reads_var(
+            "{{ config(alias=upper('a'), schema=var('region')) }}\nselect 1",
+            names.iter()
+        ));
+    }
+
+    #[test]
+    fn config_block_reads_var_ignores_parens_inside_strings() {
+        let names = ["region".to_string()];
+        assert!(config_block_reads_var(
+            "{{ config(post_hook=\"select ')'\", schema=var('region')) }}",
+            names.iter()
+        ));
+    }
+
+    #[test]
+    fn config_block_reads_var_stops_at_the_matching_paren() {
+        let names = ["region".to_string()];
+        assert!(!config_block_reads_var(
+            "{{ config(alias=upper('a')) }}\nselect var('region')",
             names.iter()
         ));
     }

@@ -12,11 +12,11 @@ use crate::types::{ExecutionPlan, NodeStatus, NodeStatusTree};
 /// failed dependencies were skipped rather than errored, and `transitive`
 /// selects whether that matters ([`TRANSITIVE_SKIP_PATCH`]).
 ///
-/// `--fail-fast` isn't threaded through here because the caller
-/// (`execute_one_level`) already short-circuits the whole level before this
-/// runs whenever `fail_fast` and a prior failure coincide, so `failed_nodes`
-/// is guaranteed empty in the one case where fail-fast should override this
-/// exemption.
+/// `--fail-fast` isn't threaded through here: the caller (`execute_one_level`)
+/// skips the whole level before this runs whenever fail-fast is in effect and
+/// a failure has been recorded, so a node's `on_error: continue` exemption is
+/// only ever consulted when fail-fast would not have stopped the run anyway.
+/// `failed_nodes` is not empty in that case; it simply never reaches here.
 pub fn is_blocked_by_failed_upstream(
     plan: &ExecutionPlan,
     unique_id: &str,

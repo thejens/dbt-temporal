@@ -81,9 +81,11 @@ pub struct SegmentIdentity {
 
 /// Everything a run segment hands to its successor.
 ///
-/// Stored as JSON in the artifact store rather than passed inline: the plan
-/// alone can reach the manifest-inlining threshold, and accumulated results
-/// grow with every node executed.
+/// The workflow passes this inline as the input of the `save_segment_state`
+/// activity, which writes it to the artifact store as JSON; the continuation
+/// then carries only a reference. That keeps the plan (which alone can reach
+/// the manifest-inlining threshold) and the accumulated results, which grow
+/// with every node executed, out of the new run's start payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSegmentState {
     /// Payload schema version. `0` identifies a checkpoint that carries no

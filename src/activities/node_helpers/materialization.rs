@@ -4,11 +4,16 @@ use std::collections::BTreeMap;
 
 use crate::error::DbtTemporalError;
 
-/// Find a materialization template by searching for a suffix match in the Jinja environment.
-/// Templates are registered with package prefixes (e.g. "dbt_postgres.materialization_view_postgres").
+/// Find a template named `<package>.<suffix>` in the Jinja environment.
 ///
-/// Prefer `MaterializationResolver::find_materialization_macro_by_name()` for production use;
-/// this function is kept for the debug_render example.
+/// Templates are registered with package prefixes (e.g.
+/// "dbt_postgres.materialization_view_postgres"). The first match in the environment's
+/// iteration order wins, so callers that need package precedence must try the package they
+/// prefer explicitly first.
+///
+/// Used by the schema-naming macro lookup and the `debug_render` example. Resolving a node's
+/// materialization goes through `MaterializationResolver::find_materialization_macro_by_name()`
+/// instead, which applies adapter inheritance and package precedence.
 pub fn find_materialization_template(
     jinja_env: &dbt_jinja_utils::jinja_environment::JinjaEnv,
     suffix: &str,

@@ -84,9 +84,10 @@ pub async fn run_project_hooks_outer(
     )
     .await;
 
-    if cancelled {
-        return Err(ActivityError::cancelled());
-    }
+    let result = match cancellable::settle(result, cancelled) {
+        cancellable::Settled::Finished(result) => result,
+        cancellable::Settled::Cancelled => return Err(ActivityError::cancelled()),
+    };
     result.map_err(|e| {
         let patterns = retry::registry_non_retryable_patterns(&activities.registry, &project);
         // An untyped hook failure is a template or SQL problem, not a

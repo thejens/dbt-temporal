@@ -74,10 +74,13 @@ pub async fn execute_node_outer(
     )
     .await;
 
-    if cancelled {
-        super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);
-        return Err(ActivityError::cancelled());
-    }
+    let result = match cancellable::settle(result, cancelled) {
+        cancellable::Settled::Finished(result) => result,
+        cancellable::Settled::Cancelled => {
+            super::node_telemetry::record_outcome(&spans, NodeStatus::Cancelled);
+            return Err(ActivityError::cancelled());
+        }
+    };
 
     match result {
         Ok(result) => {

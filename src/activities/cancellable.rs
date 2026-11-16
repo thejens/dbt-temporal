@@ -59,6 +59,37 @@ where
     (output, cancelled)
 }
 
+/// What an activity reports once its work has been joined.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Settled<T, E> {
+    /// The work ended with this result and it stands, whether or not a
+    /// cancellation arrived while it ran.
+    Finished(Result<T, E>),
+    /// Cancellation was requested and the work did not complete.
+    Cancelled,
+}
+
+/// Decide what a joined activity body is reported as.
+///
+/// Cancellation is a request, and the work is joined rather than dropped, so a
+/// body can finish for real just as the request lands: its SQL committed and
+/// its result is complete. Reporting that as cancelled would make the workflow
+/// treat a built node as unbuilt, and a later `retry_from` would build it
+/// again (duplicate rows for an append-style incremental). So an `Ok` stands.
+/// An `Err` after a cancellation request is, in practice, the interrupted
+/// query surfacing as a warehouse error, and is reported as cancelled instead
+/// of as a failure the retry classifier would act on.
+///
+/// This relies on every body returning `Ok` only when all of its work ran: a
+/// body that swallows an interrupted step and returns a partial `Ok` must turn
+/// that into an `Err` when its token is cancelled.
+pub fn settle<T, E>(result: Result<T, E>, cancel_requested: bool) -> Settled<T, E> {
+    match result {
+        Err(_) if cancel_requested => Settled::Cancelled,
+        result => Settled::Finished(result),
+    }
+}
+
 /// [`run_cancellable`] bound to a Temporal activity.
 ///
 /// Cancellation is the activity's and heartbeats go to its context. `on_cancel`
@@ -118,6 +149,29 @@ mod tests {
         assert!(cancelled);
         assert_eq!(output, "stopped");
         assert!(finished.load(Ordering::SeqCst), "work must run to its own end");
+    }
+
+    #[test]
+    fn an_ok_stands_even_when_cancellation_was_requested() {
+        assert_eq!(settle::<_, &str>(Ok(1), true), Settled::Finished(Ok(1)));
+    }
+
+    #[test]
+    fn an_error_after_a_cancellation_request_is_reported_as_cancelled() {
+        assert_eq!(settle::<(), _>(Err("query interrupted"), true), Settled::Cancelled);
+    }
+
+    #[test]
+    fn an_error_without_a_cancellation_request_is_a_failure() {
+        assert_eq!(
+            settle::<(), _>(Err("syntax error"), false),
+            Settled::Finished(Err("syntax error"))
+        );
+    }
+
+    #[test]
+    fn an_ok_without_a_cancellation_request_stands() {
+        assert_eq!(settle::<_, &str>(Ok(1), false), Settled::Finished(Ok(1)));
     }
 
     #[tokio::test]

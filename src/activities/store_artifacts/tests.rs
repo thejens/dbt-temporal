@@ -389,3 +389,51 @@ async fn store_io_failure_is_classified_retryable() {
     assert!(msg.contains("storing run_results.json"), "context lost: {msg}");
     assert!(msg.contains("503 slow down"), "cause lost: {msg}");
 }
+
+/// A catalog the registry cannot produce (no such project) stands in for a
+/// catalog query that failed.
+fn catalog_failing_setup(base_dir: std::path::PathBuf) -> (DbtActivities, StoreArtifactsInput) {
+    let mut activities = activities_with_local_store(base_dir, false);
+    activities.write_catalog = crate::config::WriteCatalog(true);
+    let input = StoreArtifactsInput {
+        prior_segments: Vec::new(),
+        invocation_id: "inv-catalog".into(),
+        project: Some("missing".to_string()),
+        command: None,
+        node_results: vec![],
+        manifest_json: Some("{}".to_string()),
+        manifest_ref: None,
+        run_log: None,
+        env: BTreeMap::new(),
+        target: None,
+        started_at: None,
+        elapsed_time: 0.0,
+    };
+    (activities, input)
+}
+
+#[tokio::test]
+async fn a_failed_catalog_is_best_effort_when_not_cancelled() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (activities, input) = catalog_failing_setup(dir.path().to_path_buf());
+
+    let out = store_artifacts_inner(&activities, input, &no_cancellation().token()).await?;
+    assert!(out.catalog_path.is_none());
+    Ok(())
+}
+
+/// A catalog interrupted by cancellation must not be reported as a complete
+/// run that happens to lack one.
+#[tokio::test]
+async fn a_catalog_cut_short_by_cancellation_fails_the_activity() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (activities, input) = catalog_failing_setup(dir.path().to_path_buf());
+    let source = no_cancellation();
+    let token = source.token();
+    source.cancel();
+
+    store_artifacts_inner(&activities, input, &token)
+        .await
+        .expect_err("cancelled catalog must fail");
+    Ok(())
+}

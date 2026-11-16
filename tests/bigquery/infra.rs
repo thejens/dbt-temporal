@@ -255,6 +255,7 @@ pub fn bigquery_test_config_with_project_dir(
         write_artifacts: false,
         write_catalog: false,
         artifact_store: artifact_dir.to_string_lossy().to_string(),
+        override_policy: dbt_temporal::config::OverridePolicy::default(),
         search_attributes: std::collections::BTreeMap::default(),
         write_run_log: false,
         worker_tuning: dbt_temporal::config::WorkerTuningConfig::Fixed {

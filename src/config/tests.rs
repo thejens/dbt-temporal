@@ -43,6 +43,8 @@ const ALL_VARS: &[&str] = &[
     "ARTIFACT_STORE",
     "WRITE_RUN_LOG",
     "TEMPORAL_SEARCH_ATTRIBUTES",
+    "ALLOWED_ENV_OVERRIDES",
+    "ALLOWED_TARGETS",
     "WORKER_TUNER",
     "WORKER_STICKY_QUEUE_TIMEOUT_SECS",
     "WORKER_NONSTICKY_TO_STICKY_POLL_RATIO",
@@ -104,6 +106,7 @@ fn from_env_uses_defaults_when_only_project_dir_set() {
         assert_eq!(cfg.artifact_store, "/tmp/dbt-artifacts");
         assert!(cfg.write_run_log);
         assert!(cfg.search_attributes.is_empty());
+        assert_eq!(cfg.override_policy, OverridePolicy::default());
         assert_eq!(cfg.sticky_queue_timeout_secs, 10);
         assert!((cfg.nonsticky_to_sticky_poll_ratio - 0.2).abs() < f32::EPSILON);
         assert!(cfg.max_worker_activities_per_second.is_none());
@@ -508,6 +511,30 @@ fn from_env_propagates_dbt_target_and_profiles() {
             let cfg = DbtTemporalConfig::from_env()?;
             assert_eq!(cfg.dbt_profiles_dir.as_deref(), Some("/profiles"));
             assert_eq!(cfg.dbt_target.as_deref(), Some("prod"));
+            Ok(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn from_env_reads_the_override_allowlists() {
+    let project = make_project_dir();
+    let project_str = project.path().to_str().unwrap();
+    with_env(
+        &env_with_project(
+            project_str,
+            vec![
+                ("ALLOWED_ENV_OVERRIDES", Some("DB_HOST,DB_SCHEMA")),
+                ("ALLOWED_TARGETS", Some("")),
+            ],
+        ),
+        || {
+            let cfg = DbtTemporalConfig::from_env()?;
+            assert_eq!(
+                cfg.override_policy,
+                OverridePolicy::new(Some(&["DB_HOST", "DB_SCHEMA"]), Some(&[]))
+            );
             Ok(())
         },
     )

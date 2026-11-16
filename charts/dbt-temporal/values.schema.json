@@ -105,6 +105,20 @@
         "allowExperimentalAdapters": {
           "type": "boolean"
         },
+        "allowedEnvOverrides": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "allowedTargets": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "profiles": {
           "type": "object",
           "additionalProperties": false,

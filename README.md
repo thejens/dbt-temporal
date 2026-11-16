@@ -150,7 +150,7 @@ For production setups (Temporal Cloud, health checks, graceful shutdown, read-on
 
 - **Multi-project workers.** Load several dbt projects into one worker and pick one per workflow.
 - **Remote project sources.** Fetch projects at startup from git (`git+https://`, `git+ssh://`, pinned to a commit), S3 or GCS, including private repositories.
-- **Per-workflow environment overrides.** Each workflow can override `env_var()` values, including the ones `profiles.yml` reads, so one worker serves many warehouses, schemas or tenants in parallel. See [env overrides](docs/env-overrides.md).
+- **Per-workflow environment overrides.** Each workflow can override `env_var()` values, including the ones `profiles.yml` reads, so one worker serves many warehouses, schemas or tenants in parallel. Anyone who can start a workflow can otherwise redirect the worker's credentials with them, so `ALLOWED_ENV_OVERRIDES` and `ALLOWED_TARGETS` can restrict what a workflow may set. See [env overrides](docs/env-overrides.md#security-restricting-what-a-workflow-can-override).
 - **Lifecycle hooks.** `pre_run`, `on_success` and `on_failure` start arbitrary Temporal child workflows, in any language, for validation, notifications, catalog updates or conditional skipping. See [hooks](docs/hooks.md).
 - **Artifact storage.** `run_results.json`, `manifest.json` and a CLI-style run log on local disk, S3 or GCS.
 - **Observability.** Live node status in workflow memos, per-node activity names in the timeline, search attributes for filtering runs, Prometheus metrics and OpenTelemetry export.

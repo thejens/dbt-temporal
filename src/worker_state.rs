@@ -53,6 +53,10 @@ pub struct WorkerState {
     /// workflow input, for `env_var('_')` in model SQL), so "did the workflow
     /// supply overrides" is always true and cannot decide anything.
     pub profile_env_vars: crate::worker::profile::ProfileEnvVars,
+    /// What a workflow may override: checked before any `env` or `target` of a
+    /// workflow takes effect. Held per project so every place that applies an
+    /// override reaches it through the state it already has.
+    pub override_policy: crate::config::OverridePolicy,
     /// Compiled SQL per node, captured after resolve step.
     /// Keyed by node unique id (e.g. "model.shop.stg_customers"): a project-relative
     /// path is not unique across packages.

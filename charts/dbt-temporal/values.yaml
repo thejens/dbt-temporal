@@ -48,6 +48,15 @@ dbt:
   # the rest, Postgres among them, unless this is on. Sets
   # DBT_ALLOW_EXPERIMENTAL_ADAPTERS.
   allowExperimentalAdapters: false
+  # What a workflow's `env` and `target` may override. null leaves it
+  # unrestricted; a list allows exactly those names; [] allows none. Without a
+  # list, anyone who can start a workflow can point the worker's credentials at
+  # another host through `env` (DB_HOST, an account, a role) or `target`. List
+  # variables that choose data (a schema, a tenant), never ones that choose
+  # where to connect. The default target is always selectable. See
+  # docs/env-overrides.md. Sets ALLOWED_ENV_OVERRIDES / ALLOWED_TARGETS.
+  allowedEnvOverrides: null
+  allowedTargets: null
   profiles:
     # An existing Secret whose `profiles.yml` key holds the profiles file.
     existingSecret: ""

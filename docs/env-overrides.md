@@ -101,6 +101,58 @@ A run's `hooks` field replaces the project's lifecycle hooks for that run.
 Anyone who can start a workflow can therefore run without a hook the project
 configures, so do not rely on a lifecycle hook as an access control.
 
+## Security: restricting what a workflow can override
+
+A workflow's `env` and `target` win over the worker's own environment and
+default target, and the worker authenticates with whatever the resulting
+`profiles.yml` names. Warehouse credentials are best kept in the worker's
+environment (see above), which means the worker presents them to whatever host
+the profile resolves to. **Without a restriction, anyone who can start a
+`dbt_run` workflow can set `DB_HOST` (or an account, role, project, or a
+different `target`) to a server they control, and the worker will send its
+password, token or key to it.** Being allowed to start workflows is therefore
+also being allowed to redirect the worker's credentials.
+
+The restriction is worker-side and off by default, so existing deployments keep
+working. Two optional settings list what a workflow may override:
+
+| Variable | Restricts |
+|----------|-----------|
+| `ALLOWED_ENV_OVERRIDES` | the names in the workflow's `env` |
+| `ALLOWED_TARGETS` | the workflow's `target` |
+
+```bash
+ALLOWED_ENV_OVERRIDES=DB_SCHEMA,TENANT_ID
+ALLOWED_TARGETS=prod,staging
+```
+
+Both take comma-separated, exact names (no patterns; case matters). For each:
+
+- **Unset**: no restriction, as before.
+- **Set to a list**: only those names may appear.
+- **Set to an empty string**: nothing may be overridden.
+
+List the variables that choose *data* (a schema, a tenant id) and leave out
+every variable `profiles.yml` uses to say *where to connect or who to be*: host,
+port, account, role, project, user, credentials. The worker's default target is
+always selectable; `ALLOWED_TARGETS` lists the others.
+
+A run that names anything else is refused, not trimmed: the planning activity
+fails with a configuration error naming the offending keys, and it is not
+retried. Dropping the override and running on would execute the SQL against the
+worker's own warehouse, which is not what the caller asked for. The check
+covers every use of the map — `profiles.yml`, `env_var()` in model SQL and
+macros, hook SQL — and also the `extra_env` a `pre_run` hook returns, which the
+planning activity cannot see; a node or hook that receives a refused key fails
+the same way. The `_` entry, which the worker fills with the serialized input,
+is never refused.
+
+The allowlist limits which names can be set, not the values: a listed name can
+still carry any value. Do not list a name that selects a host or an identity. It
+also does not stop anyone who can start workflows from reading or running
+anything the project itself can do, nor does it replace namespace-level access
+control in Temporal.
+
 ## Known limitations
 
 Per-workflow env overrides work fully for `env_var()` in **profiles.yml**, **model SQL**, and **macros**. The common pattern of setting schema/dataset and database/project in profiles.yml via `env_var()` is fully supported — each workflow gets its own connection, `target` context, and relation metadata. Static custom schemas (e.g. `+schema: staging` in `dbt_project.yml` or `config(schema='staging')` in SQL) are also correctly recomputed against the per-workflow target.

@@ -318,6 +318,7 @@ async fn initialize_project_inner(
         profile_name_in_project,
         default_target,
         profile_env_vars,
+        override_policy: config.override_policy.clone(),
         compiled_sql_cache,
         snapshot_sql_cache,
         test_sql_cache,

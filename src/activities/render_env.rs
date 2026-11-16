@@ -91,6 +91,13 @@ pub fn prepare_render_env(
     adapter_type: dbt_adapter::AdapterType,
     context: &str,
 ) -> Result<RenderEnv, DbtTemporalError> {
+    // The plan activity already refused a caller's own overrides; this is the
+    // one place every activity applies them, and it also sees the env a
+    // `pre_run` hook added, which the plan could not.
+    state
+        .override_policy
+        .check(overrides.env, overrides.target, &state.default_target)?;
+
     let mut jinja_env = (*state.jinja_env).clone();
 
     override_env_var(&mut jinja_env, overrides.env);

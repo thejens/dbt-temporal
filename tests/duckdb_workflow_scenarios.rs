@@ -129,6 +129,7 @@ fn config(project: &Project, temporal_addr: &str, concurrency: u32) -> DbtTempor
         write_artifacts: true,
         write_catalog: project.write_catalog,
         artifact_store: project.artifacts.path().to_string_lossy().to_string(),
+        override_policy: dbt_temporal::config::OverridePolicy::default(),
         search_attributes: BTreeMap::new(),
         write_run_log: true,
         worker_tuning: WorkerTuningConfig::Fixed {

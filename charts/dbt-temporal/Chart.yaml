@@ -4,8 +4,8 @@ description: Run dbt projects as durable Temporal workflows on Kubernetes — th
 type: application
 # Chart and app are released together from one tag, so the two versions move
 # in lockstep; the Release workflow refuses a tag that disagrees with either.
-version: 0.8.0
-appVersion: "0.8.0"
+version: 0.9.0
+appVersion: "0.9.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/thejens/dbt-temporal
 sources:

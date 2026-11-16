@@ -1,6 +1,6 @@
 [package]
 name = "dbt-temporal"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 # The toolchain dbt v2 pins (its rust-toolchain.toml); older ones are untested.
 rust-version = "1.96"

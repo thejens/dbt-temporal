@@ -8,7 +8,7 @@ metrics and a PodDisruptionBudget.
 
 ```bash
 helm install dbt oci://ghcr.io/thejens/charts/dbt-temporal \
-  --version 0.8.0 \
+  --version 0.9.0 \
   --set temporal.address=temporal-frontend.temporal:7233 \
   --set dbt.projectDirs='git+https://github.com/org/dbt-models.git#main' \
   --set dbt.profiles.existingSecret=dbt-profiles

@@ -76,6 +76,16 @@ impl DbtCommand {
         matches!(self, Self::SourceFreshness | Self::Freshness)
     }
 
+    /// Whether a selection that matches nothing ends the run before its
+    /// on-run-start and on-run-end hooks. dbt short-circuits these commands
+    /// when the schedule is empty (`should_skip_tasks_when_no_selected_nodes`
+    /// in `dbt-main/src/compilation.rs`), so hooks that issue warehouse calls
+    /// do not fire for a run with nothing to do. The other commands run their
+    /// hooks regardless.
+    pub const fn skips_hooks_when_nothing_selected(self) -> bool {
+        matches!(self, Self::Run | Self::Test | Self::Build | Self::Seed | Self::Snapshot)
+    }
+
     /// Selects the whole graph rather than one resource type. Only these
     /// commands warn about resource types this worker does not support: the
     /// single-resource commands legitimately ignore everything else.

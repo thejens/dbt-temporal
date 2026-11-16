@@ -727,6 +727,62 @@ fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
     Ok(())
 }
 
+/// As in dbt, a valid selection that matches nothing ends the run successfully
+/// with a warning. dbt runs no hooks for it, so the project's failing
+/// `on-run-start` and `on-run-end` hooks stay silent; the run still writes
+/// `run_results.json` (with no results) and its log carries the warning.
+#[test]
+fn a_selection_that_matches_nothing_completes_successfully() -> Result<()> {
+    let project = write_project_with(
+        &format!("{FAILING_ON_RUN_START}\n{FAILING_ON_RUN_END}"),
+        &[("ok".to_string(), "select 1 as id".to_string())],
+    )?;
+    let mut input = run_input(false);
+    input.select = Some("no_such_model".to_string());
+    input.hooks = Some(HooksConfig {
+        on_success: vec![fire_and_forget("notify_success")],
+        on_failure: vec![fire_and_forget("notify_failure")],
+        ..HooksConfig::default()
+    });
+
+    let (output, events) = scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        let raw = handle
+            .get_result(WorkflowGetResultOptions::default())
+            .await
+            .context("an empty selection should complete")?;
+        let payload = raw
+            .payloads
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no result payload"))?;
+        let output: DbtRunOutput = serde_json::from_slice(&payload.data)?;
+        Ok((output, history_events(&handle).await?))
+    })?;
+
+    assert!(output.success, "{output:?}");
+    assert!(output.node_results.is_empty(), "{output:?}");
+    assert_eq!(status_values(&events), ["running", "passed"]);
+    assert_eq!(child_workflow_types(&events), ["notify_success"]);
+
+    let results = read_run_results(&project)?;
+    assert_eq!(results["results"], serde_json::json!([]));
+    let log_path = output.log_path.context("the run should store its log")?;
+    let log = std::fs::read_to_string(&log_path)?;
+    assert!(
+        log.contains(
+            "WARNING: The selection criterion 'no_such_model' does not match any enabled nodes"
+        ),
+        "{log}"
+    );
+    assert!(
+        log.contains(
+            "WARNING: Nothing to do. Try checking your model configs and model specification args"
+        ),
+        "{log}"
+    );
+    Ok(())
+}
+
 /// Run two models with `hook` as the project's `on-run-end`, and report
 /// whether the run succeeded.
 ///

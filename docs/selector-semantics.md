@@ -150,7 +150,7 @@ a selector tree that contains one is rejected rather than read as an include.
 
 A selector may name a resource type the command cannot execute. The command's
 own node-type filter runs first, so `--select exposure:weekly` under `run`
-narrows to nothing and fails with "no nodes matched" — but `--select
+narrows to nothing and ends as an empty run (see below) — but `--select
 +exposure:weekly` selects the models that exposure is built from, and
 `--select source:raw+` selects everything downstream of a source. Naming a
 non-executable resource as a *graph seed* is the point of supporting these
@@ -163,8 +163,8 @@ matching nothing would hide the typo.
 
 ## Why rejection rather than "matches nothing"
 
-An unevaluable method contributes an empty match set. Alone that surfaces as
-"no nodes matched", but in the two positions that matter it is silent:
+An unevaluable method contributes an empty match set. Alone that would look
+like an empty run, and in the two positions that matter it is silent:
 
 - inside a union (`--select "tag:nightly result:error"`) it drops the nodes the
   second half asked for, and the run reports success having built less than
@@ -173,6 +173,21 @@ An unevaluable method contributes an empty match set. Alone that surfaces as
 
 Both produce a green run with the wrong node set, so the planner fails fast
 instead.
+
+## A selection that matches nothing
+
+As in dbt, a valid selection that matches no node is a warning, not a failure.
+The plan holds no nodes and the workflow completes successfully with
+`success: true`, an empty `run_results.json`, and the warnings in the run log
+and the worker log: `The selection criterion '<select>' does not match any
+enabled nodes`, then `Nothing to do. Try checking your model configs and model
+specification args`. This covers slim CI with `state:modified+` on an unchanged
+project, `seed` on a project without seeds, and `retry_from` after a run that
+left nothing unfinished (which says `retry_from: no selected node errored,
+failed or was skipped in the previous run`). For `run`, `test`, `build`, `seed`
+and `snapshot`, dbt ends such a run before its hooks, so the project's
+`on-run-start` and `on-run-end` hooks do not run; the other commands run them.
+An invalid selector still fails the plan.
 
 ## `indirect_selection`
 

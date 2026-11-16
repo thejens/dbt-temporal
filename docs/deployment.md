@@ -320,6 +320,11 @@ with the reason for it:
 | `failed-on-run-end-fails-the-run` | A failing `on-run-end` hook fails the run |
 | `cancelled-lifecycle-hook-cancels-the-run` | A cancellation that reaches a lifecycle hook ends the run as cancelled, not as a failed hook |
 
+A run whose selection matches nothing ends successfully with an empty plan.
+This needs no marker: a plan with no nodes could not be produced before (the
+plan activity failed), so no recorded history holds one, and the workflow's
+commands for every plan that holds nodes are unchanged.
+
 A change that is not guarded
 this way — reordering activities, adding or removing a phase — makes an
 in-flight run fail on replay with a non-determinism error once it lands on a

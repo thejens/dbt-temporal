@@ -119,9 +119,6 @@ pub fn select_command_node_ids(
     warn_unsupported_resource_types(state, command);
     warn_parse_time_vars(state, &input.vars);
 
-    if selected_ids.is_empty() {
-        anyhow::bail!("no nodes found for command '{}'", input.command);
-    }
     Ok(selected_ids)
 }
 

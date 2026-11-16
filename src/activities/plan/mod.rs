@@ -1,3 +1,4 @@
+mod empty;
 mod manifest;
 mod nodes;
 mod plan_project;

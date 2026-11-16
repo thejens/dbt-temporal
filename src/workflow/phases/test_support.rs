@@ -20,6 +20,7 @@ pub(super) fn empty_plan() -> ExecutionPlan {
         has_on_run_end: false,
         priority_scheduling: false,
         has_project_checks: false,
+        warnings: vec![],
     }
 }
 

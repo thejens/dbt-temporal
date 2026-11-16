@@ -87,6 +87,7 @@ fn sample_state() -> RunSegmentState {
             has_on_run_end: true,
             priority_scheduling: false,
             has_project_checks: true,
+            warnings: vec![],
         },
         all_results: vec![NodeExecutionResult {
             unique_id: "model.p.done".to_string(),

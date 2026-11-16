@@ -83,7 +83,7 @@ pub(super) fn build_freshness_json(
         "results": results,
         "elapsed_time": total.as_secs_f64(),
     });
-    serde_json::to_string_pretty(&artifact).map_err(Into::into)
+    serde_json::to_string(&artifact).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -169,6 +169,20 @@ mod tests {
         assert_eq!(results[0]["resource_type"], "source");
         assert_eq!(results[1]["resource_type"], "model");
         assert_eq!(results[1]["status"], "warn");
+        Ok(())
+    }
+
+    #[test]
+    fn freshness_artifacts_are_written_compact() -> anyhow::Result<()> {
+        let input = freshness_input(
+            "freshness",
+            vec![with_freshness(
+                "source.p.s.orders",
+                "source",
+                FreshnessGrade::Pass,
+            )],
+        );
+        assert!(!build_freshness_json(&input, true)?.contains('\n'));
         Ok(())
     }
 }

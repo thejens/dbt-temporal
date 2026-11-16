@@ -907,12 +907,15 @@ async fn cached_manifest_matches_a_manifest_built_from_scratch_for_each_run() {
         ("downstream", "select id from {{ ref('base') }}"),
     ])
     .await;
-    let state = harness.state();
+    let state = harness.state_arc();
     let resolver_state = &state.resolver_state;
 
+    let for_build = std::sync::Arc::clone(&state);
     let template = state
         .manifest
-        .get_or_build(|| dbt_schemas::schemas::manifest::build_manifest("", resolver_state))
+        .get_or_build(move || {
+            dbt_schemas::schemas::manifest::build_manifest("", &for_build.resolver_state)
+        })
         .await
         .unwrap();
 

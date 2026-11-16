@@ -21,17 +21,42 @@ use tokio::sync::OnceCell;
 ///
 /// Small: a worker is usually deferring to one or two manifests (a production
 /// build, maybe a previous CI run). When a new reference arrives with the cache
-/// full, every manifest already loaded is dropped at once — no recency is
-/// tracked, since the cost of a miss is one decode. Loads in progress are kept,
-/// so their waiters still share them.
+/// full, the least recently used manifest is dropped: every node activity of a
+/// running workflow touches its manifest, so the ones in active use stay and a
+/// miss costs one download and decode only for a reference nobody is using.
+/// Loads in progress are never dropped, so their waiters still share them; if
+/// all entries are mid-load the bound is exceeded by the number of concurrent
+/// loads.
 const MAX_CACHED_MANIFESTS: usize = 4;
 
 type Cell = Arc<OnceCell<Arc<Nodes>>>;
 
+#[derive(Debug)]
+struct Entry {
+    cell: Cell,
+    /// Value of the cache's clock at the last lookup; the smallest is the least
+    /// recently used.
+    last_used: u64,
+}
+
+impl Entry {
+    /// A cell is mid-load exactly when someone besides the map holds it and it
+    /// has no value yet. Failed or abandoned loads have no other holder.
+    fn is_loading(&self) -> bool {
+        !self.cell.initialized() && Arc::strong_count(&self.cell) > 1
+    }
+}
+
+#[derive(Debug, Default)]
+struct State {
+    entries: HashMap<String, Entry>,
+    clock: u64,
+}
+
 /// Defer manifests this worker has already decoded.
 #[derive(Debug, Default)]
 pub struct DeferManifestCache {
-    entries: Mutex<HashMap<String, Cell>>,
+    state: Mutex<State>,
 }
 
 impl DeferManifestCache {
@@ -57,20 +82,37 @@ impl DeferManifestCache {
     }
 
     fn cell(&self, manifest_ref: &str) -> Cell {
-        // The map is consistent between statements, so a poisoned lock is safe
+        // The state is consistent between statements, so a poisoned lock is safe
         // to keep using.
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(cell) = entries.get(manifest_ref) {
-            return Arc::clone(cell);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.clock += 1;
+        let now = state.clock;
+        if let Some(entry) = state.entries.get_mut(manifest_ref) {
+            entry.last_used = now;
+            return Arc::clone(&entry.cell);
         }
-        if entries.len() >= MAX_CACHED_MANIFESTS {
-            // A cell is mid-load exactly when someone besides this map holds it
-            // and it has no value yet. Failed or abandoned loads have no other
-            // holder, so they go too.
-            entries.retain(|_, cell| !cell.initialized() && Arc::strong_count(cell) > 1);
+        while state.entries.len() >= MAX_CACHED_MANIFESTS {
+            let victim = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| !entry.is_loading())
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            match victim {
+                Some(key) => {
+                    state.entries.remove(&key);
+                }
+                None => break,
+            }
         }
         let cell = Cell::default();
-        entries.insert(manifest_ref.to_string(), Arc::clone(&cell));
+        state.entries.insert(
+            manifest_ref.to_string(),
+            Entry {
+                cell: Arc::clone(&cell),
+                last_used: now,
+            },
+        );
         cell
     }
 }
@@ -183,8 +225,35 @@ mod tests {
         for i in 0..MAX_CACHED_MANIFESTS * 3 {
             load(&cache, &format!("run-{i}/manifest.json")).await;
         }
-        let held = cache.entries.lock().expect("not poisoned").len();
+        let held = cache.state.lock().expect("not poisoned").entries.len();
         assert!(held <= MAX_CACHED_MANIFESTS, "held {held}");
+    }
+
+    /// Runs in active use keep touching their manifest, so overflow must drop
+    /// the one nobody has asked for the longest.
+    #[tokio::test]
+    async fn eviction_drops_the_least_recently_used_manifest() {
+        let cache = DeferManifestCache::default();
+        let mut loaded = Vec::new();
+        for i in 0..MAX_CACHED_MANIFESTS {
+            loaded.push(load(&cache, &format!("run-{i}/manifest.json")).await);
+        }
+        // Touch the oldest, making run-1 the least recently used.
+        let touched = load(&cache, "run-0/manifest.json").await;
+        assert!(Arc::ptr_eq(&touched, &loaded[0]));
+        load(&cache, "run-new/manifest.json").await;
+
+        for kept in [0, 2, 3] {
+            let again = cache
+                .get_or_load(&format!("run-{kept}/manifest.json"), || async {
+                    panic!("run-{kept} was evicted")
+                })
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&again, &loaded[kept]));
+        }
+        let reloaded = load(&cache, "run-1/manifest.json").await;
+        assert!(!Arc::ptr_eq(&reloaded, &loaded[1]), "run-1 was the victim");
     }
 
     /// Eviction must not drop a load that is still running, or its waiters and

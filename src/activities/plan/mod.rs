@@ -1,4 +1,5 @@
 mod empty;
+mod graph;
 mod manifest;
 mod nodes;
 mod plan_project;

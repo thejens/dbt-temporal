@@ -7,6 +7,7 @@
 //! cached and each run splices a freshly serialized `metadata` in front of it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use dbt_schemas::schemas::manifest::{DbtManifest, ManifestMetadata};
@@ -73,21 +74,27 @@ impl ManifestTemplate {
 /// Holds a project's [`ManifestTemplate`], built by the first run that needs it.
 #[derive(Debug, Default)]
 pub struct ManifestCache {
-    template: OnceCell<ManifestTemplate>,
+    template: OnceCell<Arc<ManifestTemplate>>,
 }
 
 impl ManifestCache {
     /// The cached template, building it with `build` if no run has yet.
     ///
+    /// Building converts every node of the project and serializes the result,
+    /// so it runs on the dbt pool rather than on the caller's async thread.
     /// Concurrent first calls wait for a single build rather than each doing
     /// the work, and a failed build is not cached, so the next run retries.
     pub async fn get_or_build(
         &self,
-        build: impl FnOnce() -> DbtManifest,
-    ) -> Result<&ManifestTemplate, anyhow::Error> {
+        build: impl FnOnce() -> DbtManifest + Send + 'static,
+    ) -> Result<Arc<ManifestTemplate>, anyhow::Error> {
         self.template
-            .get_or_try_init(|| async { ManifestTemplate::from_manifest(build()) })
+            .get_or_try_init(|| async {
+                crate::dbt_pool::run(move || ManifestTemplate::from_manifest(build()).map(Arc::new))
+                    .await?
+            })
             .await
+            .map(Arc::clone)
     }
 }
 
@@ -170,23 +177,57 @@ mod tests {
     #[tokio::test]
     async fn concurrent_first_runs_build_the_template_once() -> Result<(), anyhow::Error> {
         let cache = ManifestCache::default();
-        let builds = AtomicUsize::new(0);
+        let builds = Arc::new(AtomicUsize::new(0));
         let build = || {
-            builds.fetch_add(1, Ordering::SeqCst);
-            sample_manifest()
+            let builds = Arc::clone(&builds);
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                sample_manifest()
+            }
         };
 
         let (a, b, c) = tokio::join!(
-            cache.get_or_build(build),
-            cache.get_or_build(build),
-            cache.get_or_build(build),
+            cache.get_or_build(build()),
+            cache.get_or_build(build()),
+            cache.get_or_build(build()),
         );
         a?;
         b?;
         c?;
-        cache.get_or_build(build).await?;
+        cache.get_or_build(build()).await?;
 
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// Serializing the project is the expensive part of planning; it must not
+    /// hold the async thread the activity runs on.
+    #[tokio::test]
+    async fn the_template_is_built_on_the_dbt_pool() -> Result<(), anyhow::Error> {
+        let cache = ManifestCache::default();
+        let async_thread = std::thread::current().id();
+        let build_thread = Arc::new(std::sync::Mutex::new(None));
+        let recorded = Arc::clone(&build_thread);
+
+        cache
+            .get_or_build(move || {
+                if let Ok(mut slot) = recorded.lock() {
+                    *slot = Some((
+                        std::thread::current().id(),
+                        std::thread::current().name().map(str::to_owned),
+                    ));
+                }
+                sample_manifest()
+            })
+            .await?;
+
+        let (thread, name) = build_thread
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poisoned"))?
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the build never ran"))?;
+        assert_ne!(thread, async_thread);
+        assert!(name.is_some_and(|n| n.starts_with("dbt-worker")), "ran on the dbt pool");
         Ok(())
     }
 }

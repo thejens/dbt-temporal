@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use bytes::Bytes;
 use temporalio_sdk::activities::ActivityContext;
+use tracing::warn;
 
 use crate::types::{DbtRunInput, ExecutionPlan};
 use crate::worker_state::WorkerState;
@@ -150,6 +151,29 @@ async fn fetch_previous_artifact(
         .map_err(|e| artifact_io_error(e.context(format!("loading {what} from {reference}"))))
 }
 
+/// Fetch the previous manifest `state:` selectors compare against, when the
+/// run's selectors use one.
+///
+/// Loaded up front so a missing `state_manifest_ref` fails with a clear error
+/// instead of silently matching nothing.
+async fn fetch_state_manifest(
+    activities: &DbtActivities,
+    input: &DbtRunInput,
+) -> Result<Option<Bytes>, anyhow::Error> {
+    if !selectors_use_state(input.select.as_deref(), input.exclude.as_deref())? {
+        return Ok(None);
+    }
+    let manifest_ref = input.state_manifest_ref.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "select/exclude use state: methods — set state_manifest_ref to a previous \
+             manifest.json artifact"
+        )
+    })?;
+    fetch_previous_artifact(activities, manifest_ref, "state_manifest_ref", "state manifest")
+        .await
+        .map(Some)
+}
+
 /// Plan activity inner logic — called from DbtActivities::plan_project.
 ///
 /// Planning alternates between artifact-store round-trips, which are awaited
@@ -183,29 +207,7 @@ pub async fn plan_project_inner(
         crate::dbt_pool::run(move || select_command_node_ids(&state, &input)).await??
     };
 
-    // state: selectors compare against a previous manifest, loaded up front so
-    // a missing state_manifest_ref fails with a clear error instead of
-    // silently matching nothing.
-    let state_manifest = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref())?
-    {
-        let manifest_ref = input.state_manifest_ref.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "select/exclude use state: methods — set state_manifest_ref to a previous \
-                 manifest.json artifact"
-            )
-        })?;
-        Some(
-            fetch_previous_artifact(
-                activities,
-                manifest_ref,
-                "state_manifest_ref",
-                "state manifest",
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let state_manifest = fetch_state_manifest(activities, &input).await?;
 
     let selected_ids = {
         let (state, input) = (Arc::clone(&state), Arc::clone(&input));

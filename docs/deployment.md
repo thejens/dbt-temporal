@@ -50,6 +50,8 @@ All config is via environment variables. The important ones:
 | `DBT_TARGET` | | `prod` |
 | `WRITE_ARTIFACTS` | | `true` — write run_results.json, manifest.json, log.txt after each run (default: `false`) |
 | `ARTIFACT_STORE` | | `/data/dbt-artifacts`, `gs://bucket/prefix`, or `s3://bucket/prefix` |
+| `EXTERNAL_PAYLOAD_STORAGE` | | `true` — keep large Temporal payloads out of workflow history, in `ARTIFACT_STORE` (default: `false`), see [Large projects and payload limits](#large-projects-and-payload-limits) |
+| `EXTERNAL_PAYLOAD_THRESHOLD_BYTES` | | `262144` — smallest payload moved to the store (default: the SDK's, 256 KiB; only read when `EXTERNAL_PAYLOAD_STORAGE` is on) |
 | `TEMPORAL_DEPLOYMENT_NAME` | | `dbt-temporal-prod` — enables worker versioning, see [Workflow changes and in-flight runs](#workflow-changes-and-in-flight-runs) |
 | `ALLOWED_ENV_OVERRIDES` | | `DB_SCHEMA,TENANT_ID` — the only names a workflow's `env` may override (unset: any). Set it wherever workflows can be started by someone other than the worker's operators, see [security](env-overrides.md#security-restricting-what-a-workflow-can-override) |
 | `ALLOWED_TARGETS` | | `prod,staging` — the only targets a workflow may select besides the default (unset: any) |
@@ -294,6 +296,140 @@ spec:
 
 Without `WORKER_GRACEFUL_SHUTDOWN_SECS`, a node that outlives
 `terminationGracePeriodSeconds` is killed mid-query rather than cancelled.
+
+## Large projects and payload limits
+
+Temporal rejects a payload of about 2 MiB (2,097,152 bytes), and the Temporal
+server warns well before that. A dbt run keeps several payloads that grow with
+the number of nodes it executes:
+
+| Payload | Where it crosses Temporal |
+|---------|---------------------------|
+| Execution plan (levels and per-node metadata) | Result of the plan activity; carried again inside the lifecycle hook payloads |
+| Run segment state (plan, this segment's node results, log lines) | Input of `save_segment_state` before a continue-as-new |
+| Node results | Input of `store_artifacts` and of the `on-run-end` hook activity |
+| Run output (node results of the final segment) | Workflow result, and the payload of `on_success` / `on_failure` hook child workflows |
+
+Measured on a synthetic project: model ids of about 45 characters, three
+dependencies per node, one result per node with two timing entries, an adapter
+response of four fields and a stored (not inline) compiled-SQL reference, and
+one 120-character log line per node. Sizes are the JSON payload in bytes:
+
+| Nodes | Plan | Segment state | `store_artifacts` input | `on-run-end` input |
+|------:|-----:|--------------:|------------------------:|-------------------:|
+| 1,000 | 0.46 MB | 1.4 MB | 0.88 MB | 0.77 MB |
+| 5,000 | 2.3 MB | 7.0 MB | 4.4 MB | 3.8 MB |
+| 10,000 | 4.6 MB | 14.0 MB | 8.8 MB | 7.7 MB |
+
+That is roughly 460 bytes per node for the plan, 1.4 KB for segment state, 880
+bytes for `store_artifacts` and 770 bytes for `on-run-end`, so the plan reaches
+the limit at about 4,500 nodes and the node-result payloads at 1,500 to 2,700.
+With `WRITE_ARTIFACTS` off, compiled SQL travels inside each node result instead
+of being stored: at 1.5 KB of SQL per node the same payloads reach the limit at
+roughly 750 to 1,000 nodes. Longer unique ids, more dependencies and bigger
+adapter responses all push the limits lower. A segment state holds only its own
+segment's results, so it stays under the limit longer than the 5,000 and 10,000
+node rows suggest; the plan travels whole in every one.
+
+### Externalising payloads
+
+Temporal's Rust SDK can move any payload above a size threshold to a store of
+your choosing and leave a small reference in workflow history. dbt-temporal
+provides a store backed by the same `ARTIFACT_STORE` as run artifacts, so no
+second bucket or set of credentials is needed:
+
+```bash
+EXTERNAL_PAYLOAD_STORAGE=true
+ARTIFACT_STORE=gs://bucket/prefix            # or s3://…
+EXTERNAL_PAYLOAD_THRESHOLD_BYTES=262144      # optional; the SDK default
+```
+
+With the Helm chart, set `externalPayloadStorage.enabled` and
+`artifacts.store` (the chart refuses an empty store, since the default is a
+pod-local path); `WRITE_ARTIFACTS` is independent of this setting.
+
+- Payloads land under `<ARTIFACT_STORE>/_external_payloads/`, one object per
+  payload named by its SHA-256, so storing the same payload again (the SDK
+  does so whenever it replays a workflow) rewrites the same object. The worker
+  only reads objects under that directory, whatever a reference in a
+  workflow input claims.
+- At start-up the worker writes and reads back a test object, so a store that
+  cannot hold payloads stops the worker rather than failing workflow tasks
+  later.
+- A local `ARTIFACT_STORE` works only when every worker replica sees the same
+  directory, because the replica that reads a payload is rarely the one that
+  wrote it. The worker logs a warning for a local path. Use a bucket.
+- Nothing deletes the objects. Keep them at least as long as the Temporal
+  namespace retains workflow history, with a bucket lifecycle rule: a workflow
+  that replays after its payloads are gone cannot proceed. Do not move or
+  rename `ARTIFACT_STORE` while workflows that used it are retained, since
+  references hold the object path.
+- Turn it on before the runs that need it. Turning it off while workflows
+  that stored payloads are still running makes their workflow tasks fail with
+  `[TMPRL1105]` until it is turned back on.
+- The default threshold is the SDK's 256 KiB; payloads below it stay inline.
+  Setting it to `0` offloads every payload.
+
+**What starters and readers must configure.** Starting a workflow works
+without any of this: `DbtRunInput` is small and is never offloaded. Anything
+that *reads* a payload that was offloaded must be able to retrieve it. The
+workflow result (`DbtRunOutput`, which carries the final segment's node
+results) is offloaded when it exceeds the threshold, so a
+Rust client built without a data converter that has external storage fails
+with `[TMPRL1105]` from `get_result` on a large run, and the Temporal CLI and
+UI show the reference JSON instead of the result. Run history is returned as
+stored, references included. A starter in another language needs an
+external-storage driver that reads this layout: driver name
+`dbt-temporal-artifact-store`, claim field `path` holding the object path
+(the object is a protobuf-encoded `Payload`). A starter that only starts
+workflows and polls for completion, or reads `run_results.json` from the
+artifact store, needs nothing. In Rust, build the client with the same
+converter the worker uses:
+
+```rust
+let data_converter = dbt_temporal::worker::temporal::build_data_converter(&config).await?;
+let client = Client::new(
+    connection,
+    ClientOptions::new(&config.temporal_namespace)
+        .data_converter(data_converter)
+        .build(),
+)?;
+```
+
+The `examples/` use the `temporal` CLI, which cannot retrieve payloads, so with
+the setting on their `make submit-*` targets show a reference for any result
+above the threshold.
+
+**This is experimental in the Temporal SDK.** The SDK's own documentation
+marks external storage as experimental and subject to change without notice.
+dbt-temporal enables the SDK's `experimental` feature on `temporalio-common`
+only, which is what carries the storage types; the SDK's other experimental
+surfaces (plugins, interceptors) stay off. The SDK writes the claim data into
+history unencrypted, so object paths are visible to anyone who can read
+history; payload bytes are as protected as the bucket is.
+
+**When the store fails.** Storing happens when a workflow task or an activity
+completes, and retrieval when one is delivered. The SDK does not retry inside
+the store call:
+
+- A workflow task that cannot store fails with the cause
+  `ExternalStorageFailure`, and the server retries the task. The run does
+  not fail, and it makes no progress until the store recovers.
+- An activity that cannot store its result, or retrieve its input, reports a
+  retryable failure, so it re-runs under its retry policy, which re-executes
+  the node, and fails once the attempts are spent.
+- The SDK treats every store failure alike. dbt-temporal adds "permanent
+  failure, retrying will not help" to the error when the cause is one no retry
+  fixes (object missing, access denied), so an operator can tell a stuck
+  workflow that needs intervention from an outage that will clear.
+
+### Alternative: a payload codec
+
+A custom payload codec (for example compression) shrinks every payload without
+an external store. It is supplied the same way, through the data converter on
+the worker and every client, and the SDK applies it before the size threshold.
+dbt-temporal does not ship one. A codec only moves the limit: the payloads
+still grow with the project, and every reader needs the codec as well.
 
 ## Re-deploying on Changes
 

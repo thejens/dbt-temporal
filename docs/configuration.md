@@ -186,6 +186,8 @@ On Kubernetes, the Helm chart's `dbt.git` values wire all of this up from Secret
 | `ARTIFACT_STORE` | `/tmp/dbt-artifacts` | Local path or cloud URL (`gs://…`, `s3://…`). Cloud URLs require the `gcs` or `aws` feature; released packages and images include both. |
 | `WRITE_RUN_LOG` | `true` | Write a CLI-style run log (`log.txt`) to the artifact store alongside `run_results.json` |
 | `WRITE_CATALOG` | `false` | Also generate a partial `catalog.json` (`dbt docs generate` equivalent): per-relation column names and types from the warehouse for every node the run built plus all sources. Table types come from each node's materialization; comments/owner/stats are omitted. Catalog problems are logged but never fail the run. Requires `WRITE_ARTIFACTS=1`. |
+| `EXTERNAL_PAYLOAD_STORAGE` | `false` | Keep large Temporal payloads (plans, run state, node results) out of workflow history by writing them to `ARTIFACT_STORE` and leaving a reference. For projects with thousands of nodes; see [Large projects and payload limits](deployment.md#large-projects-and-payload-limits). Works without `WRITE_ARTIFACTS`. |
+| `EXTERNAL_PAYLOAD_THRESHOLD_BYTES` | SDK default (256 KiB) | Smallest payload moved to the store. Only read when `EXTERNAL_PAYLOAD_STORAGE` is on. |
 
 `ARTIFACT_STORE` accepts the same URL schemes as `DBT_PROJECT_DIRS`. The feature flags matter only when building from source: the released `.deb`, `.rpm` and container images are built with `gcs` and `aws`.
 

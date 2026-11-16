@@ -676,5 +676,6 @@ pub fn build_config(
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     }
 }

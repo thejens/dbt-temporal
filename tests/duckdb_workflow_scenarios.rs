@@ -27,7 +27,9 @@ use temporalio_sdk_core::ephemeral_server::{
     EphemeralExe, EphemeralServer, TemporalDevServerConfig, default_cached_download,
 };
 
-use dbt_temporal::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
+use dbt_temporal::config::{
+    DbtTemporalConfig, ExternalPayloadStorageConfig, TemporalMetricsConfig, WorkerTuningConfig,
+};
 use dbt_temporal::types::{
     DbtRunInput, DbtRunOutput, HookConfig, HookErrorMode, HooksConfig, RunStatusSnapshot,
 };
@@ -148,6 +150,7 @@ fn config(project: &Project, temporal_addr: &str, concurrency: u32) -> DbtTempor
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     }
 }
 
@@ -185,13 +188,30 @@ where
     F: FnOnce(Client, String) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    scenario_with(project, concurrency, None, body)
+}
+
+/// [`scenario`] with external payload storage configured on the worker. The
+/// client gets the same data converter, as any starter reading results must.
+fn scenario_with<T, F, Fut>(
+    project: &Project,
+    concurrency: u32,
+    external_payload_storage: Option<ExternalPayloadStorageConfig>,
+    body: F,
+) -> Result<T>
+where
+    F: FnOnce(Client, String) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
     dbt_temporal::tracing_setup::init_for_tests();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
         let server = start_server().await?;
-        let config = config(project, &server.target, concurrency);
+        let mut config = config(project, &server.target, concurrency);
+        config.external_payload_storage = external_payload_storage;
+        let data_converter = dbt_temporal::worker::temporal::build_data_converter(&config).await?;
         let mut worker = dbt_temporal::worker::build_worker(&config)
             .await
             .context("building worker")?;
@@ -211,8 +231,13 @@ where
             .run_until(async {
                 let url = url::Url::parse(&format!("http://{}", server.target))?;
                 let connection = Connection::connect(ConnectionOptions::new(url).build()).await?;
-                let client = Client::new(connection, ClientOptions::new("default").build())
-                    .map_err(|e| anyhow::anyhow!("creating client: {e}"))?;
+                let client = Client::new(
+                    connection,
+                    ClientOptions::new("default")
+                        .data_converter(data_converter)
+                        .build(),
+                )
+                .map_err(|e| anyhow::anyhow!("creating client: {e}"))?;
                 body(client, task_queue).await
             })
             .await;
@@ -1035,5 +1060,77 @@ fn activities_outside_the_node_loop_carry_a_bounded_retry_policy() -> Result<()>
             policy.non_retryable_error_types
         );
     }
+    Ok(())
+}
+
+/// With a threshold far below the plan's size, the run completes and workflow
+/// history carries references where the large payloads would have been. The
+/// payloads themselves sit in the artifact store, under their own directory.
+#[test]
+fn large_payloads_are_kept_out_of_history() -> Result<()> {
+    const THRESHOLD: usize = 2048;
+    let models: Vec<(String, String)> = (0..60)
+        .map(|i| (format!("m{i:03}"), format!("select {i} as id")))
+        .collect();
+    let project = write_project(&models)?;
+
+    let (output, inline, references) = scenario_with(
+        &project,
+        4,
+        Some(ExternalPayloadStorageConfig {
+            threshold_bytes: Some(THRESHOLD),
+        }),
+        |client, task_queue| async move {
+            let handle = start(&client, &task_queue, false).await?;
+            let raw = handle
+                .get_result(WorkflowGetResultOptions::default())
+                .await
+                .context("waiting for the workflow")?;
+            let payload = raw
+                .payloads
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no result payload"))?;
+            let output: DbtRunOutput = serde_json::from_slice(&payload.data)?;
+
+            // Fetched history is returned as stored, references included.
+            let events = handle
+                .fetch_history(WorkflowFetchHistoryOptions::default())
+                .into_events()
+                .await?;
+            let mut inline = Vec::new();
+            let mut references = 0;
+            for event in events {
+                let payloads = match event.attributes {
+                    Some(Attributes::ActivityTaskScheduledEventAttributes(a)) => {
+                        a.input.map(|p| p.payloads)
+                    }
+                    Some(Attributes::ActivityTaskCompletedEventAttributes(a)) => {
+                        a.result.map(|p| p.payloads)
+                    }
+                    _ => None,
+                };
+                for payload in payloads.unwrap_or_default() {
+                    if payload.metadata.get("messageType").map(Vec::as_slice)
+                        == Some(b"temporal.api.sdk.v1.ExternalStorageReference".as_slice())
+                    {
+                        references += 1;
+                    } else {
+                        inline.push(prost::Message::encoded_len(&payload));
+                    }
+                }
+            }
+            Ok((output, inline, references))
+        },
+    )?;
+
+    assert!(output.success);
+    assert_eq!(output.node_results.len(), 60);
+    assert!(references > 0, "no payload was offloaded");
+    assert!(
+        inline.iter().all(|&size| size < THRESHOLD),
+        "payloads at or above the threshold stayed in history: {inline:?}"
+    );
+    let stored = std::fs::read_dir(project.artifacts.path().join("_external_payloads"))?.count();
+    assert!(stored > 0, "no payload object reached the artifact store");
     Ok(())
 }

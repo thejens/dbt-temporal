@@ -118,8 +118,16 @@ pub async fn connect_and_register(
         .await
         .context("connecting to Temporal server")?;
 
-    let client = Client::new(connection, ClientOptions::new(&config.temporal_namespace).build())
-        .context("creating Temporal client")?;
+    // The worker reads its data converter from the client, so this one setting
+    // covers workflow tasks, activity tasks and the client calls the worker makes.
+    let data_converter = temporal::build_data_converter(config).await?;
+    let client = Client::new(
+        connection,
+        ClientOptions::new(&config.temporal_namespace)
+            .data_converter(data_converter)
+            .build(),
+    )
+    .context("creating Temporal client")?;
 
     // List registered search attributes so we can skip unregistered ones at runtime.
     let registered_attrs =

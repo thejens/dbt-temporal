@@ -377,6 +377,7 @@ pub fn test_config(infra: &SharedInfra, fixture_dir: &Path) -> Result<DbtTempora
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     })
 }
 
@@ -447,6 +448,7 @@ pub fn test_config_env_var_profile(
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     })
 }
 
@@ -523,6 +525,7 @@ pub fn test_config_multi_project(
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     })
 }
 
@@ -965,6 +968,7 @@ pub fn test_config_with_schema(
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     };
 
     Ok((config, schema))

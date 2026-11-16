@@ -44,6 +44,7 @@ fn test_config() -> DbtTemporalConfig {
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     }
 }
 
@@ -261,4 +262,58 @@ fn build_worker_options_applies_optional_rate_limits() {
     assert_eq!(opts.max_worker_activities_per_second, Some(50.0));
     assert_eq!(opts.max_task_queue_activities_per_second, Some(200.0));
     assert_eq!(opts.graceful_shutdown_period, Some(Duration::from_secs(15)));
+}
+
+fn storage_config(
+    artifact_store: &std::path::Path,
+    threshold_bytes: Option<usize>,
+) -> DbtTemporalConfig {
+    DbtTemporalConfig {
+        artifact_store: artifact_store.to_string_lossy().into_owned(),
+        external_payload_storage: Some(crate::config::ExternalPayloadStorageConfig {
+            threshold_bytes,
+        }),
+        ..test_config()
+    }
+}
+
+#[tokio::test]
+async fn data_converter_has_no_external_storage_by_default() -> Result<()> {
+    let converter = build_data_converter(&test_config()).await?;
+    assert!(converter.external_storage().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn data_converter_uses_the_sdk_threshold_unless_overridden() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let default = build_data_converter(&storage_config(dir.path(), None)).await?;
+    let storage = default.external_storage().expect("storage enabled");
+    assert_eq!(storage.payload_size_threshold(), 256 * 1024);
+    assert_eq!(storage.drivers().len(), 1);
+    assert_eq!(storage.drivers()[0].name(), crate::payload_storage::DRIVER_NAME);
+
+    let tiny = build_data_converter(&storage_config(dir.path(), Some(1024))).await?;
+    assert_eq!(
+        tiny.external_storage()
+            .expect("storage enabled")
+            .payload_size_threshold(),
+        1024
+    );
+    Ok(())
+}
+
+/// A store that cannot be written stops start-up, naming the setting that
+/// asked for it.
+#[tokio::test]
+async fn data_converter_fails_fast_when_the_store_is_unusable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("_external_payloads"), b"not a directory")?;
+    let err = build_data_converter(&storage_config(dir.path(), None))
+        .await
+        .unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("EXTERNAL_PAYLOAD_STORAGE"), "{message}");
+    assert!(message.contains(&*dir.path().to_string_lossy()), "{message}");
+    Ok(())
 }

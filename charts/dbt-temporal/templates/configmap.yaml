@@ -12,6 +12,9 @@
 {{- if and .Values.dbt.profiles.existingSecret .Values.dbt.profiles.inline }}
 {{- fail "set dbt.profiles.existingSecret or dbt.profiles.inline, not both" }}
 {{- end }}
+{{- if and .Values.externalPayloadStorage.enabled (not .Values.artifacts.store) }}
+{{- fail "externalPayloadStorage.enabled needs artifacts.store set to a bucket (gs://… or s3://…): payloads are kept there, and a pod-local path is lost with the pod and not shared between replicas" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -58,12 +61,20 @@ data:
   GIT_SSL_CAINFO: {{ printf "/etc/dbt-temporal/git-ca/%s" .Values.dbt.git.caBundle.key | quote }}
   {{- end }}
   WRITE_ARTIFACTS: {{ .Values.artifacts.enabled | toString | quote }}
-  {{- if .Values.artifacts.enabled }}
+  {{- if or .Values.artifacts.enabled .Values.externalPayloadStorage.enabled }}
   {{- with .Values.artifacts.store }}
   ARTIFACT_STORE: {{ . | quote }}
   {{- end }}
+  {{- end }}
+  {{- if .Values.artifacts.enabled }}
   WRITE_CATALOG: {{ .Values.artifacts.catalog | toString | quote }}
   WRITE_RUN_LOG: {{ .Values.artifacts.runLog | toString | quote }}
+  {{- end }}
+  {{- if .Values.externalPayloadStorage.enabled }}
+  EXTERNAL_PAYLOAD_STORAGE: "true"
+  {{- if include "dbt-temporal.isSet" .Values.externalPayloadStorage.thresholdBytes }}
+  EXTERNAL_PAYLOAD_THRESHOLD_BYTES: {{ .Values.externalPayloadStorage.thresholdBytes | int | quote }}
+  {{- end }}
   {{- end }}
   HEALTH_PORT: {{ .Values.health.port | quote }}
   {{- if include "dbt-temporal.isSet" .Values.worker.gracefulShutdownSeconds }}

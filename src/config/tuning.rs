@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{PollerAutoscalingConfig, Secret, TemporalMetricsConfig, WorkerTuningConfig};
+use super::{
+    ExternalPayloadStorageConfig, PollerAutoscalingConfig, Secret, TemporalMetricsConfig,
+    WorkerTuningConfig,
+};
 
 /// Parse `TEMPORAL_SEARCH_ATTRIBUTES` env var as a JSON object of string key-value pairs.
 /// Example: `TEMPORAL_SEARCH_ATTRIBUTES={"env":"prod","team":"data-eng"}`
@@ -155,6 +158,26 @@ fn parse_header_pairs(raw: &str) -> Result<BTreeMap<String, Secret>> {
         headers.insert(k.trim().to_string(), Secret::new(v.trim()));
     }
     Ok(headers)
+}
+
+/// Parse the external payload storage settings.
+///
+/// `EXTERNAL_PAYLOAD_STORAGE` turns it on, `EXTERNAL_PAYLOAD_THRESHOLD_BYTES`
+/// optionally overrides the SDK's offload threshold. The threshold is ignored
+/// while storage is off.
+pub fn parse_external_payload_storage() -> Result<Option<ExternalPayloadStorageConfig>> {
+    let enabled = std::env::var("EXTERNAL_PAYLOAD_STORAGE")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if !enabled {
+        return Ok(None);
+    }
+    let threshold_bytes = parse_optional_env_u64("EXTERNAL_PAYLOAD_THRESHOLD_BYTES")?
+        .map(|bytes| {
+            usize::try_from(bytes)
+                .map_err(|_| anyhow!("EXTERNAL_PAYLOAD_THRESHOLD_BYTES is too large: {bytes}"))
+        })
+        .transpose()?;
+    Ok(Some(ExternalPayloadStorageConfig { threshold_bytes }))
 }
 
 pub fn parse_env_usize(name: &str, default: usize) -> Result<usize> {

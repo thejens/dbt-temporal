@@ -30,6 +30,9 @@ artifacts:
   enabled: true
   store: gs://artifacts/dbt
   catalog: true
+externalPayloadStorage:
+  enabled: true
+  thresholdBytes: 131072
 worker:
   gracefulShutdownSeconds: 600
   tuning:

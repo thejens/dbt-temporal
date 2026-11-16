@@ -197,6 +197,24 @@
         }
       }
     },
+    "externalPayloadStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "thresholdBytes": {
+          "type": [
+            "integer",
+            "null",
+            "string"
+          ],
+          "pattern": "^$|^[0-9]+$",
+          "minimum": 0
+        }
+      }
+    },
     "worker": {
       "type": "object",
       "additionalProperties": false,

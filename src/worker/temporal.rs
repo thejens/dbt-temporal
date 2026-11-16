@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use temporalio_client::Url;
+use temporalio_common::data_converters::{DataConverter, ExternalStorage};
 use temporalio_common::telemetry::TelemetryOptions;
 use temporalio_common::worker::{
     VersioningBehavior, WorkerDeploymentOptions, WorkerDeploymentVersion,
@@ -13,6 +14,8 @@ use temporalio_sdk::runtime::{AutoscalingOptions, PollerBehavior};
 use tracing::info;
 
 use crate::config::{DbtTemporalConfig, TemporalMetricsConfig, WorkerTuningConfig};
+use crate::payload_storage::ArtifactStoreDriver;
+use crate::worker::build_artifact_store;
 
 /// Build `TelemetryOptions` for the Temporal runtime, starting a metrics
 /// exporter when configured.
@@ -146,6 +149,58 @@ pub fn build_tls_options(
             .maybe_client_tls_options(client_tls)
             .build(),
     ))
+}
+
+/// Build the data converter the Temporal client and worker share.
+///
+/// With `EXTERNAL_PAYLOAD_STORAGE` off this is the SDK default, so payloads on
+/// the wire are exactly what they are without the feature. With it on, payloads
+/// above the threshold are written to the artifact store and replaced in
+/// workflow history by a reference.
+///
+/// The store is exercised here, so a location that cannot hold payloads stops
+/// the worker at start-up. Left until the first large payload, the same fault
+/// would fail workflow tasks, which the server retries without ever failing
+/// the run.
+pub async fn build_data_converter(config: &DbtTemporalConfig) -> Result<DataConverter> {
+    let Some(settings) = &config.external_payload_storage else {
+        return Ok(DataConverter::default());
+    };
+
+    let store = build_artifact_store(config)
+        .context("EXTERNAL_PAYLOAD_STORAGE needs a usable ARTIFACT_STORE")?;
+    let driver = ArtifactStoreDriver::new(store);
+    driver.probe().await.with_context(|| {
+        format!(
+            "EXTERNAL_PAYLOAD_STORAGE: cannot write to and read from ARTIFACT_STORE '{}'",
+            config.artifact_store
+        )
+    })?;
+
+    let is_cloud_store =
+        config.artifact_store.starts_with("gs://") || config.artifact_store.starts_with("s3://");
+    if !is_cloud_store {
+        // Retrieval happens on whichever worker picks up the task, which is
+        // rarely the one that stored the payload.
+        tracing::warn!(
+            artifact_store = %config.artifact_store,
+            "external payload storage uses a local directory: it only works while every worker \
+             replica shares that directory, so with more than one replica use a gs:// or s3:// \
+             ARTIFACT_STORE"
+        );
+    }
+
+    let mut storage = ExternalStorage::new(Arc::new(driver))
+        .map_err(|e| anyhow::anyhow!("configuring external payload storage: {e}"))?;
+    if let Some(threshold) = settings.threshold_bytes {
+        storage = storage.with_payload_size_threshold(threshold);
+    }
+    info!(
+        artifact_store = %config.artifact_store,
+        threshold_bytes = storage.payload_size_threshold(),
+        "external payload storage enabled"
+    );
+    Ok(DataConverter::default().with_external_storage(storage))
 }
 
 /// Build a `WorkerOptions` with tuning settings from the config (fully built).

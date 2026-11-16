@@ -6,6 +6,7 @@ pub mod error;
 pub mod health;
 pub mod hooks;
 pub mod model_store;
+pub mod payload_storage;
 pub mod project_registry;
 pub mod tracing_setup;
 pub mod types;

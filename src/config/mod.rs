@@ -111,6 +111,22 @@ pub struct DbtTemporalConfig {
     /// stable now so wiring the handler needs no config change once the SDK ships
     /// handler support.
     pub nexus_enabled: bool,
+    /// Offload large Temporal payloads to the artifact store instead of
+    /// carrying them in workflow history. `None` (default) keeps every payload
+    /// inline. Controlled by `EXTERNAL_PAYLOAD_STORAGE`.
+    pub external_payload_storage: Option<ExternalPayloadStorageConfig>,
+}
+
+/// Settings for offloading large Temporal payloads to the artifact store.
+///
+/// The SDK feature behind this is experimental, so it is opt-in. Payloads are
+/// written to the store named by `ARTIFACT_STORE`, under a prefix of their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalPayloadStorageConfig {
+    /// Smallest encoded payload, in bytes, that is offloaded. `None` leaves the
+    /// SDK's own default (256 KiB) in force. Controlled by
+    /// `EXTERNAL_PAYLOAD_THRESHOLD_BYTES`; `0` offloads every payload.
+    pub threshold_bytes: Option<usize>,
 }
 
 /// How the worker exports Temporal SDK metrics.
@@ -277,6 +293,7 @@ impl DbtTemporalConfig {
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             nexus_enabled: std::env::var("NEXUS_ENABLED")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
+            external_payload_storage: tuning::parse_external_payload_storage()?,
         })
     }
 }

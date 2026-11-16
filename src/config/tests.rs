@@ -65,6 +65,8 @@ const ALL_VARS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "TEMPORAL_PRIORITY_SCHEDULING",
     "NEXUS_ENABLED",
+    "EXTERNAL_PAYLOAD_STORAGE",
+    "EXTERNAL_PAYLOAD_THRESHOLD_BYTES",
 ];
 
 fn make_project_dir() -> tempfile::TempDir {
@@ -538,5 +540,75 @@ fn from_env_reads_the_override_allowlists() {
             Ok(())
         },
     )
+    .unwrap();
+}
+
+#[test]
+fn from_env_external_payload_storage_is_off_by_default() {
+    let project = make_project_dir();
+    let project_str = project.path().to_str().unwrap();
+    // A threshold alone must not switch the feature on.
+    let vars =
+        env_with_project(project_str, vec![("EXTERNAL_PAYLOAD_THRESHOLD_BYTES", Some("1024"))]);
+    with_env(&vars, || {
+        assert_eq!(DbtTemporalConfig::from_env()?.external_payload_storage, None);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn from_env_external_payload_storage_parses_flag_and_threshold() {
+    let project = make_project_dir();
+    let project_str = project.path().to_str().unwrap();
+    for raw in ["1", "true", "TRUE"] {
+        let vars = env_with_project(project_str, vec![("EXTERNAL_PAYLOAD_STORAGE", Some(raw))]);
+        with_env(&vars, || {
+            assert_eq!(
+                DbtTemporalConfig::from_env()?.external_payload_storage,
+                Some(ExternalPayloadStorageConfig {
+                    threshold_bytes: None
+                }),
+                "raw={raw}"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+    let vars = env_with_project(
+        project_str,
+        vec![
+            ("EXTERNAL_PAYLOAD_STORAGE", Some("true")),
+            ("EXTERNAL_PAYLOAD_THRESHOLD_BYTES", Some("0")),
+        ],
+    );
+    with_env(&vars, || {
+        assert_eq!(
+            DbtTemporalConfig::from_env()?.external_payload_storage,
+            Some(ExternalPayloadStorageConfig {
+                threshold_bytes: Some(0)
+            })
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn from_env_external_payload_threshold_rejects_garbage() {
+    let project = make_project_dir();
+    let project_str = project.path().to_str().unwrap();
+    let vars = env_with_project(
+        project_str,
+        vec![
+            ("EXTERNAL_PAYLOAD_STORAGE", Some("true")),
+            ("EXTERNAL_PAYLOAD_THRESHOLD_BYTES", Some("lots")),
+        ],
+    );
+    with_env(&vars, || {
+        let err = DbtTemporalConfig::from_env().unwrap_err();
+        assert!(format!("{err:#}").contains("EXTERNAL_PAYLOAD_THRESHOLD_BYTES"), "{err:#}");
+        Ok(())
+    })
     .unwrap();
 }

@@ -274,6 +274,7 @@ pub fn bigquery_test_config_with_project_dir(
         temporal_metrics: TemporalMetricsConfig::None,
         priority_scheduling: false,
         nexus_enabled: false,
+        external_payload_storage: None,
     })
 }
 

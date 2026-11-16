@@ -94,6 +94,17 @@ artifacts:
   catalog: false
   runLog: true
 
+# Keep large Temporal payloads (the execution plan, node results) out of
+# workflow history by writing them to `artifacts.store`, which must be set to a
+# bucket. Experimental in the Temporal SDK, so off by default. Anything that
+# starts these workflows or reads their results must enable it too; see
+# docs/deployment.md "Large projects and payload limits".
+externalPayloadStorage:
+  enabled: false
+  # Smallest payload, in bytes, that is moved to the store. Empty keeps the
+  # SDK default (262144).
+  thresholdBytes: null
+
 worker:
   # After SIGTERM, how long in-flight activities may run before they are
   # cancelled and retried on another worker. New work stops at the signal.

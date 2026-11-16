@@ -162,6 +162,8 @@ connections; the health port is for the kubelet's probes.
 | `artifacts.enabled` | `false` | Write `run_results.json`, `manifest.json` and the run log. |
 | `artifacts.store` | `""` | `gs://…` / `s3://…`. A local path is lost with the pod. |
 | `artifacts.catalog` / `.runLog` | `false` / `true` | |
+| `externalPayloadStorage.enabled` | `false` | Keep large Temporal payloads out of workflow history, in `artifacts.store` (required, a bucket). Experimental in the SDK; clients must enable it too, see [deployment](../../docs/deployment.md#large-projects-and-payload-limits). |
+| `externalPayloadStorage.thresholdBytes` | `null` | Smallest payload moved to the store. `null` keeps the SDK default (256 KiB). |
 | `worker.gracefulShutdownSeconds` | `300` | Drain window after SIGTERM. `null` waits forever, and then requires `worker.terminationGracePeriodSeconds`. |
 | `worker.terminationGraceBufferSeconds` | `60` | Added to the drain for the pod deadline. |
 | `worker.terminationGracePeriodSeconds` | `null` | Overrides the computed deadline. |

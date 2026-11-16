@@ -10,7 +10,7 @@ use crate::types::{
 };
 
 use super::super::DbtRunWorkflow;
-use super::super::helpers::ON_RUN_END_FAILS_RUN_PATCH;
+use super::super::helpers::{ON_RUN_END_FAILS_RUN_PATCH, activity_error_message};
 use super::activity_options::{HookPolicy, activity_failure, hook_activity_options};
 
 /// Build the input for `run_project_hooks` (on-run-start or on-run-end).
@@ -113,11 +113,14 @@ pub async fn run_on_run_end(
     if fails_run && matches!(e, temporalio_sdk::ActivityExecutionError::Cancelled(_)) {
         return Err(WorkflowTermination::cancelled());
     }
-    tracing::error!(error = %e, fails_run, "on-run-end hook failed");
+    // The hook's own error rides in the failure's cause chain; `Display` alone
+    // says only that the activity task failed.
+    let message = activity_error_message(&e);
+    tracing::error!(error = %message, fails_run, "on-run-end hook failed");
     hook_errors.push(HookError {
         hook_workflow_type: "on_run_end".to_string(),
         event: "on_run_end".to_string(),
-        error: e.to_string(),
+        error: message,
     });
     Ok(fails_run)
 }

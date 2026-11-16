@@ -6,6 +6,7 @@
 
 mod activity_errors;
 mod blocking;
+mod cancellation;
 mod clock;
 mod labels;
 mod log_lines;
@@ -21,6 +22,7 @@ pub use self::activity_errors::{activity_error_message, short_activity_error};
 pub use self::blocking::{
     dep_continues_on_error, failure_blocks_dependents, is_blocked_by_failed_upstream,
 };
+pub use self::cancellation::hook_failure_is_cancellation;
 pub use self::clock::{RunClock, RunFacts, elapsed_secs};
 pub use self::labels::{format_activity_id, format_activity_label, node_label};
 pub use self::log_lines::{

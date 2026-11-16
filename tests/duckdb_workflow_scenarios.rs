@@ -581,6 +581,80 @@ fn cancelling_outside_the_node_loop_ends_the_run_as_cancelled() -> Result<()> {
     Ok(())
 }
 
+/// An awaited hook on a queue nobody serves: its child workflow starts and
+/// then runs until the parent gives up on it.
+fn blocking_hook(workflow_type: &str, on_error: HookErrorMode) -> HookConfig {
+    HookConfig {
+        workflow_type: workflow_type.to_string(),
+        task_queue: "no-worker-listens-here".to_string(),
+        timeout_secs: Some(600),
+        on_error,
+        input: None,
+        fire_and_forget: false,
+    }
+}
+
+/// Run `input` against a one-model project, cancel it `after` it starts, and
+/// report the history of the cancelled workflow.
+fn cancel_while_hook_runs(
+    input: DbtRunInput,
+    after: std::time::Duration,
+) -> Result<Vec<temporalio_common::protos::temporal::api::history::v1::HistoryEvent>> {
+    let project = write_project(&[("ok".to_string(), "select 1 as id".to_string())])?;
+    scenario(&project, 2, |client, task_queue| async move {
+        let handle = start_with(&client, &task_queue, input).await?;
+        tokio::time::sleep(after).await;
+        handle.cancel(WorkflowCancelOptions::default()).await?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_mins(1),
+            handle.get_result(WorkflowGetResultOptions::default()),
+        )
+        .await
+        .context("the cancelled workflow did not end")?;
+        assert!(
+            matches!(result, Err(WorkflowGetResultError::Cancelled { .. })),
+            "expected cancellation: {result:?}"
+        );
+        history_events(&handle).await
+    })
+}
+
+/// A cancellation that reaches a `pre_run` hook ends the run as cancelled
+/// instead of failing it for the hook's sake, and the failure hooks stay quiet.
+#[test]
+fn cancelling_during_a_pre_run_hook_ends_the_run_as_cancelled() -> Result<()> {
+    let mut input = run_input(false);
+    input.hooks = Some(HooksConfig {
+        pre_run: vec![blocking_hook("slow_pre_run", HookErrorMode::Fail)],
+        on_failure: vec![fire_and_forget("notify_failure")],
+        ..HooksConfig::default()
+    });
+
+    let events = cancel_while_hook_runs(input, std::time::Duration::from_secs(3))?;
+
+    assert_eq!(status_values(&events), ["running", "cancelled"]);
+    assert_eq!(child_workflow_types(&events), ["slow_pre_run"]);
+    Ok(())
+}
+
+/// `warn` lets a hook fail without consequence, but a cancellation is not the
+/// hook failing: the run must not carry on and report a completed run.
+#[test]
+fn cancelling_during_a_warn_mode_post_run_hook_ends_the_run_as_cancelled() -> Result<()> {
+    let mut input = run_input(false);
+    input.hooks = Some(HooksConfig {
+        on_success: vec![blocking_hook("slow_on_success", HookErrorMode::Warn)],
+        on_failure: vec![fire_and_forget("notify_failure")],
+        ..HooksConfig::default()
+    });
+
+    let events = cancel_while_hook_runs(input, std::time::Duration::from_secs(8))?;
+
+    assert_eq!(status_values(&events).last().map(String::as_str), Some("cancelled"));
+    assert_eq!(child_workflow_types(&events), ["slow_on_success"]);
+    Ok(())
+}
+
 const FAILING_ON_RUN_END: &str = "on-run-end:\n  - \"select from from\"";
 
 /// A fire-and-forget hook of `workflow_type`, which needs no worker to listen.
@@ -639,6 +713,9 @@ fn a_failing_on_run_end_hook_fails_the_run() -> Result<()> {
             matches!(result, Err(WorkflowGetResultError::Failed(_))),
             "the run should fail: {result:?}"
         );
+        // The failure names what the hook did wrong, not just that the
+        // activity task failed.
+        assert!(format!("{result:?}").contains("syntax error"), "{result:?}");
         history_events(&handle).await
     })?;
 

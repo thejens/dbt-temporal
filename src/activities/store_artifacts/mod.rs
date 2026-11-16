@@ -62,9 +62,10 @@ pub async fn store_artifacts_outer(
         store_artifacts_inner(activities, input, &token),
     )
     .await;
-    if cancelled {
-        return Err(ActivityError::cancelled());
-    }
+    let result = match cancellable::settle(result, cancelled) {
+        cancellable::Settled::Finished(result) => result,
+        cancellable::Settled::Cancelled => return Err(ActivityError::cancelled()),
+    };
     result.map_err(|e| {
         warn!(error = %format!("{e:#}"), "store_artifacts failed");
         let patterns = project
@@ -154,6 +155,10 @@ pub async fn store_artifacts_inner(
                 info!(path = %path, "stored catalog.json");
                 Some(path)
             }
+            // A catalog cut short by cancellation is incomplete work, not a
+            // best-effort miss: failing lets the caller report the activity as
+            // cancelled instead of as a finished run that lacks its catalog.
+            Err(e) if cancellation.is_cancelled() => return Err(e),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "catalog.json generation failed (non-fatal)");
                 None

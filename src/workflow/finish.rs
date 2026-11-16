@@ -221,8 +221,20 @@ async fn finish_executed(
         mut hook_errors,
     } = run;
 
+    // Artifacts are stored by now, so a cancellation that reaches a post-run
+    // hook has nothing left to save: the run ends as cancelled, as it would
+    // had the cancellation arrived a moment earlier.
     let success =
-        run_post_hooks(ctx, input, &plan, &hooks, &output, output.success, &mut hook_errors).await;
+        match run_post_hooks(ctx, input, &plan, &hooks, &output, output.success, &mut hook_errors)
+            .await
+        {
+            Ok(success) => success,
+            Err(cancelled) => {
+                upsert_terminal_status(ctx, Some(&plan), RunOutcome::Cancelled)?;
+                ctx.set_current_details("cancelled".to_string());
+                return Err(cancelled);
+            }
+        };
 
     output.success = success;
     output.hook_errors = hook_errors;
@@ -269,7 +281,9 @@ fn run_failure_message(error_count: usize, hook_errors: &[HookError]) -> String 
 /// line.
 ///
 /// The failure hooks are best-effort: whatever they report is logged by
-/// `run_post_hooks` and does not replace the failure being finished.
+/// `run_post_hooks` and does not replace the failure being finished. A
+/// cancellation that reaches them abandons the rest of them, and the run still
+/// ends as the failure it already was.
 async fn fail_run(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
@@ -290,7 +304,12 @@ async fn fail_run(
             });
         let snapshot =
             failure_snapshot(plan, results, partial, elapsed_secs(start, ctx.workflow_time()));
-        run_post_hooks(ctx, input, plan, hooks, &snapshot, false, &mut Vec::new()).await;
+        if run_post_hooks(ctx, input, plan, hooks, &snapshot, false, &mut Vec::new())
+            .await
+            .is_err()
+        {
+            tracing::warn!("cancelled while the failure hooks ran; the run ends as failed");
+        }
     }
     upsert_terminal_status(ctx, Some(plan), RunOutcome::Failed)?;
     ctx.set_current_details(failure_details(failure));

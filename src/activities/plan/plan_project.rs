@@ -1,25 +1,19 @@
 //! The plan activity: select, order and describe the nodes of one run.
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use bytes::Bytes;
 use temporalio_sdk::activities::ActivityContext;
-use tracing::{info, warn};
 
-use crate::types::{DbtCommand, DbtRunInput, ExecutionPlan};
+use crate::types::{DbtRunInput, ExecutionPlan};
+use crate::worker_state::WorkerState;
 
 use super::super::DbtActivities;
-use super::super::dag::{
-    build_dependency_map, independent_nodes, inject_test_gates, inject_unit_test_gates,
-    topological_levels,
-};
-use super::super::indirect::{IndirectSelection, expand_indirect_selection};
-use super::super::selectors::{StateSelector, apply_selectors, selectors_use_state};
-use super::empty::{hooks_skipped, narrow_to_retry, nothing_selected_warnings};
-use super::nodes::build_node_info;
-use super::priorities::compute_priorities;
-use super::retry::parse_retry_node_ids;
+use super::super::indirect::IndirectSelection;
+use super::super::selectors::selectors_use_state;
+use super::empty::{hooks_skipped, nothing_selected_warnings};
+use super::graph::{PlannedGraph, filter_selection, plan_graph};
 use super::search_attributes::build_search_attributes;
 use super::select::select_command_node_ids;
 
@@ -97,7 +91,7 @@ fn validate_microbatch_window(input: &DbtRunInput) -> Result<(), anyhow::Error> 
 /// write artifacts without one cannot finish anyway. Failing here surfaces it
 /// before a single node executes.
 async fn store_manifest_json(
-    artifact_store: Option<&std::sync::Arc<dyn crate::artifact_store::ArtifactStore>>,
+    artifact_store: Option<&Arc<dyn crate::artifact_store::ArtifactStore>>,
     invocation_id: &str,
     manifest_json: String,
 ) -> Result<String, anyhow::Error> {
@@ -110,14 +104,67 @@ async fn store_manifest_json(
         .map_err(|e| artifact_io_error(e.context("storing manifest.json")))
 }
 
+/// Render this run's manifest and store it, returning its reference.
+async fn store_run_manifest(
+    activities: &DbtActivities,
+    state: &Arc<WorkerState>,
+    invocation_id: &str,
+) -> Result<String, anyhow::Error> {
+    let for_build = Arc::clone(state);
+    let template = state
+        .manifest
+        .get_or_build(move || {
+            dbt_schemas::schemas::manifest::build_manifest("", &for_build.resolver_state)
+        })
+        .await?;
+    // The body is tens of megabytes on a large project: copying it into the
+    // run's document is not work for an async thread either.
+    let run_id = invocation_id.to_owned();
+    let manifest_json = crate::dbt_pool::run(move || {
+        template.render(
+            &run_id,
+            chrono::Utc::now(),
+            dbt_common::constants::collect_dbt_custom_envs(),
+        )
+    })
+    .await??;
+    store_manifest_json(activities.artifact_store.as_ref(), invocation_id, manifest_json).await
+}
+
+/// Fetch a previous run's artifact the plan depends on.
+async fn fetch_previous_artifact(
+    activities: &DbtActivities,
+    reference: &str,
+    needed_for: &str,
+    what: &str,
+) -> Result<Bytes, anyhow::Error> {
+    let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{needed_for} requires artifact storage to be configured \
+             (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+        )
+    })?;
+    artifact_store
+        .retrieve(reference)
+        .await
+        .map_err(|e| artifact_io_error(e.context(format!("loading {what} from {reference}"))))
+}
+
 /// Plan activity inner logic — called from DbtActivities::plan_project.
-#[allow(clippy::too_many_lines)]
+///
+/// Planning alternates between artifact-store round-trips, which are awaited
+/// here, and CPU work over the whole project, which runs on the dbt pool: on a
+/// large project selection, the DAG build and manifest serialization each take
+/// long enough to stall the tokio worker thread, and with it the heartbeats and
+/// workflow tasks of everything else on this worker. The activity sets no
+/// heartbeat of its own because the workflow gives it only a start-to-close
+/// timeout.
 pub async fn plan_project_inner(
     activities: &DbtActivities,
     ctx: &ActivityContext,
     input: DbtRunInput,
 ) -> Result<ExecutionPlan, anyhow::Error> {
-    let state = activities.registry.get(input.project.as_deref())?;
+    let state = Arc::clone(activities.registry.get(input.project.as_deref())?);
 
     let invocation_id = ctx
         .info()
@@ -126,73 +173,47 @@ pub async fn plan_project_inner(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     validate_microbatch_window(&input)?;
+    // The mode is parsed up front so an unrecognised value is rejected before
+    // any graph work, and on every run rather than only on filtered ones.
+    let indirect_mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
+    let input = Arc::new(input);
 
-    let selected_ids = select_command_node_ids(state, &input)?;
-    // The command's own node-type filter bounds what indirect selection may
-    // add later: `run` never executes tests, so it must never gain any.
-    let command_eligible: std::collections::BTreeSet<String> =
-        selected_ids.iter().cloned().collect();
+    let selected_ids = {
+        let (state, input) = (Arc::clone(&state), Arc::clone(&input));
+        crate::dbt_pool::run(move || select_command_node_ids(&state, &input)).await??
+    };
 
     // state: selectors compare against a previous manifest, loaded up front so
     // a missing state_manifest_ref fails with a clear error instead of
     // silently matching nothing.
-    let state_selector = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref())?
+    let state_manifest = if selectors_use_state(input.select.as_deref(), input.exclude.as_deref())?
     {
-        let manifest_ref = input.state_manifest_ref.as_ref().ok_or_else(|| {
+        let manifest_ref = input.state_manifest_ref.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
                 "select/exclude use state: methods — set state_manifest_ref to a previous \
                  manifest.json artifact"
             )
         })?;
-        let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "state_manifest_ref requires artifact storage to be configured \
-                 (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+        Some(
+            fetch_previous_artifact(
+                activities,
+                manifest_ref,
+                "state_manifest_ref",
+                "state manifest",
             )
-        })?;
-        let bytes = artifact_store.retrieve(manifest_ref).await.map_err(|e| {
-            artifact_io_error(e.context(format!("loading state manifest from {manifest_ref}")))
-        })?;
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&bytes).context("parsing state manifest JSON")?;
-        Some(StateSelector::from_previous_manifest(&state.resolver_state.nodes, &manifest))
+            .await?,
+        )
     } else {
         None
     };
 
-    // Apply --select/--exclude, pulling in the tests hanging off what --select
-    // matched in between. Without that expansion `--select my_model` runs the
-    // model and silently skips every test on it; running it before --exclude
-    // is what keeps an explicitly excluded test excluded.
-    //
-    // `apply_selectors` returns early when neither filter is set, so the
-    // expansion never runs for an unfiltered `build` — which already contains
-    // every test.
-    //
-    // The mode is parsed up front so an unrecognised value is rejected before
-    // any graph work, and on every run rather than only on filtered ones.
-    let indirect_mode = parse_indirect_selection(input.indirect_selection.as_deref())?;
-    let nodes = &state.resolver_state.nodes;
-    let selected_ids = apply_selectors(
-        selected_ids,
-        nodes,
-        input.select.as_deref(),
-        input.exclude.as_deref(),
-        state_selector.as_ref(),
-        &|ids, maps| {
-            let before = ids.len();
-            let expanded =
-                expand_indirect_selection(ids, nodes, maps, &command_eligible, indirect_mode);
-            if expanded.len() > before {
-                info!(
-                    added = expanded.len() - before,
-                    mode = ?indirect_mode,
-                    "indirect selection added tests for the selected nodes"
-                );
-            }
-            expanded
-        },
-    )?;
+    let selected_ids = {
+        let (state, input) = (Arc::clone(&state), Arc::clone(&input));
+        crate::dbt_pool::run(move || {
+            filter_selection(&state, &input, indirect_mode, selected_ids, state_manifest.as_deref())
+        })
+        .await??
+    };
 
     // An empty selection is not an error, as in dbt: the plan simply holds no
     // nodes and `nothing_selected_warnings` says so. Everything above that can
@@ -200,71 +221,32 @@ pub async fn plan_project_inner(
     // has already run, so only a valid selection that matches nothing gets here.
     let selected_before_retry = selected_ids.len();
 
-    // Retry-from-failure: narrow the selection to the nodes `dbt retry` would
-    // re-run from a previous run (errored, failed and skipped ones; skipped
-    // nodes were blocked by a failure).
-    let selected_ids = if let Some(ref retry_ref) = input.retry_from {
-        let artifact_store = activities.artifact_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "retry_from requires artifact storage to be configured \
-                 (set ARTIFACT_STORE and WRITE_ARTIFACTS)"
+    let previous_run_results = match input.retry_from.as_deref() {
+        Some(retry_ref) => Some(
+            fetch_previous_artifact(activities, retry_ref, "retry_from", "previous run_results")
+                .await?,
+        ),
+        None => None,
+    };
+
+    let priority_scheduling = activities.priority_scheduling.0;
+    let PlannedGraph {
+        levels,
+        nodes,
+        selected,
+    } = {
+        let (state, input) = (Arc::clone(&state), Arc::clone(&input));
+        crate::dbt_pool::run(move || {
+            plan_graph(
+                &state,
+                &input,
+                selected_ids,
+                previous_run_results.as_deref(),
+                priority_scheduling,
             )
-        })?;
-        let bytes = artifact_store.retrieve(retry_ref).await.map_err(|e| {
-            artifact_io_error(e.context(format!("loading previous run_results from {retry_ref}")))
-        })?;
-        let retry_ids = parse_retry_node_ids(&bytes)?;
-        let filtered = narrow_to_retry(selected_ids, &retry_ids);
-        warn!(
-            retrying = filtered.len(),
-            from = %retry_ref,
-            "retry_from: narrowed plan to nodes that errored, failed or were skipped previously"
-        );
-        filtered
-    } else {
-        selected_ids
+        })
+        .await??
     };
-
-    // Compute topological levels from the dependency graph.
-    // Tests act as gates: non-test downstream nodes must wait for all tests on their
-    // upstream model to pass before starting. If a test fails, downstreams are skipped.
-    //
-    // The freshness commands are the exception: they have no task graph at all,
-    // so every measured node goes into one level.
-    let deps = if DbtCommand::parse(&input.command).is_some_and(DbtCommand::is_freshness) {
-        independent_nodes(&selected_ids)
-    } else {
-        let mut deps = build_dependency_map(&state.resolver_state.nodes, &selected_ids);
-        // Unit test rewiring must run before data-test gates so unit tests
-        // inherit the tested model's original inputs, not gate edges.
-        inject_unit_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
-        inject_test_gates(&state.resolver_state.nodes, &selected_ids, &mut deps);
-        deps
-    };
-    let levels = topological_levels(&deps)?;
-
-    // Priority keys from critical-path depth: nodes with longer downstream
-    // chains block more of the run, so they get higher priority when activity
-    // slots are scarce.
-    let priorities = if activities.priority_scheduling.0 {
-        compute_priorities(&levels, &deps)
-    } else {
-        BTreeMap::new()
-    };
-
-    // Build NodeInfo for each selected node, using the computed deps (which include
-    // test gates and ephemeral promotions) so the workflow's skip logic is correct.
-    let mut nodes = BTreeMap::new();
-    for unique_id in &selected_ids {
-        if let Some(mut info) = build_node_info(&state.resolver_state.nodes, unique_id) {
-            // Override depends_on with the computed deps (includes test gates).
-            if let Some(computed_deps) = deps.get(unique_id) {
-                info.depends_on = computed_deps.iter().cloned().collect();
-            }
-            info.priority = priorities.get(unique_id).copied();
-            nodes.insert(unique_id.clone(), info);
-        }
-    }
 
     let write_artifacts = activities.write_artifacts.0;
 
@@ -272,21 +254,7 @@ pub async fn plan_project_inner(
     // hundreds of KB (especially with adapter macro packages) and nothing else
     // in the run needs it.
     let manifest_ref = if write_artifacts {
-        let template = state
-            .manifest
-            .get_or_build(|| {
-                dbt_schemas::schemas::manifest::build_manifest("", &state.resolver_state)
-            })
-            .await?;
-        let manifest_json = template.render(
-            &invocation_id,
-            chrono::Utc::now(),
-            dbt_common::constants::collect_dbt_custom_envs(),
-        )?;
-        Some(
-            store_manifest_json(activities.artifact_store.as_ref(), &invocation_id, manifest_json)
-                .await?,
-        )
+        Some(store_run_manifest(activities, &state, &invocation_id).await?)
     } else {
         None
     };
@@ -300,14 +268,14 @@ pub async fn plan_project_inner(
         &activities.registered_attrs.0,
     );
 
-    let warnings = nothing_selected_warnings(&input, selected_before_retry, selected_ids.len());
+    let warnings = nothing_selected_warnings(&input, selected_before_retry, selected);
     for line in &warnings {
         warn!("{line}");
     }
 
     // dbt runs no hooks for an empty selection of these commands; see
     // `DbtCommand::skips_hooks_when_nothing_selected`.
-    let hooks_skipped = hooks_skipped(&input.command, selected_ids.len());
+    let hooks_skipped = hooks_skipped(&input.command, selected);
     let has_on_run_start =
         !hooks_skipped && !state.resolver_state.operations.on_run_start.is_empty();
     let has_on_run_end = !hooks_skipped && !state.resolver_state.operations.on_run_end.is_empty();
@@ -327,7 +295,7 @@ pub async fn plan_project_inner(
         write_artifacts,
         has_on_run_start,
         has_on_run_end,
-        priority_scheduling: activities.priority_scheduling.0,
+        priority_scheduling,
         has_project_checks,
         warnings,
     })
@@ -409,9 +377,8 @@ mod tests {
     #[tokio::test]
     async fn store_manifest_json_writes_to_the_store_and_returns_its_reference() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store: std::sync::Arc<dyn crate::artifact_store::ArtifactStore> = std::sync::Arc::new(
-            crate::artifact_store::LocalArtifactStore::new(dir.path().to_path_buf()),
-        );
+        let store: Arc<dyn crate::artifact_store::ArtifactStore> =
+            Arc::new(crate::artifact_store::LocalArtifactStore::new(dir.path().to_path_buf()));
 
         let manifest = r#"{"nodes":{}}"#;
         let path = store_manifest_json(Some(&store), "inv-1", manifest.to_string())

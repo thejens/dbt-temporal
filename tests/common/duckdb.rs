@@ -255,6 +255,17 @@ impl Harness {
             .expect("project registered")
     }
 
+    /// The project's state as the shared handle, for work that must be handed to
+    /// another thread.
+    pub fn state_arc(&self) -> Arc<dbt_temporal::worker_state::WorkerState> {
+        Arc::clone(
+            self.activities
+                .registry
+                .get(Some(PROJECT))
+                .expect("project registered"),
+        )
+    }
+
     /// The `(schema, alias)` the project's parse gave a node.
     pub fn node_relation(&self, unique_id: &str) -> (String, String) {
         let node = self

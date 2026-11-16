@@ -69,3 +69,15 @@ pub const ON_RUN_END_FAILS_RUN_PATCH: &str = "failed-on-run-end-fails-the-run";
 /// activity would be scheduled, so a run that stored its artifacts in the
 /// ordinary course, or never ran a node, records nothing.
 pub const ENDED_RUN_ARTIFACTS_PATCH: &str = "store-artifacts-of-runs-that-end-early";
+
+/// Patch id for ending a run as cancelled when the cancellation reaches a
+/// lifecycle hook.
+///
+/// A hook is a child workflow, and a cancellation that arrives while one runs
+/// used to surface as that hook's error: `on_error: fail` failed the run and
+/// fired its failure hooks, `warn` and `ignore` carried on to the next command.
+/// Ending as cancelled issues different commands from there, so a history
+/// recorded before the marker keeps the old ending. The marker is consulted
+/// only when a hook errored while the workflow's cancellation was already
+/// requested, so a run whose hooks passed records nothing.
+pub const HOOK_CANCELS_RUN_PATCH: &str = "cancelled-lifecycle-hook-cancels-the-run";

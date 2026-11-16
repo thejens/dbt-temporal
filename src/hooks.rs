@@ -15,7 +15,7 @@ use crate::types::{
     HooksConfig, ResolveConfigInput, ResolvedProjectConfig, RetryConfig, TimeoutConfig,
 };
 
-use crate::workflow::DbtRunWorkflow;
+use crate::workflow::{DbtRunWorkflow, hook_failure_is_cancellation};
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 300;
 
@@ -86,6 +86,18 @@ fn merge_resolved_config(
         retry: default_retry.clone(),
         timeouts: default_timeouts.clone(),
     }
+}
+
+/// Why a batch of lifecycle hooks did not complete.
+#[derive(Debug, thiserror::Error)]
+pub enum HooksError {
+    /// The run was cancelled while a hook was running or starting. Not a
+    /// failure of the hook: the caller ends the run as cancelled.
+    #[error("the run was cancelled while its hooks ran")]
+    Cancelled,
+    /// A hook with `on_error: fail` failed, or its input could not be built.
+    #[error(transparent)]
+    Failed(anyhow::Error),
 }
 
 /// What a successfully-completed pre_run hook tells the runner to do next.
@@ -223,7 +235,9 @@ fn record_hook_error(
 /// Execute a list of hooks sequentially as child workflows.
 ///
 /// Returns a `HookExecutionOutcome` with collected non-fatal errors and skip state.
-/// Returns `Err` if any hook with `on_error: fail` fails.
+/// Returns `Err(Failed)` if any hook with `on_error: fail` fails, and
+/// `Err(Cancelled)` when the run's cancellation reaches a hook, whatever that
+/// hook's `on_error` says.
 ///
 /// For pre_run hooks, a child workflow can signal "skip this run" by returning:
 /// - JSON `false`
@@ -235,7 +249,7 @@ pub async fn execute_hooks(
     ctx: &temporalio_sdk::WorkflowContext<DbtRunWorkflow>,
     hooks: &[HookConfig],
     payload: &HookPayload,
-) -> Result<HookExecutionOutcome, anyhow::Error> {
+) -> Result<HookExecutionOutcome, HooksError> {
     let mut outcome = HookExecutionOutcome::default();
     let parent_workflow_id = ctx.workflow_id();
 
@@ -250,7 +264,7 @@ pub async fn execute_hooks(
             "starting hook child workflow"
         );
 
-        let input_payload = build_hook_input_payload(hook, payload)?;
+        let input_payload = build_hook_input_payload(hook, payload).map_err(HooksError::Failed)?;
 
         let opts = build_hook_options(hook, workflow_id, payload.event, i);
         let wf = UntypedWorkflow::new(&hook.workflow_type);
@@ -267,6 +281,9 @@ pub async fn execute_hooks(
                     );
                 }
                 Err(e) => {
+                    if hook_failure_is_cancellation(ctx) {
+                        return Err(HooksError::Cancelled);
+                    }
                     let error_msg =
                         format!("fire-and-forget child workflow failed to start: {e:#}");
                     if matches!(hook.on_error, HookErrorMode::Warn) {
@@ -277,7 +294,8 @@ pub async fn execute_hooks(
                             "fire-and-forget hook failed to start (continuing)"
                         );
                     }
-                    record_hook_error(hook, payload, error_msg, &mut outcome)?;
+                    record_hook_error(hook, payload, error_msg, &mut outcome)
+                        .map_err(HooksError::Failed)?;
                 }
             }
             continue;
@@ -308,6 +326,9 @@ pub async fn execute_hooks(
                 }
             }
             Err(e) => {
+                if hook_failure_is_cancellation(ctx) {
+                    return Err(HooksError::Cancelled);
+                }
                 let error_msg = format!("{e:#}");
                 if matches!(hook.on_error, HookErrorMode::Warn) {
                     warn!(
@@ -317,7 +338,8 @@ pub async fn execute_hooks(
                         "hook failed (continuing)"
                     );
                 }
-                record_hook_error(hook, payload, error_msg, &mut outcome)?;
+                record_hook_error(hook, payload, error_msg, &mut outcome)
+                    .map_err(HooksError::Failed)?;
             }
         }
     }

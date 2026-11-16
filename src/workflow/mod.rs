@@ -28,6 +28,7 @@ use temporalio_sdk::{SyncWorkflowContext, WorkflowContext, WorkflowContextView, 
 use self::continuation::inherited_fail_fast_override;
 use self::drive::drive_run;
 use self::finish::{RunProgress, finish_run};
+pub(crate) use self::helpers::hook_failure_is_cancellation;
 use crate::types::{DbtRunInput, DbtRunOutput, RunPhase, RunStatusSnapshot};
 
 /// The main dbt-temporal workflow: plan → execute levels → collect → store artifacts.

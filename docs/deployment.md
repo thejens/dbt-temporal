@@ -317,7 +317,10 @@ with the reason for it:
 | `transitive-upstream-skip` | A skip carries through a skipped `on_error: continue` model (level loop only) |
 | `finalize-runs-that-fail-outside-the-node-loop` | Failure hooks, terminal status and cancellation for a failure outside the node loop |
 | `store-artifacts-of-runs-that-end-early` | Artifacts of a run that is cancelled or fails after its nodes ran |
-| `failed-on-run-end-fails-the-run` | A failing `on-run-end` hook fails the run | A change that is not guarded
+| `failed-on-run-end-fails-the-run` | A failing `on-run-end` hook fails the run |
+| `cancelled-lifecycle-hook-cancels-the-run` | A cancellation that reaches a lifecycle hook ends the run as cancelled, not as a failed hook |
+
+A change that is not guarded
 this way — reordering activities, adding or removing a phase — makes an
 in-flight run fail on replay with a non-determinism error once it lands on a
 worker running the new binary. The markers only protect upgrades: a run started

@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use temporalio_sdk::error::ApplicationFailure;
 use temporalio_sdk::{WorkflowContext, WorkflowTermination};
 
-use crate::hooks::execute_hooks;
+use crate::hooks::{HooksError, execute_hooks};
 use crate::types::{
     DbtRunInput, DbtRunOutput, ExecutionPlan, HookError, HookEvent, HookPayload, HooksConfig,
 };
@@ -146,7 +146,7 @@ pub async fn run_pre_run_hooks(
     }
 
     let payload = build_pre_run_payload(plan, input);
-    match execute_hooks(ctx, &hooks.pre_run, &payload).await {
+    match split_cancellation(execute_hooks(ctx, &hooks.pre_run, &payload).await)? {
         Ok(outcome) => {
             let elapsed = elapsed_secs(start, ctx.workflow_time());
             Ok(apply_pre_run_outcome(plan, outcome, effective_env, hook_errors, elapsed))
@@ -157,9 +157,23 @@ pub async fn run_pre_run_hooks(
     }
 }
 
+/// Separate a cancellation of the run from a failure of its hooks: the first
+/// ends the workflow as cancelled whatever the hook's `on_error` says, the
+/// second is the hooks' own verdict for the caller to apply.
+fn split_cancellation<T>(
+    result: Result<T, HooksError>,
+) -> Result<Result<T, anyhow::Error>, WorkflowTermination> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(HooksError::Failed(e)) => Ok(Err(e)),
+        Err(HooksError::Cancelled) => Err(WorkflowTermination::cancelled()),
+    }
+}
+
 /// Runs the on_success or on_failure hooks. Returns the post-hook `success`
 /// flag — caller is responsible for writing it back into `output.success`
-/// before deciding `Ok` vs `Err`.
+/// before deciding `Ok` vs `Err`. A cancellation that reaches a hook is an
+/// `Err` instead: the run ends as cancelled, not as a failed hook.
 pub async fn run_post_hooks(
     ctx: &WorkflowContext<DbtRunWorkflow>,
     input: &DbtRunInput,
@@ -168,19 +182,19 @@ pub async fn run_post_hooks(
     output_snapshot: &DbtRunOutput,
     success_in: bool,
     hook_errors: &mut Vec<HookError>,
-) -> bool {
+) -> Result<bool, WorkflowTermination> {
     let (post_hooks, event) = select_post_run_hooks(success_in, hooks);
 
     if post_hooks.is_empty() {
-        return success_in;
+        return Ok(success_in);
     }
 
     let payload = build_post_hook_payload(event, plan, input, output_snapshot);
-    let result = execute_hooks(ctx, post_hooks, &payload).await;
+    let result = split_cancellation(execute_hooks(ctx, post_hooks, &payload).await)?;
     if let Err(ref e) = result {
         tracing::error!(event = %event, error = %e, "post-hook failed, marking workflow as failed");
     }
-    apply_post_run_outcome(result, hook_errors, success_in)
+    Ok(apply_post_run_outcome(result, hook_errors, success_in))
 }
 
 #[cfg(test)]
@@ -306,6 +320,28 @@ mod tests {
         let (sel_fail, _) = select_post_run_hooks(false, &hooks);
         assert!(sel_succ.is_empty());
         assert!(sel_fail.is_empty());
+    }
+
+    // --- split_cancellation ---
+
+    #[test]
+    fn a_cancelled_hook_ends_the_workflow_as_cancelled() {
+        let ended = split_cancellation::<()>(Err(HooksError::Cancelled));
+        assert!(matches!(ended, Err(WorkflowTermination::Cancelled { .. })));
+    }
+
+    #[test]
+    fn a_failed_hook_stays_the_hooks_own_verdict() {
+        let split = split_cancellation::<()>(Err(HooksError::Failed(anyhow::anyhow!("boom"))));
+        let Ok(Err(e)) = split else {
+            panic!("a hook failure must reach the caller as a failure");
+        };
+        assert_eq!(e.to_string(), "boom");
+    }
+
+    #[test]
+    fn a_completed_batch_passes_through() {
+        assert!(matches!(split_cancellation(Ok(7)), Ok(Ok(7))));
     }
 
     // --- apply_post_run_outcome ---

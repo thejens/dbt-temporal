@@ -374,10 +374,12 @@ execute on another. A node that does not exist on the executing worker fails wit
 body, without any error.
 
 Today's mitigation is operational. Pin the git ref to a commit or tag
-(`#${GIT_COMMIT}` as below, not a branch), and run one deployment version per
-project revision: either keep old and new workers off the same task queue
-during a rollout, or set `TEMPORAL_DEPLOYMENT_NAME` so a run stays on the
-version that started it.
+(`#${GIT_COMMIT}` as below, not a branch), so every replica of a rollout loads
+the same revision, and keep workers holding different revisions off the same
+task queue: drain the old workers before the new ones start, or give the new
+revision its own task queue. `TEMPORAL_DEPLOYMENT_NAME` does not separate
+revisions by itself, because the worker's build id is the dbt-temporal version
+and says nothing about the project it loaded.
 
 **Model file changes** — two strategies:
 
